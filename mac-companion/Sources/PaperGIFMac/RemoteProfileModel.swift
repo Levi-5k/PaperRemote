@@ -1,0 +1,344 @@
+import Foundation
+
+enum RemoteControlKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case button
+    case slider
+    case textBox
+
+    var id: Self { self }
+}
+
+enum RemoteTextSource: String, Codable, CaseIterable, Identifiable, Sendable {
+    case staticText
+    case dateTime
+    case macScript
+    case macShortcut
+    case controlValue
+    case nowPlaying
+
+    var id: Self { self }
+}
+
+enum RemoteTextSize: String, Codable, CaseIterable, Identifiable, Sendable {
+    case small
+    case medium
+    case large
+    case extraLarge
+    case autoFit
+
+    var id: Self { self }
+}
+
+enum RemoteTextHorizontalAlignment: String, Codable, CaseIterable, Identifiable, Sendable {
+    case leading
+    case center
+    case trailing
+
+    var id: Self { self }
+}
+
+enum RemoteTextVerticalAlignment: String, Codable, CaseIterable, Identifiable, Sendable {
+    case top
+    case center
+    case bottom
+
+    var id: Self { self }
+}
+
+enum RemoteTextTapBehavior: String, Codable, CaseIterable, Identifiable, Sendable {
+    case displayOnly
+    case refresh
+    case action
+
+    var id: Self { self }
+}
+
+enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
+    case macMedia
+    case macKey
+    case macOpen
+    case macShortcut
+    case macScript
+    case wledPower
+    case wledPreset
+    case wledBrightness
+    case page
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .macMedia: "Media"
+        case .macKey: "Keyboard shortcut"
+        case .macOpen: "Open app or URL"
+        case .macShortcut: "Apple Shortcut"
+        case .macScript: "Approved script"
+        case .wledPower: "WLED power"
+        case .wledPreset: "WLED preset"
+        case .wledBrightness: "WLED brightness"
+        case .page: "Open page"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .macMedia: "playpause.fill"
+        case .macKey: "keyboard"
+        case .macOpen: "arrow.up.forward.app"
+        case .macShortcut: "command"
+        case .macScript: "terminal"
+        case .wledPower: "power"
+        case .wledPreset: "sparkles"
+        case .wledBrightness: "sun.max.fill"
+        case .page: "rectangle.on.rectangle"
+        }
+    }
+}
+
+struct RemoteAction: Codable, Equatable, Sendable {
+    var type: RemoteActionType
+    var host = ""
+    var text = ""
+    var value = 0
+    var modifiers: [String] = []
+    var computerID: String?
+}
+
+struct RemoteComputer: Codable, Equatable, Identifiable, Sendable {
+    var id = UUID()
+    var name: String
+    var host: String
+    var port = 43_821
+    var token: String
+}
+
+struct RemoteTextBox: Codable, Equatable, Sendable {
+    var source: RemoteTextSource = .staticText
+    var sourceText = "Text"
+    var referencedControlID: UUID?
+    var computerID: UUID?
+    var dateFormat = "%b %e, %H:%M"
+    var placeholder = "Unavailable"
+    var gridWidth = 2
+    var gridHeight = 1
+    var textSize: RemoteTextSize = .autoFit
+    var horizontalAlignment: RemoteTextHorizontalAlignment = .leading
+    var verticalAlignment: RemoteTextVerticalAlignment = .top
+    var tapBehavior: RemoteTextTapBehavior = .displayOnly
+    var tapAction: RemoteAction?
+    var refreshIntervalSeconds: Int?
+}
+
+extension RemoteTextBox {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        source = try container.decodeIfPresent(RemoteTextSource.self, forKey: .source) ?? .staticText
+        sourceText = try container.decodeIfPresent(String.self, forKey: .sourceText) ?? "Text"
+        referencedControlID = try container.decodeIfPresent(UUID.self, forKey: .referencedControlID)
+        computerID = try container.decodeIfPresent(UUID.self, forKey: .computerID)
+        dateFormat = try container.decodeIfPresent(String.self, forKey: .dateFormat) ?? "%b %e, %H:%M"
+        placeholder = try container.decodeIfPresent(String.self, forKey: .placeholder) ?? "Unavailable"
+        gridWidth = try container.decodeIfPresent(Int.self, forKey: .gridWidth) ?? 2
+        gridHeight = try container.decodeIfPresent(Int.self, forKey: .gridHeight) ?? 1
+        textSize = try container.decodeIfPresent(RemoteTextSize.self, forKey: .textSize) ?? .autoFit
+        horizontalAlignment = try container.decodeIfPresent(
+            RemoteTextHorizontalAlignment.self,
+            forKey: .horizontalAlignment
+        ) ?? .leading
+        verticalAlignment = try container.decodeIfPresent(
+            RemoteTextVerticalAlignment.self,
+            forKey: .verticalAlignment
+        ) ?? .top
+        tapBehavior = try container.decodeIfPresent(RemoteTextTapBehavior.self, forKey: .tapBehavior) ?? .displayOnly
+        tapAction = try container.decodeIfPresent(RemoteAction.self, forKey: .tapAction)
+        refreshIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .refreshIntervalSeconds)
+    }
+}
+
+struct RemoteControl: Codable, Equatable, Identifiable, Sendable {
+    var id = UUID()
+    var title: String
+    var symbol: String
+    var iconBitmap: String? = nil
+    var tintHex = "202020"
+    var kind: RemoteControlKind
+    var isToggle: Bool? = nil
+    var buttonHeight: Int? = nil
+    var action: RemoteAction
+    var layoutSlot: Int?
+    var textBox: RemoteTextBox? = nil
+
+    var gridSpan: RemoteGridSpan {
+        switch kind {
+        case .button: RemoteGridSpan(width: 1, height: buttonGridHeight)
+        case .slider: RemoteGridSpan(width: 1, height: 1)
+        case .textBox:
+            RemoteGridSpan(
+                width: min(max(textBox?.gridWidth ?? 2, 1), 2),
+                height: min(max(textBox?.gridHeight ?? 1, 1), 8)
+            )
+        }
+    }
+
+    var buttonGridHeight: Int {
+        min(max(buttonHeight ?? 2, 1), 2)
+    }
+}
+
+struct RemoteGridSpan: Equatable, Sendable {
+    let width: Int
+    let height: Int
+}
+
+struct RemoteGridPlacement: Equatable, Sendable {
+    let slot: Int
+    let span: RemoteGridSpan
+}
+
+enum RemoteGrid {
+    static let columns = 2
+    static let rows = 8
+
+    static func placement(for control: RemoteControl, at requestedSlot: Int) -> RemoteGridPlacement? {
+        guard (0..<(columns * rows)).contains(requestedSlot) else { return nil }
+        let span = control.gridSpan
+        let row = requestedSlot / columns
+        var column = requestedSlot % columns
+        if span.width == columns { column = 0 }
+        guard column + span.width <= columns, row + span.height <= rows else { return nil }
+        return RemoteGridPlacement(slot: row * columns + column, span: span)
+    }
+
+    static func cells(for placement: RemoteGridPlacement) -> Set<Int> {
+        let row = placement.slot / columns
+        let column = placement.slot % columns
+        return Set((0..<placement.span.height).flatMap { rowOffset in
+            (0..<placement.span.width).map { columnOffset in
+                (row + rowOffset) * columns + column + columnOffset
+            }
+        })
+    }
+}
+
+struct RemotePage: Codable, Equatable, Identifiable, Sendable {
+    var id = UUID()
+    var name: String
+    var controls: [RemoteControl]
+}
+
+struct RemoteProfile: Codable, Equatable, Sendable {
+    static let currentVersion = 2
+
+    var version = currentVersion
+    var wifiSSID = ""
+    var wifiPassword = ""
+    var macHost = ""
+    var macPort = 43_821
+    var macToken = ""
+    var computers: [RemoteComputer] = []
+    var screensaverDelaySeconds = 30
+    var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
+    var pages: [RemotePage]
+
+    init(pages: [RemotePage]) {
+        self.pages = pages
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedVersion = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        guard (1...Self.currentVersion).contains(decodedVersion) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .version,
+                in: container,
+                debugDescription: "Unsupported remote profile version \(decodedVersion)."
+            )
+        }
+        version = Self.currentVersion
+        wifiSSID = try container.decodeIfPresent(String.self, forKey: .wifiSSID) ?? ""
+        wifiPassword = try container.decodeIfPresent(String.self, forKey: .wifiPassword) ?? ""
+        macHost = try container.decodeIfPresent(String.self, forKey: .macHost) ?? ""
+        macPort = try container.decodeIfPresent(Int.self, forKey: .macPort) ?? 43_821
+        macToken = try container.decodeIfPresent(String.self, forKey: .macToken) ?? ""
+        computers = try container.decodeIfPresent([RemoteComputer].self, forKey: .computers) ?? []
+        screensaverDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .screensaverDelaySeconds) ?? 30
+        timeZoneOffsetMinutes = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutes)
+            ?? TimeZone.current.secondsFromGMT() / 60
+        pages = try container.decode([RemotePage].self, forKey: .pages)
+    }
+
+    static let starter = RemoteProfile(pages: [
+        RemotePage(name: "Main", controls: [
+            RemoteControl(title: "Previous", symbol: "backward.fill", kind: .button, action: .init(type: .macMedia, text: "previous")),
+            RemoteControl(title: "Play / Pause", symbol: "playpause.fill", kind: .button, action: .init(type: .macMedia, text: "playPause")),
+            RemoteControl(title: "Next", symbol: "forward.fill", kind: .button, action: .init(type: .macMedia, text: "next")),
+            RemoteControl(title: "Lights", symbol: "lightbulb.fill", kind: .button, action: .init(type: .wledPower, text: "toggle")),
+        ]),
+    ])
+
+    var devicePayload: Data {
+        get throws {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            let encoded = try encoder.encode(self)
+            guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+                return encoded
+            }
+            let components = Calendar.current.dateComponents(in: .current, from: Date())
+            object["deviceClock"] = [
+                "year": components.year ?? 0,
+                "month": components.month ?? 0,
+                "day": components.day ?? 0,
+                "weekday": max((components.weekday ?? 1) - 1, 0),
+                "hour": components.hour ?? 0,
+                "minute": components.minute ?? 0,
+                "second": components.second ?? 0,
+            ]
+            return try JSONSerialization.data(
+                withJSONObject: object,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            )
+        }
+    }
+}
+
+struct RemoteIcon: Identifiable, Sendable {
+    let id: String
+    let title: String
+
+    static let all: [Self] = [
+        .init(id: "circle.fill", title: "Circle"),
+        .init(id: "play.fill", title: "Play"),
+        .init(id: "pause.fill", title: "Pause"),
+        .init(id: "playpause.fill", title: "Play / Pause"),
+        .init(id: "stop.fill", title: "Stop"),
+        .init(id: "backward.fill", title: "Previous"),
+        .init(id: "forward.fill", title: "Next"),
+        .init(id: "speaker.fill", title: "Volume"),
+        .init(id: "speaker.wave.2.fill", title: "Volume Up"),
+        .init(id: "speaker.slash.fill", title: "Mute"),
+        .init(id: "power", title: "Power"),
+        .init(id: "lightbulb.fill", title: "Light"),
+        .init(id: "sun.max.fill", title: "Brightness"),
+        .init(id: "moon.fill", title: "Moon"),
+        .init(id: "sparkles", title: "Effect"),
+        .init(id: "house.fill", title: "Home"),
+        .init(id: "gearshape.fill", title: "Settings"),
+        .init(id: "arrow.up", title: "Up"),
+        .init(id: "arrow.down", title: "Down"),
+        .init(id: "arrow.left", title: "Left"),
+        .init(id: "arrow.right", title: "Right"),
+        .init(id: "plus", title: "Plus"),
+        .init(id: "minus", title: "Minus"),
+        .init(id: "checkmark", title: "Confirm"),
+        .init(id: "xmark", title: "Close"),
+        .init(id: "star.fill", title: "Favorite"),
+        .init(id: "heart.fill", title: "Heart"),
+        .init(id: "bolt.fill", title: "Energy"),
+        .init(id: "lock.fill", title: "Lock"),
+        .init(id: "wifi", title: "Wi-Fi"),
+        .init(id: "slider.horizontal.3", title: "Sliders"),
+        .init(id: "music.note", title: "Music"),
+        .init(id: "display", title: "Display"),
+    ]
+}

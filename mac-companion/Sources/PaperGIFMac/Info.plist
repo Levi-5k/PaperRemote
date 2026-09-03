@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>paperGIF Mac</string>
+    <key>CFBundleExecutable</key>
+    <string>PaperGIFMac</string>
+    <key>CFBundleIdentifier</key>
+    <string>human-programs.paperGIFMac</string>
+    <key>CFBundleName</key>
+    <string>paperGIF Mac</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>paperGIF Mac reads the current track from Music to show it on your paperGIF display.</string>
+</dict>
+</plist>

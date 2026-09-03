@@ -1,0 +1,26 @@
+.DS_Store
+.venv/
+.env
+.env.*
+!.env.example
+
+# Xcode
+build-device/
+DerivedData/
+*.xcresult
+*.xcuserstate
+xcuserdata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# PlatformIO
+.pio/
+.pio-venv/
+
+# Local output and credentials
+*.log
+*.pem
+*.p12
+*.mobileprovision
