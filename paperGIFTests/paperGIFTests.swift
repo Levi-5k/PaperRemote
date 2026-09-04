@@ -411,7 +411,8 @@ struct paperGIFTests {
     @Test @MainActor func prefersHomeWiFiWhenEndpointIsAvailable() {
         let transport = PaperGIFBluetoothManager.preferredTransferTransport(
             homeWiFiState: .connected,
-            hasHomeWiFiEndpoint: true
+            hasHomeWiFiEndpoint: true,
+            isDeviceWiFiConnected: false
         )
 
         #expect(transport == .wifi)
@@ -420,10 +421,21 @@ struct paperGIFTests {
     @Test @MainActor func prefersBluetoothWhenHomeWiFiEndpointIsUnavailable() {
         let transport = PaperGIFBluetoothManager.preferredTransferTransport(
             homeWiFiState: .connected,
-            hasHomeWiFiEndpoint: false
+            hasHomeWiFiEndpoint: false,
+            isDeviceWiFiConnected: false
         )
 
         #expect(transport == .bluetooth)
+    }
+
+    @Test @MainActor func prefersDeviceWiFiWhenAccessPointIsConnected() {
+        let transport = PaperGIFBluetoothManager.preferredTransferTransport(
+            homeWiFiState: .notConfigured,
+            hasHomeWiFiEndpoint: false,
+            isDeviceWiFiConnected: true
+        )
+
+        #expect(transport == .wifi)
     }
 
     @Test @MainActor func treatsValidPaperGIFStatusResponseAsReachableEvenWhenNotReady() {

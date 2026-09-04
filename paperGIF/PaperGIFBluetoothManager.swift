@@ -100,9 +100,11 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     static func preferredTransferTransport(
         homeWiFiState: HomeWiFiState,
-        hasHomeWiFiEndpoint: Bool
+        hasHomeWiFiEndpoint: Bool,
+        isDeviceWiFiConnected: Bool
     ) -> TransferTransport {
-        homeWiFiState == .connected && hasHomeWiFiEndpoint ? .wifi : .bluetooth
+        homeWiFiState == .connected && hasHomeWiFiEndpoint || isDeviceWiFiConnected
+            ? .wifi : .bluetooth
     }
 
     static func isDeviceWiFiReachable(device: String, ready: Bool) -> Bool {
@@ -457,7 +459,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         guard canSend else { return }
         let transport = Self.preferredTransferTransport(
             homeWiFiState: homeWiFiState,
-            hasHomeWiFiEndpoint: homeWiFiDeviceURL != nil && homeWiFiAuthorization != nil
+            hasHomeWiFiEndpoint: homeWiFiDeviceURL != nil && homeWiFiAuthorization != nil,
+            isDeviceWiFiConnected: wifiConnectionState == .connected
         )
 
         deviceLibraryTimeout?.cancel()
@@ -473,16 +476,24 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             case .bluetooth:
                 self.beginBluetoothUpload(data, name: name)
             case .wifi:
-                guard let deviceURL = self.homeWiFiDeviceURL,
-                      let authorization = self.homeWiFiAuthorization else {
-                    self.beginBluetoothUpload(data, name: name)
-                    return
-                }
-                if await self.probeWiFiConnection(
+                let usesHomeWiFi = self.homeWiFiState == .connected &&
+                    self.homeWiFiDeviceURL != nil && self.homeWiFiAuthorization != nil
+                let deviceURL = usesHomeWiFi ? self.homeWiFiDeviceURL! : Self.wifiDeviceURL
+                let authorization = usesHomeWiFi ? self.homeWiFiAuthorization : nil
+                let isReachable = await self.probeWiFiConnection(
                     at: deviceURL,
                     authorization: authorization,
-                    updatesAccessPointState: false
-                ), await self.suspendBluetoothForWiFiTransfer() {
+                    updatesAccessPointState: !usesHomeWiFi
+                )
+                let isReady: Bool
+                if !isReachable {
+                    isReady = false
+                } else if usesHomeWiFi {
+                    isReady = await self.suspendBluetoothForWiFiTransfer()
+                } else {
+                    isReady = true
+                }
+                if isReachable && isReady {
                     await self.sendOverWiFi(
                         data,
                         name: name,
@@ -735,7 +746,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         _ data: Data,
         name: String,
         deviceURL: URL,
-        authorization: String
+        authorization: String?
     ) async {
         transferStatus = "Sending over Wi-Fi"
         transferProgress = 0.05
@@ -770,7 +781,9 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
                 request.setValue(String(offset), forHTTPHeaderField: "X-PGIF-Offset")
                 request.setValue(String(upperBound - offset), forHTTPHeaderField: "X-PGIF-Chunk-Size")
                 request.setValue(isFinal ? "1" : "0", forHTTPHeaderField: "X-PGIF-Final")
-                request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
+                if let authorization {
+                    request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
+                }
 
                 let configuration = URLSessionConfiguration.ephemeral
                 configuration.allowsCellularAccess = false
