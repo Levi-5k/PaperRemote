@@ -4,14 +4,20 @@
 #include <ESPmDNS.h>
 #include <M5Unified.h>
 #include <NimBLEDevice.h>
+#include <new>
 #include <SD.h>
 #include <SPI.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <Wire.h>
+#include <driver/gpio.h>
 #include <esp_heap_caps.h>
 #include <nvs.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include "geometric_snake.h"
+#include "monochrome_damage.h"
+#include "screensaver_battery.h"
 
 namespace {
 
@@ -68,6 +74,7 @@ constexpr uint32_t kLegacyFrameBytes = kDisplayWidth * kDisplayHeight / 8;
 constexpr uint32_t kHeaderBytes = 22;
 constexpr uint32_t kUploadWindowBytes = 16 * 1024;
 constexpr size_t kWifiWriteBufferBytes = 32 * 1024;
+constexpr uint32_t kIdleLoopDelayMs = 10;
 constexpr uint8_t kHomeWifiAuthenticationAttemptLimit = 3;
 constexpr uint32_t kHomeWifiAuthenticationRetryDelayMs = 1500;
 constexpr uint32_t kSlideshowIntervalsSeconds[] = {
@@ -77,6 +84,8 @@ constexpr size_t kSlideshowIntervalCount =
     sizeof(kSlideshowIntervalsSeconds) / sizeof(kSlideshowIntervalsSeconds[0]);
 constexpr uint8_t kDefaultSlideshowIntervalIndex = 2;
 constexpr uint8_t kUseProfileScreensaverDelay = 0xFF;
+enum class ScreensaverStyle : uint8_t { media = 0, geometricSnake = 1 };
+constexpr uint32_t kSnakeCleanRefreshInterval = 240;
 constexpr lgfx::bgr888_t kGrayscalePalette[] = {
     {0, 0, 0},
     {17, 17, 17},
@@ -115,11 +124,19 @@ constexpr uint32_t kToggleStatesMagic = 0x54474C45;
 constexpr int32_t kLibraryRowTop = 166;
 constexpr int32_t kLibraryRowHeight = 88;
 constexpr uint32_t kRenderMarker = 0x50474946;
+constexpr size_t kPendingRemoteActionCapacity = 8;
+constexpr uint32_t kClimateSampleIntervalMs = 60000;
+constexpr uint64_t kClimateWakeIntervalUs = 5ULL * 60ULL * 1000000ULL;
+constexpr uint32_t kClimateAutomationMagic = 0x434C4933;
+constexpr size_t kMaximumClimateAutomations = 8;
+constexpr uint32_t kScheduleRunStoreMagic = 0x53434831;
+constexpr uint16_t kScheduleCatchUpMinutes = 15;
 
 constexpr int kSdSclk = 14;
 constexpr int kSdMiso = 13;
 constexpr int kSdMosi = 12;
 constexpr int kSdCs = 4;
+constexpr gpio_num_t kMainPowerPin = GPIO_NUM_2;
 constexpr int kPreviousButtonPin = 37;
 constexpr int kMenuButtonPin = 38;
 constexpr int kNextButtonPin = 39;
@@ -165,9 +182,16 @@ struct RemoteAction {
     char host[64] = {};
     char text[192] = {};
     int value = 0;
+    int16_t valueTenths = 0;
     char modifiers[4][12] = {};
     uint8_t modifierCount = 0;
     char computerId[40] = {};
+    uint8_t deadbandTenths = 10;
+    uint8_t humidityThreshold = 65;
+    uint8_t minimumCycleMinutes = 10;
+    bool scheduleEnabled = false;
+    uint8_t scheduleHour = 0;
+    uint8_t scheduleMinute = 0;
 };
 
 struct RemoteComputer {
@@ -209,6 +233,15 @@ struct RemoteControl {
     RemoteAction action;
 };
 
+struct PendingRemoteAction {
+    RemoteAction action;
+    char controlId[40] = {};
+    uint8_t pageIndex = 0;
+    bool slider = false;
+    bool toggle = false;
+    bool toggleOn = false;
+};
+
 struct RemotePage {
     char id[40] = {};
     char name[32] = {};
@@ -225,6 +258,7 @@ struct RemoteProfile {
     RemoteComputer computers[kMaximumRemoteComputers];
     uint8_t computerCount = 0;
     uint32_t screensaverDelayMs = 30000;
+    bool useFahrenheit = false;
     int16_t timeZoneOffsetMinutes = 0;
     m5::rtc_datetime_t deviceClock;
     bool hasDeviceClock = false;
@@ -235,12 +269,12 @@ struct RemoteProfile {
 
 struct PersistedSliderPosition {
     char controlId[40] = {};
-    uint8_t value = 0;
+    uint16_t valueTenths = 0;
 };
 
 struct SliderPositionStore {
     uint32_t magic = kSliderPositionsMagic;
-    uint8_t version = 1;
+    uint8_t version = 2;
     uint8_t count = 0;
     uint16_t reserved = 0;
     PersistedSliderPosition positions[kMaximumPersistedSliders];
@@ -253,6 +287,34 @@ struct ToggleStateStore {
     uint16_t reserved = 0;
     uint64_t controlIdHashes[kMaximumPersistedSliders] = {};
     uint8_t states[kMaximumPersistedSliders] = {};
+};
+
+struct ClimateAutomationState {
+    uint64_t controlIdHash;
+    uint32_t lastChangeMinute;
+    uint32_t lastSampleMinute;
+    float filteredTemperatureC;
+    float integralError;
+    float previousError;
+    uint8_t outputKnown;
+    uint8_t outputOn;
+    uint8_t fanSpeed;
+    uint8_t controllerInitialized;
+};
+
+struct ClimateAutomationStore {
+    uint32_t magic;
+    ClimateAutomationState states[kMaximumClimateAutomations];
+};
+
+struct ScheduleRunState {
+    uint64_t controlIdHash;
+    uint32_t dayKey;
+};
+
+struct ScheduleRunStore {
+    uint32_t magic;
+    ScheduleRunState states[kMaximumPersistedSliders];
 };
 
 struct LibraryItem {
@@ -270,6 +332,14 @@ RemoteProfile* pendingRemoteProfile = nullptr;
 SliderPositionStore sliderPositionStore;
 bool sliderPositionStoreLoaded = false;
 ToggleStateStore toggleStateStore;
+PendingRemoteAction pendingRemoteActions[kPendingRemoteActionCapacity];
+size_t pendingRemoteActionCount = 0;
+PendingRemoteAction deferredThermostatSetpoint;
+bool deferredThermostatSetpointPending = false;
+uint32_t deferredThermostatSetpointDueAt = 0;
+PendingRemoteAction deferredFanSpeed;
+bool deferredFanSpeedPending = false;
+uint32_t deferredFanSpeedDueAt = 0;
 bool toggleStateStoreLoaded = false;
 File animationFile;
 AnimationHeader animationHeader;
@@ -294,6 +364,8 @@ LibraryItem libraryItems[kMaximumLibraryItems];
 size_t libraryItemCount = 0;
 size_t libraryPage = 0;
 size_t librarySelection = 0;
+volatile bool libraryRefreshRequested = false;
+volatile int16_t requestedLibrarySelection = -1;
 bool libraryVisible = false;
 bool settingsVisible = false;
 bool slideshowMenuVisible = false;
@@ -319,22 +391,47 @@ volatile bool wifiStopRequested = false;
 uint32_t wifiStopRequestedAt = 0;
 bool bluetoothActive = false;
 bool bluetoothStopping = false;
+NimBLEServer* bluetoothServer = nullptr;
+uint16_t bluetoothConnectionHandle = UINT16_MAX;
 volatile bool bluetoothSuspendRequested = false;
 volatile bool bluetoothResumeRequested = false;
 bool bluetoothSuspendedForWifiUpload = false;
 uint32_t bluetoothSuspendRequestedAt = 0;
 uint32_t bluetoothSuspendedAt = 0;
+uint32_t nextBluetoothAdvertisingCheckAt = 0;
 bool slideshowEnabled = false;
 bool slideshowDeepSleep = false;
 bool deepSleepSuspended = false;
 uint8_t slideshowIntervalIndex = kDefaultSlideshowIntervalIndex;
 uint8_t screensaverDelayIndex = kUseProfileScreensaverDelay;
+ScreensaverStyle screensaverStyle = ScreensaverStyle::media;
+bool imagesOnlyOnBattery = false;
+bool batteryImagesOnly = false;
+bool batteryPolicySampled = false;
+uint32_t batteryPolicySampledAt = 0;
+bool batteryStillPrepared = false;
+char batterySavedAnimationPath[kMaximumPathBytes] = {};
+size_t batteryStillIndex = 0;
+M5Canvas snakeCanvas(&M5.Display);
+geometric_snake::Scene* snakeScene = nullptr;
+uint32_t snakeFrames = 0;
+uint32_t nextSnakeFrameAt = 0;
+uint32_t snakeStatsStartedAt = 0;
+uint32_t snakeStatsFrames = 0;
+uint32_t snakeStatsRenderUs = 0;
+uint32_t snakeStatsTransferUs = 0;
+uint32_t snakeStatsPixels = 0;
 uint32_t nextSlideshowAt = 0;
 esp_sleep_wakeup_cause_t wakeupCause = ESP_SLEEP_WAKEUP_UNDEFINED;
 bool recoveredFromRenderCrash = false;
 bool remoteVisible = false;
 bool screensaverActive = false;
+bool slideshowSleepPending = false;
 volatile bool touchInterruptPending = false;
+bool suppressHeldWakeTouch = false;
+bool wakeTouchCaptured = false;
+int32_t wakeTouchX = 0;
+int32_t wakeTouchY = 0;
 int8_t activeRemoteControlIndex = -1;
 uint8_t activeRemoteTouchPage = 0;
 bool activeRemoteControlVisual = false;
@@ -366,6 +463,12 @@ uint8_t wifiWriteBuffer[kWifiWriteBufferBytes];
 size_t wifiWriteBufferLength = 0;
 uint32_t wifiUploadStartedAt = 0;
 RTC_DATA_ATTR volatile uint32_t renderInProgress = 0;
+RTC_DATA_ATTR ClimateAutomationStore climateAutomationStore;
+RTC_DATA_ATTR ScheduleRunStore scheduleRunStore;
+float climateTemperatureC = 0;
+float climateHumidityPercent = 0;
+bool climateReadingAvailable = false;
+uint32_t nextClimateSampleAt = 0;
 
 void displayUploadStart();
 void displayUploadProgress(uint8_t progress);
@@ -390,12 +493,25 @@ bool postJsonResponse(
     const char* token);
 void stopWifiMode();
 void startBluetooth();
+void ensureBluetoothAdvertising();
 void suspendBluetoothForWifiUpload();
 void resumeBluetoothAfterWifiUpload();
+void setBluetoothTransferPerformance(bool transferring);
 void displayRemote();
 void displayRemoteProfileChanges(const RemoteProfile& previousProfile, uint8_t previousPageIndex);
 void redrawRemoteTextBox(RemotePage& page, uint8_t controlIndex);
 void connectHomeWifi();
+bool dispatchRemoteAction(
+    RemoteControl& control,
+    bool queueIfOffline = true,
+    bool reportStatus = true);
+void resetClimateAutomationController(const RemoteControl& control);
+void dispatchCapturedWakeTouch();
+void enterM5PaperDeepSleep(uint64_t microseconds);
+void pollClimateAutomation();
+bool hasEnabledClimateAutomation();
+void pollScheduledRemoteActions();
+uint64_t backgroundWakeIntervalUs(uint64_t defaultIntervalUs);
 
 void loadSliderPositionStore() {
     if (sliderPositionStoreLoaded) {
@@ -411,7 +527,7 @@ void loadSliderPositionStore() {
     const esp_err_t result = nvs_get_blob(handle, kSliderPositionsKey, &stored, &length);
     nvs_close(handle);
     if (result == ESP_OK && length == sizeof(stored) &&
-        stored.magic == kSliderPositionsMagic && stored.version == 1 &&
+        stored.magic == kSliderPositionsMagic && stored.version == 2 &&
         stored.count <= kMaximumPersistedSliders) {
         sliderPositionStore = stored;
     }
@@ -423,17 +539,36 @@ void restoreRemoteSliderPositions(RemoteProfile& profile) {
         RemotePage& page = profile.pages[pageIndex];
         for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
             RemoteControl& control = page.controls[controlIndex];
-            if (!control.slider || control.id[0] == '\0') {
+            const bool persistsValue = control.slider ||
+                (control.kind == 2 && strcmp(control.action.type, "netHomeTemperature") == 0);
+            if (!persistsValue || control.id[0] == '\0') {
                 continue;
             }
             for (uint8_t index = 0; index < sliderPositionStore.count; ++index) {
                 if (strcmp(sliderPositionStore.positions[index].controlId, control.id) == 0) {
-                    control.action.value = sliderPositionStore.positions[index].value;
+                    control.action.valueTenths = sliderPositionStore.positions[index].valueTenths;
+                    control.action.value = static_cast<int>(roundf(control.action.valueTenths / 10.0f));
                     break;
                 }
             }
         }
     }
+}
+
+esp_err_t writeNvsBlob(nvs_handle_t handle, const char* key, const void* value, size_t length) {
+    esp_err_t result = nvs_set_blob(handle, key, value, length);
+    if (result == ESP_ERR_NVS_NOT_ENOUGH_SPACE) {
+        const esp_err_t eraseResult = nvs_erase_key(handle, key);
+        if (eraseResult != ESP_OK && eraseResult != ESP_ERR_NVS_NOT_FOUND) {
+            return eraseResult;
+        }
+        result = nvs_commit(handle);
+        if (result != ESP_OK) {
+            return result;
+        }
+        result = nvs_set_blob(handle, key, value, length);
+    }
+    return result == ESP_OK ? nvs_commit(handle) : result;
 }
 
 void persistRemoteSliderPositions(const RemoteProfile& profile) {
@@ -442,13 +577,20 @@ void persistRemoteSliderPositions(const RemoteProfile& profile) {
         const RemotePage& page = profile.pages[pageIndex];
         for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
             const RemoteControl& control = page.controls[controlIndex];
-            if (!control.slider || control.id[0] == '\0' ||
+            const bool persistsValue = control.slider ||
+                (control.kind == 2 && strcmp(control.action.type, "netHomeTemperature") == 0);
+            if (!persistsValue || control.id[0] == '\0' ||
                 updated.count >= kMaximumPersistedSliders) {
                 continue;
             }
             PersistedSliderPosition& position = updated.positions[updated.count++];
             strlcpy(position.controlId, control.id, sizeof(position.controlId));
-            position.value = constrain(control.action.value, 0, 255);
+            position.valueTenths = constrain(
+                strcmp(control.action.type, "netHomeTemperature") == 0
+                    ? control.action.valueTenths
+                    : control.action.value * 10,
+                0,
+                2550);
         }
     }
     loadSliderPositionStore();
@@ -460,14 +602,162 @@ void persistRemoteSliderPositions(const RemoteProfile& profile) {
         Serial.println("Slider position NVS open failed");
         return;
     }
-    const esp_err_t writeResult = nvs_set_blob(
+    const esp_err_t writeResult = writeNvsBlob(
         handle, kSliderPositionsKey, &updated, sizeof(updated));
-    const esp_err_t commitResult = writeResult == ESP_OK ? nvs_commit(handle) : writeResult;
     nvs_close(handle);
-    if (writeResult == ESP_OK && commitResult == ESP_OK) {
+    if (writeResult == ESP_OK) {
         sliderPositionStore = updated;
     } else {
-        Serial.printf("Slider position NVS write failed: %d\n", commitResult);
+        Serial.printf("Slider position NVS write failed: %d\n", writeResult);
+    }
+}
+
+__attribute__((noinline)) void migrateGeneratedThermostatPages(RemoteProfile& profile) {
+    for (uint8_t pageIndex = 0; pageIndex < profile.pageCount; ++pageIndex) {
+        RemotePage& page = profile.pages[pageIndex];
+        if (page.controlCount == 11) {
+            int8_t setpointIndex = -1;
+            int8_t fanSliderIndex = -1;
+            int8_t fanReadoutIndex = -1;
+            int8_t downIndex = -1;
+            int8_t upIndex = -1;
+            int8_t modeIndices[4] = {-1, -1, -1, -1};
+            for (uint8_t index = 0; index < page.controlCount; ++index) {
+                RemoteControl& control = page.controls[index];
+                const char* type = control.action.type;
+                if (strcmp(type, "netHomeTemperature") == 0) setpointIndex = index;
+                else if (strcmp(type, "netHomeTemperatureStep") == 0) {
+                    (control.action.value < 0 ? downIndex : upIndex) = index;
+                } else if (strcmp(type, "netHomeFan") == 0) {
+                    (control.slider ? fanSliderIndex : fanReadoutIndex) = index;
+                } else if (strcmp(type, "netHomeMode") == 0) {
+                    const char* mode = control.action.text;
+                    const int8_t modeIndex = strcmp(mode, "cool") == 0 ? 0
+                        : strcmp(mode, "heat") == 0 ? 1
+                        : strcmp(mode, "dry") == 0 ? 2
+                        : strcmp(mode, "fan") == 0 ? 3 : -1;
+                    if (modeIndex >= 0) modeIndices[modeIndex] = index;
+                }
+            }
+            if (setpointIndex >= 0 && fanSliderIndex >= 0 && fanReadoutIndex >= 0 &&
+                downIndex >= 0 && upIndex >= 0 && modeIndices[0] >= 0 &&
+                modeIndices[1] >= 0 && modeIndices[2] >= 0 && modeIndices[3] >= 0) {
+                page.controls[setpointIndex].layoutSlot = 4;
+                page.controls[setpointIndex].gridHeight = 1;
+                page.controls[downIndex].layoutSlot = 6;
+                page.controls[upIndex].layoutSlot = 7;
+                page.controls[fanSliderIndex].layoutSlot = 8;
+                page.controls[fanReadoutIndex].layoutSlot = 9;
+                for (uint8_t mode = 0; mode < 4; ++mode) {
+                    page.controls[modeIndices[mode]].layoutSlot = 10 + mode;
+                }
+                Serial.printf("Compacted thermostat page: %s\n", page.name);
+            }
+            continue;
+        }
+        if (page.controlCount != 8) {
+            continue;
+        }
+        RemoteControl* original = new (std::nothrow) RemoteControl[page.controlCount];
+        if (original == nullptr) {
+            return;
+        }
+        for (uint8_t index = 0; index < page.controlCount; ++index) {
+            original[index] = page.controls[index];
+        }
+        int8_t powerIndex = -1;
+        int8_t autoIndex = -1;
+        int8_t setpointIndex = -1;
+        int8_t fanIndex = -1;
+        int8_t modeIndices[4] = {-1, -1, -1, -1};
+        for (uint8_t index = 0; index < 8; ++index) {
+            const char* type = original[index].action.type;
+            if (strcmp(type, "netHomePower") == 0) powerIndex = index;
+            else if (strcmp(type, "netHomeAuto") == 0) autoIndex = index;
+            else if (strcmp(type, "netHomeTemperature") == 0) setpointIndex = index;
+            else if (strcmp(type, "netHomeFan") == 0) fanIndex = index;
+            else if (strcmp(type, "netHomeMode") == 0) {
+                const char* mode = original[index].action.text;
+                const int8_t modeIndex = strcmp(mode, "cool") == 0 ? 0
+                    : strcmp(mode, "heat") == 0 ? 1
+                    : strcmp(mode, "dry") == 0 ? 2
+                    : strcmp(mode, "fan") == 0 ? 3 : -1;
+                if (modeIndex >= 0) modeIndices[modeIndex] = index;
+            }
+        }
+        if (powerIndex < 0 || autoIndex < 0 || setpointIndex < 0 || fanIndex < 0 ||
+            modeIndices[0] < 0 || modeIndices[1] < 0 || modeIndices[2] < 0 || modeIndices[3] < 0) {
+            delete[] original;
+            continue;
+        }
+
+        page.controlCount = 0;
+        const auto appendOriginal = [&](int8_t originalIndex, int8_t slot, uint8_t height) -> RemoteControl& {
+            RemoteControl& destination = page.controls[page.controlCount++];
+            destination = original[originalIndex];
+            destination.layoutSlot = slot;
+            destination.gridWidth = 1;
+            destination.gridHeight = height;
+            return destination;
+        };
+        appendOriginal(powerIndex, 0, 2);
+        appendOriginal(autoIndex, 1, 2);
+
+        RemoteControl& setpoint = appendOriginal(setpointIndex, 4, 1);
+        setpoint.kind = 2;
+        setpoint.slider = false;
+        setpoint.toggle = false;
+        setpoint.gridWidth = 2;
+        strlcpy(setpoint.textSource, "controlValue", sizeof(setpoint.textSource));
+        strlcpy(setpoint.referencedControlId, setpoint.id, sizeof(setpoint.referencedControlId));
+        strlcpy(setpoint.placeholder, "--", sizeof(setpoint.placeholder));
+        strlcpy(setpoint.resolvedText, "--", sizeof(setpoint.resolvedText));
+        setpoint.textSize = 3;
+        setpoint.textHorizontalAlignment = 1;
+        setpoint.textVerticalAlignment = 1;
+
+        const auto appendStep = [&](const char* title, const char* symbol, int value, int8_t slot) {
+            RemoteControl& step = page.controls[page.controlCount++];
+            step = RemoteControl();
+            snprintf(step.id, sizeof(step.id), "thermostat-%s-%u", value < 0 ? "down" : "up", pageIndex);
+            strlcpy(step.title, title, sizeof(step.title));
+            strlcpy(step.symbol, symbol, sizeof(step.symbol));
+            step.kind = 0;
+            step.layoutSlot = slot;
+            step.gridWidth = 1;
+            step.gridHeight = 1;
+            strlcpy(step.action.type, "netHomeTemperatureStep", sizeof(step.action.type));
+            strlcpy(step.action.host, setpoint.action.host, sizeof(step.action.host));
+            strlcpy(step.action.computerId, setpoint.action.computerId, sizeof(step.action.computerId));
+            step.action.value = value;
+        };
+        appendStep("Down", "minus", -1, 6);
+        appendStep("Up", "plus", 1, 7);
+
+        RemoteControl& fan = appendOriginal(fanIndex, 8, 1);
+        RemoteControl& fanReadout = page.controls[page.controlCount++];
+        fanReadout = RemoteControl();
+        snprintf(fanReadout.id, sizeof(fanReadout.id), "thermostat-fan-%u", pageIndex);
+        strlcpy(fanReadout.title, "Fan", sizeof(fanReadout.title));
+        strlcpy(fanReadout.symbol, "fan.fill", sizeof(fanReadout.symbol));
+        fanReadout.kind = 2;
+        fanReadout.layoutSlot = 9;
+        fanReadout.gridWidth = 1;
+        fanReadout.gridHeight = 1;
+        strlcpy(fanReadout.textSource, "controlValue", sizeof(fanReadout.textSource));
+        strlcpy(fanReadout.referencedControlId, fan.id, sizeof(fanReadout.referencedControlId));
+        strlcpy(fanReadout.placeholder, "--", sizeof(fanReadout.placeholder));
+        strlcpy(fanReadout.resolvedText, "--", sizeof(fanReadout.resolvedText));
+        fanReadout.textSize = 2;
+        fanReadout.textHorizontalAlignment = 1;
+        fanReadout.textVerticalAlignment = 1;
+        fanReadout.action = fan.action;
+
+        for (uint8_t mode = 0; mode < 4; ++mode) {
+            appendOriginal(modeIndices[mode], 10 + mode, 1);
+        }
+        delete[] original;
+        Serial.printf("Migrated thermostat page: %s\n", page.name);
     }
 }
 
@@ -544,14 +834,13 @@ void persistRemoteToggleStates(const RemoteProfile& profile) {
         Serial.println("Toggle state NVS open failed");
         return;
     }
-    const esp_err_t writeResult = nvs_set_blob(
+    const esp_err_t writeResult = writeNvsBlob(
         handle, kToggleStatesKey, &updated, sizeof(updated));
-    const esp_err_t commitResult = writeResult == ESP_OK ? nvs_commit(handle) : writeResult;
     nvs_close(handle);
-    if (writeResult == ESP_OK && commitResult == ESP_OK) {
+    if (writeResult == ESP_OK) {
         toggleStateStore = updated;
     } else {
-        Serial.printf("Toggle state NVS write failed: %d\n", commitResult);
+        Serial.printf("Toggle state NVS write failed: %d\n", writeResult);
     }
 }
 
@@ -647,6 +936,8 @@ void persistSettings() {
         file.write(slideshowDeepSleep ? 1 : 0);
         file.write(slideshowIntervalIndex);
         file.write(screensaverDelayIndex);
+        file.write(static_cast<uint8_t>(screensaverStyle));
+        file.write(imagesOnlyOnBattery ? 1 : 0);
         file.close();
     }
 }
@@ -660,6 +951,8 @@ void restoreSettings() {
     const int deepSleep = file.read();
     const int intervalIndex = file.read();
     const int delayIndex = file.read();
+    const int style = file.read();
+    const int batteryOnly = file.read();
     file.close();
     slideshowEnabled = enabled == 1;
     slideshowDeepSleep = deepSleep == 1;
@@ -668,6 +961,23 @@ void restoreSettings() {
     }
     if (delayIndex >= 0 && delayIndex < kSlideshowIntervalCount) {
         screensaverDelayIndex = static_cast<uint8_t>(delayIndex);
+    }
+    // Older settings have only 3 or 4 bytes; missing/unknown styles use media.
+    screensaverStyle = style == static_cast<int>(ScreensaverStyle::geometricSnake)
+        ? ScreensaverStyle::geometricSnake : ScreensaverStyle::media;
+    imagesOnlyOnBattery = batteryOnly == 1; // Missing sixth byte defaults off.
+}
+
+void updateScreensaverBatteryPolicy() {
+    if (!imagesOnlyOnBattery) {
+        batteryImagesOnly = false;
+        batteryPolicySampled = false;
+        return;
+    }
+    if (!batteryPolicySampled || millis() - batteryPolicySampledAt >= 10000) {
+        batteryImagesOnly = screensaver_battery::imagesOnly(true, M5.Power.getBatteryLevel());
+        batteryPolicySampledAt = millis();
+        batteryPolicySampled = true;
     }
 }
 
@@ -717,7 +1027,7 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     const DeserializationError error = deserializeJson(document, file);
     file.close();
     const int profileVersion = document["version"] | 1;
-    if (error || profileVersion < 1 || profileVersion > 2) {
+    if (error || profileVersion < 1 || profileVersion > 6) {
         Serial.printf("Remote profile parse failed: %s\n", error ? error.c_str() : "version");
         return false;
     }
@@ -744,6 +1054,7 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     const uint32_t delaySeconds = constrain(
         document["screensaverDelaySeconds"] | 30, 10, 3600);
     output.screensaverDelayMs = delaySeconds * 1000;
+    output.useFahrenheit = strcmp(document["temperatureUnit"] | "celsius", "fahrenheit") == 0;
     output.timeZoneOffsetMinutes = constrain(
         document["timeZoneOffsetMinutes"] | 0, -14 * 60, 14 * 60);
     JsonObject clockJson = document["deviceClock"];
@@ -840,6 +1151,13 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
             strlcpy(control.action.host, actionJson["host"] | "", sizeof(control.action.host));
             strlcpy(control.action.text, actionJson["text"] | "", sizeof(control.action.text));
             control.action.value = actionJson["value"] | 0;
+            control.action.valueTenths = actionJson["valueTenths"] | (control.action.value * 10);
+            control.action.deadbandTenths = constrain(actionJson["deadbandTenths"] | 10, 5, 30);
+            control.action.humidityThreshold = constrain(actionJson["humidityThreshold"] | 65, 40, 80);
+            control.action.minimumCycleMinutes = constrain(actionJson["minimumCycleMinutes"] | 10, 1, 30);
+            control.action.scheduleEnabled = actionJson["scheduleEnabled"] | false;
+            control.action.scheduleHour = constrain(actionJson["scheduleHour"] | 0, 0, 23);
+            control.action.scheduleMinute = constrain(actionJson["scheduleMinute"] | 0, 0, 59);
             strlcpy(
                 control.action.computerId,
                 actionJson["computerID"] | "",
@@ -862,6 +1180,9 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     }
     if (output.pageCount == 0) {
         return false;
+    }
+    if (profileVersion < 6) {
+        migrateGeneratedThermostatPages(output);
     }
     restoreRemoteSliderPositions(output);
     restoreRemoteToggleStates(output);
@@ -916,6 +1237,44 @@ void preserveRemoteTextBoxValues(const RemoteProfile& previous, RemoteProfile& c
     }
 }
 
+__attribute__((noinline)) void preserveRemoteThermostatValues(
+    const RemoteProfile& previous,
+    RemoteProfile& current) {
+    for (uint8_t pageIndex = 0; pageIndex < current.pageCount; ++pageIndex) {
+        RemotePage& page = current.pages[pageIndex];
+        for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+            RemoteControl& control = page.controls[controlIndex];
+            const bool isSetpoint = strcmp(control.action.type, "netHomeTemperature") == 0;
+            const bool isFan = control.slider && strcmp(control.action.type, "netHomeFan") == 0;
+            if ((!isSetpoint && !isFan) || control.action.host[0] == '\0') {
+                continue;
+            }
+            for (uint8_t previousPageIndex = 0;
+                 previousPageIndex < previous.pageCount;
+                 ++previousPageIndex) {
+                const RemotePage& previousPage = previous.pages[previousPageIndex];
+                for (uint8_t previousControlIndex = 0;
+                     previousControlIndex < previousPage.controlCount;
+                     ++previousControlIndex) {
+                    const RemoteControl& previousControl = previousPage.controls[previousControlIndex];
+                    const bool sameControl =
+                        strcmp(previousControl.action.type, control.action.type) == 0 &&
+                        (!isFan || previousControl.slider) &&
+                        strcmp(previousControl.action.host, control.action.host) == 0 &&
+                        strcmp(previousControl.action.computerId, control.action.computerId) == 0;
+                    if (!sameControl) {
+                        continue;
+                    }
+                    control.action.value = previousControl.action.value;
+                    control.action.valueTenths = previousControl.action.valueTenths;
+                    previousPageIndex = previous.pageCount;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 bool installTemporaryRemoteProfile() {
     if (remoteProfile == nullptr || pendingRemoteProfile == nullptr ||
         !parseRemoteProfile(kRemoteProfileTemporaryPath, *pendingRemoteProfile)) {
@@ -934,10 +1293,12 @@ bool installTemporaryRemoteProfile() {
     if (remotePageIndex < remoteProfile->pageCount) {
         strlcpy(visiblePageId, remoteProfile->pages[remotePageIndex].id, sizeof(visiblePageId));
     }
+    preserveRemoteThermostatValues(*remoteProfile, *pendingRemoteProfile);
     RemoteProfile* previousProfile = remoteProfile;
     remoteProfile = pendingRemoteProfile;
     pendingRemoteProfile = previousProfile;
     preserveRemoteTextBoxValues(*pendingRemoteProfile, *remoteProfile);
+    persistRemoteSliderPositions(*remoteProfile);
     if (remoteProfile->hasDeviceClock) {
         M5.Rtc.setDateTime(remoteProfile->deviceClock);
     }
@@ -1253,6 +1614,18 @@ void resetWifiUploadState() {
     wifiWriteBufferLength = 0;
 }
 
+void setBluetoothTransferPerformance(bool transferring) {
+    if (!deviceConnected || bluetoothServer == nullptr ||
+        bluetoothConnectionHandle == UINT16_MAX) {
+        return;
+    }
+    if (transferring) {
+        bluetoothServer->updateConnParams(bluetoothConnectionHandle, 12, 12, 0, 200);
+    } else {
+        bluetoothServer->updateConnParams(bluetoothConnectionHandle, 24, 40, 4, 400);
+    }
+}
+
 void cancelUpload(bool notifyFailure) {
     upload.file.close();
     resetWifiUploadState();
@@ -1261,6 +1634,7 @@ void cancelUpload(bool notifyFailure) {
         bluetoothResumeRequested = true;
     }
     upload = UploadState{};
+    setBluetoothTransferPerformance(false);
     finishRequested = false;
     if (SD.exists(kTemporaryPath)) {
         SD.remove(kTemporaryPath);
@@ -1273,6 +1647,7 @@ void cancelUpload(bool notifyFailure) {
 void cancelRemoteProfileUpload(bool notifyFailure) {
     remoteProfileUpload.file.close();
     remoteProfileUpload = RemoteProfileUploadState{};
+    setBluetoothTransferPerformance(false);
     if (SD.exists(kRemoteProfileTemporaryPath)) {
         SD.remove(kRemoteProfileTemporaryPath);
     }
@@ -1802,8 +2177,16 @@ void configureWifiServer() {
                         const RemotePage& page = remoteProfile->pages[pageIndex];
                         for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
                             const RemoteControl& control = page.controls[controlIndex];
-                            if (control.slider && strcmp(control.id, controlId) == 0) {
+                            if ((control.slider || control.toggle ||
+                                 strcmp(control.action.type, "netHomeTemperature") == 0) &&
+                                strcmp(control.id, controlId) == 0) {
                                 controlJson["action"]["value"] = control.action.value;
+                                if (control.toggle) {
+                                    controlJson["toggleOn"] = control.toggleOn;
+                                }
+                                if (strcmp(control.action.type, "netHomeTemperature") == 0) {
+                                    controlJson["action"]["valueTenths"] = control.action.valueTenths;
+                                }
                             }
                         }
                     }
@@ -2262,6 +2645,7 @@ void beginUpload(const uint8_t* value, size_t length) {
         strlcpy(upload.title, "Untitled", sizeof(upload.title));
     }
     upload.active = true;
+    setBluetoothTransferPerformance(true);
     finishRequested = false;
     libraryVisible = false;
     uploadScreenPending = true;
@@ -2361,6 +2745,7 @@ void completeUpload() {
         return;
     }
     notifyControl(kUploadComplete);
+    setBluetoothTransferPerformance(false);
 }
 
 void finishUpload() {
@@ -2399,6 +2784,7 @@ void beginRemoteProfileUpload(const uint8_t* value, size_t length) {
     remoteProfileUpload.runningCrc = UINT32_MAX;
     remoteProfileUpload.lastActivityAt = millis();
     remoteProfileUpload.active = true;
+    setBluetoothTransferPerformance(true);
     notifyControl(kRemoteProfileReady);
 }
 
@@ -2423,6 +2809,7 @@ void completeRemoteProfileUpload() {
         return;
     }
     notifyControl(kRemoteProfileComplete);
+    setBluetoothTransferPerformance(false);
 }
 
 void finishRemoteProfileUpload() {
@@ -2471,7 +2858,7 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
         } else if (value[0] == kFinishUpload && value.size() == 1) {
             finishUpload();
         } else if (value[0] == kListLibrary && value.size() == 1) {
-            notifyLibraryCount();
+            libraryRefreshRequested = true;
         } else if (value[0] == kReadLibraryItem && value.size() == 2) {
             notifyLibraryItem(value[1]);
         } else if (value[0] == kDeleteLibraryItem && value.size() == 2) {
@@ -2483,11 +2870,10 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
             controlCharacteristic->setValue(response, sizeof(response));
             controlCharacteristic->notify();
         } else if (value[0] == kSelectLibraryItem && value.size() == 2) {
-            if (value[1] < libraryItemCount && loadAnimation(libraryItems[value[1]].path)) {
-                persistActiveSelection();
-                displayCurrentFrame();
-            } else {
+            if (value[1] >= libraryItemCount) {
                 notifyControl(kUploadFailed);
+            } else {
+                requestedLibrarySelection = value[1];
             }
         } else if (value[0] == kStartWifi && value.size() == 1) {
             wifiStartRequested = true;
@@ -2526,8 +2912,10 @@ class DataCallbacks final : public NimBLECharacteristicCallbacks {
 class ServerCallbacks final : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* server, NimBLEConnInfo& connectionInfo) override {
         Serial.println("BLE connected");
-        server->updateConnParams(connectionInfo.getConnHandle(), 12, 12, 0, 200);
+        bluetoothServer = server;
+        bluetoothConnectionHandle = connectionInfo.getConnHandle();
         deviceConnected = true;
+        setBluetoothTransferPerformance(false);
         stillFrameDisplayed = false;
         nextFrameAt = millis();
     }
@@ -2535,6 +2923,7 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
     void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int reason) override {
         Serial.printf("BLE disconnected, reason: %d\n", reason);
         deviceConnected = false;
+        bluetoothConnectionHandle = UINT16_MAX;
         if (bluetoothStopping) {
             return;
         }
@@ -2560,25 +2949,45 @@ void startBluetooth() {
     }
     NimBLEDevice::init("paperGIF");
     NimBLEDevice::setMTU(517);
-    NimBLEServer* server = NimBLEDevice::createServer();
-    server->setCallbacks(&serverCallbacks, false);
-    server->advertiseOnDisconnect(true);
+    bluetoothServer = NimBLEDevice::createServer();
+    bluetoothServer->setCallbacks(&serverCallbacks, false);
+    bluetoothServer->advertiseOnDisconnect(true);
 
-    NimBLEService* service = server->createService(kServiceUuid);
+    NimBLEService* service = bluetoothServer->createService(kServiceUuid);
     controlCharacteristic = service->createCharacteristic(
         kControlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 64);
     NimBLECharacteristic* dataCharacteristic = service->createCharacteristic(
         kDataUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR, 512);
     controlCharacteristic->setCallbacks(&controlCallbacks);
     dataCharacteristic->setCallbacks(&dataCallbacks);
-    server->start();
+    bluetoothServer->start();
 
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
     advertising->addServiceUUID(kServiceUuid);
+    advertising->setMinInterval(160);
+    advertising->setMaxInterval(320);
     advertising->setPreferredParams(12, 12);
     advertising->enableScanResponse(true);
     advertising->start();
     bluetoothActive = true;
+    nextBluetoothAdvertisingCheckAt = millis() + 5000;
+}
+
+void ensureBluetoothAdvertising() {
+    if (bluetoothStopping || bluetoothSuspendedForWifiUpload || deviceConnected ||
+        static_cast<int32_t>(millis() - nextBluetoothAdvertisingCheckAt) < 0) {
+        return;
+    }
+    nextBluetoothAdvertisingCheckAt = millis() + 5000;
+    if (!bluetoothActive) {
+        startBluetooth();
+        return;
+    }
+    NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+    if (advertising != nullptr && !advertising->isAdvertising()) {
+        advertising->start();
+        Serial.println("BLE advertising restarted");
+    }
 }
 
 void suspendBluetoothForWifiUpload() {
@@ -2592,6 +3001,8 @@ void suspendBluetoothForWifiUpload() {
     }
     bluetoothActive = false;
     deviceConnected = false;
+    bluetoothServer = nullptr;
+    bluetoothConnectionHandle = UINT16_MAX;
     controlCharacteristic = nullptr;
     bluetoothSuspendedForWifiUpload = true;
     bluetoothSuspendedAt = millis();
@@ -2814,37 +3225,70 @@ void displaySlideshowMenu() {
     M5.Display.drawFastHLine(32, 98, 476, TFT_BLACK);
 
     drawToggleRow("ENABLED", slideshowEnabled, 130);
-    drawToggleRow("SLEEP BETWEEN IMAGES", slideshowDeepSleep, 250);
-
-    M5.Display.drawRect(32, 370, 476, 104, TFT_BLACK);
-    M5.Display.setFont(&fonts::FreeSansBold12pt7b);
-    M5.Display.drawString("START AFTER", 54, 404);
-    M5.Display.drawRect(274, 395, 54, 54, TFT_BLACK);
-    M5.Display.drawCenterString("-", 301, 408);
     char delayText[16];
     formatScreensaverDelay(delayText, sizeof(delayText));
-    M5.Display.setFont(&fonts::FreeMonoBold12pt7b);
-    M5.Display.drawCenterString(delayText, 374, 408);
-    M5.Display.drawRect(448, 395, 54, 54, TFT_BLACK);
-    M5.Display.drawCenterString("+", 475, 408);
+    const bool snakeSelected = screensaverStyle == ScreensaverStyle::geometricSnake;
+    if (slideshowEnabled) {
+        if (snakeSelected) {
+            M5.Display.drawRect(32, 250, 476, 104, TFT_BLACK);
+            M5.Display.setFont(&fonts::FreeSansBold12pt7b);
+            M5.Display.drawString("LIVE ANIMATION", 54, 274);
+            M5.Display.setFont(&fonts::FreeSans12pt7b);
+            M5.Display.drawString("Stays awake while lines move", 54, 314);
+        } else {
+            drawToggleRow("SLEEP BETWEEN IMAGES", slideshowDeepSleep, 250);
+        }
 
-    M5.Display.drawRect(32, 490, 476, 104, TFT_BLACK);
+        M5.Display.drawRect(32, 370, 476, 104, TFT_BLACK);
+        M5.Display.setFont(&fonts::FreeSansBold12pt7b);
+        M5.Display.drawString("START AFTER", 54, 404);
+        M5.Display.drawRect(274, 395, 54, 54, TFT_BLACK);
+        M5.Display.drawCenterString("-", 301, 408);
+        M5.Display.setFont(&fonts::FreeMonoBold12pt7b);
+        M5.Display.drawCenterString(delayText, 374, 408);
+        M5.Display.drawRect(448, 395, 54, 54, TFT_BLACK);
+        M5.Display.drawCenterString("+", 475, 408);
+
+        M5.Display.drawRect(32, 490, 476, 104, TFT_BLACK);
+        M5.Display.setFont(&fonts::FreeSansBold12pt7b);
+        if (snakeSelected) {
+            M5.Display.drawString("RANDOM HEXAGONAL PATHS", 54, 514);
+            M5.Display.setFont(&fonts::FreeSans12pt7b);
+            M5.Display.drawString("Many plain lines. No intersections.", 54, 554);
+        } else {
+            M5.Display.drawString("IMAGE INTERVAL", 54, 524);
+            M5.Display.drawRect(274, 515, 54, 54, TFT_BLACK);
+            M5.Display.drawCenterString("-", 301, 528);
+            char intervalText[16];
+            formatSlideshowInterval(intervalText, sizeof(intervalText));
+            M5.Display.setFont(&fonts::FreeMonoBold12pt7b);
+            M5.Display.drawCenterString(intervalText, 374, 528);
+            M5.Display.drawRect(448, 515, 54, 54, TFT_BLACK);
+            M5.Display.drawCenterString("+", 475, 528);
+        }
+    } else {
+        M5.Display.drawRect(32, 250, 476, 104, TFT_BLACK);
+        M5.Display.setFont(&fonts::FreeSansBold12pt7b);
+        M5.Display.drawString("SLEEP AFTER", 54, 284);
+        M5.Display.drawRect(274, 275, 54, 54, TFT_BLACK);
+        M5.Display.drawCenterString("-", 301, 288);
+        M5.Display.setFont(&fonts::FreeMonoBold12pt7b);
+        M5.Display.drawCenterString(delayText, 374, 288);
+        M5.Display.drawRect(448, 275, 54, 54, TFT_BLACK);
+        M5.Display.drawCenterString("+", 475, 288);
+    }
+
+    M5.Display.drawRect(32, 610, 476, 104, TFT_BLACK);
     M5.Display.setFont(&fonts::FreeSansBold12pt7b);
-    M5.Display.drawString("IMAGE INTERVAL", 54, 524);
-    M5.Display.drawRect(274, 515, 54, 54, TFT_BLACK);
-    M5.Display.drawCenterString("-", 301, 528);
-    char intervalText[16];
-    formatSlideshowInterval(intervalText, sizeof(intervalText));
-    M5.Display.setFont(&fonts::FreeMonoBold12pt7b);
-    M5.Display.drawCenterString(intervalText, 374, 528);
-    M5.Display.drawRect(448, 515, 54, 54, TFT_BLACK);
-    M5.Display.drawCenterString("+", 475, 528);
-
+    M5.Display.drawString("STYLE", 54, 646);
     M5.Display.setFont(&fonts::FreeSans12pt7b);
-    M5.Display.drawString("Sleep keeps the current image visible", 34, 650);
-    M5.Display.drawString("and turns off Bluetooth between images.", 34, 690);
+    M5.Display.drawString(snakeSelected ? "Geometric Snake" : "Library Media", 190, 648);
+    M5.Display.drawString(">", 478, 648);
+    drawToggleRow("IMAGES BELOW 100%", imagesOnlyOnBattery, 730);
+    M5.Display.setFont(&fonts::FreeSans12pt7b);
+    M5.Display.drawString("Live background / GIFs only at 100%.", 34, 852);
     M5.Display.setFont(&fonts::FreeMonoBold12pt7b);
-    M5.Display.drawString("PRESS CENTER BUTTON TO WAKE", 34, 800);
+    M5.Display.drawString("TOUCH OR CENTER BUTTON TO WAKE", 24, 902);
     M5.Display.endWrite();
     remoteVisible = false;
     libraryVisible = false;
@@ -3085,6 +3529,44 @@ void drawRemoteControlIcon(
             M5.Display.drawLine(centerX + cos(angle) * (quarter + 3), centerY + sin(angle) * (quarter + 3),
                 centerX + cos(angle) * half, centerY + sin(angle) * half, foreground);
         }
+    } else if (strcmp(symbol, "snowflake") == 0) {
+        for (uint8_t index = 0; index < 3; ++index) {
+            const float angle = index * PI / 3;
+            const int32_t xOffset = cos(angle) * half;
+            const int32_t yOffset = sin(angle) * half;
+            M5.Display.drawLine(centerX - xOffset, centerY - yOffset,
+                centerX + xOffset, centerY + yOffset, foreground);
+        }
+        M5.Display.fillCircle(centerX, centerY, max(1, size / 12), foreground);
+    } else if (strcmp(symbol, "drop.fill") == 0 || strcmp(symbol, "humidity.fill") == 0) {
+        M5.Display.fillCircle(centerX, centerY + quarter, quarter + 2, foreground);
+        M5.Display.fillTriangle(centerX, centerY - half,
+            centerX - quarter - 2, centerY + quarter,
+            centerX + quarter + 2, centerY + quarter, foreground);
+        if (strcmp(symbol, "humidity.fill") == 0) {
+            M5.Display.fillCircle(centerX + half - 2, centerY - quarter, max(2, size / 10), foreground);
+        }
+    } else if (strcmp(symbol, "thermometer.medium") == 0) {
+        const int32_t stemWidth = max(3, size / 6);
+        M5.Display.drawRoundRect(centerX - stemWidth / 2, centerY - half,
+            stemWidth, size - quarter, stemWidth / 2, foreground);
+        M5.Display.fillRect(centerX - 1, centerY - quarter, 3, half, foreground);
+        M5.Display.fillCircle(centerX, centerY + half - quarter, quarter, foreground);
+    } else if (strcmp(symbol, "fan.fill") == 0) {
+        M5.Display.fillCircle(centerX, centerY, max(2, size / 10), foreground);
+        for (uint8_t index = 0; index < 3; ++index) {
+            const float angle = index * 2 * PI / 3;
+            const int32_t bladeX = centerX + cos(angle) * quarter;
+            const int32_t bladeY = centerY + sin(angle) * quarter;
+            const int32_t tipX = centerX + cos(angle + 0.65f) * half;
+            const int32_t tipY = centerY + sin(angle + 0.65f) * half;
+            M5.Display.fillTriangle(centerX, centerY, bladeX, bladeY, tipX, tipY, foreground);
+        }
+    } else if (strcmp(symbol, "wind") == 0) {
+        M5.Display.drawFastHLine(centerX - half, centerY - quarter, size - quarter, foreground);
+        M5.Display.drawArc(centerX + quarter, centerY - quarter, quarter, quarter - 2, 270, 90, foreground);
+        M5.Display.drawFastHLine(centerX - half, centerY + quarter, size, foreground);
+        M5.Display.drawArc(centerX, centerY + quarter, quarter, quarter - 2, 270, 90, foreground);
     } else if (strcmp(symbol, "moon.fill") == 0) {
         M5.Display.fillCircle(centerX, centerY, half, foreground);
         M5.Display.fillCircle(centerX + quarter, centerY - quarter, half - 2, background);
@@ -3346,7 +3828,14 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
         constexpr int32_t radius = 10;
         const int32_t inset = 3;
         const int32_t innerWidth = width - inset * 2;
-        const int32_t fillWidth = constrain(control.action.value, 0, 255) * innerWidth / 255;
+        const int32_t sliderMinimum = strcmp(control.action.type, "netHomeTemperature") == 0
+            ? 16 : strcmp(control.action.type, "netHomeFan") == 0 ? 20 : 0;
+        const int32_t sliderMaximum = strcmp(control.action.type, "netHomeTemperature") == 0
+            ? 30 : strcmp(control.action.type, "netHomeFan") == 0 ? 100 : 255;
+        const int32_t sliderPosition =
+            (constrain(control.action.value, sliderMinimum, sliderMaximum) - sliderMinimum) *
+            255 / (sliderMaximum - sliderMinimum);
+        const int32_t fillWidth = sliderPosition * innerWidth / 255;
         M5.Display.fillRect(x, y, width, height, TFT_WHITE);
         M5.Display.drawRoundRect(x, y, width, height, radius, TFT_BLACK);
         if (fillWidth > 0) {
@@ -3368,6 +3857,21 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
                 foreground, background);
             M5.Display.setTextDatum(textdatum_t::middle_left);
             M5.Display.drawString(control.title, x + 50, y + height / 2);
+            if (strcmp(control.action.type, "netHomeTemperature") == 0 ||
+                strcmp(control.action.type, "netHomeFan") == 0) {
+                char valueText[12];
+                if (strcmp(control.action.type, "netHomeTemperature") == 0) {
+                    const bool fahrenheit = remoteProfile != nullptr && remoteProfile->useFahrenheit;
+                    const int temperature = fahrenheit
+                        ? static_cast<int>(roundf(control.action.valueTenths * 9.0f / 50.0f + 32.0f))
+                        : static_cast<int>(roundf(control.action.valueTenths / 10.0f));
+                    snprintf(valueText, sizeof(valueText), "%d %c", temperature, fahrenheit ? 'F' : 'C');
+                } else {
+                    snprintf(valueText, sizeof(valueText), "%d%%", control.action.value);
+                }
+                M5.Display.setTextDatum(textdatum_t::middle_right);
+                M5.Display.drawString(valueText, x + width - 18, y + height / 2);
+            }
         };
         drawSliderContent(TFT_BLACK, TFT_WHITE);
         if (fillWidth > 0) {
@@ -3613,6 +4117,20 @@ void drawRemoteStatusLine() {
             snprintf(errorText, sizeof(errorText), "Wi-Fi failed (reason %u)", homeWifiFailureReason);
         }
         M5.Display.drawString(errorText, 24, 116);
+    } else if (climateReadingAvailable) {
+        char climateText[40];
+        const bool fahrenheit = remoteProfile != nullptr && remoteProfile->useFahrenheit;
+        const float displayedTemperature = fahrenheit
+            ? climateTemperatureC * 9.0f / 5.0f + 32.0f
+            : climateTemperatureC;
+        snprintf(
+            climateText,
+            sizeof(climateText),
+            "%.1f %c  %.0f%% humidity",
+            displayedTemperature,
+            fahrenheit ? 'F' : 'C',
+            climateHumidityPercent);
+        M5.Display.drawString(climateText, 24, 116);
     }
 }
 
@@ -3932,9 +4450,19 @@ bool resolveLocalTextBox(RemoteControl& control) {
                 if (strcmp(referenced.id, control.referencedControlId) != 0) {
                     continue;
                 }
-                text = referenced.slider
-                    ? String(referenced.action.value)
-                    : (referenced.toggleOn ? "On" : "Off");
+                if (strcmp(referenced.action.type, "netHomeTemperature") == 0) {
+                    const bool fahrenheit = remoteProfile->useFahrenheit;
+                    const int temperature = fahrenheit
+                        ? static_cast<int>(roundf(referenced.action.valueTenths * 9.0f / 50.0f + 32.0f))
+                        : static_cast<int>(roundf(referenced.action.valueTenths / 10.0f));
+                    text = String(temperature) + " " + (fahrenheit ? "F" : "C");
+                } else if (strcmp(referenced.action.type, "netHomeFan") == 0) {
+                    text = String(referenced.action.value) + "%";
+                } else {
+                    text = referenced.slider
+                        ? String(referenced.action.value)
+                        : (referenced.toggleOn ? "On" : "Off");
+                }
                 break;
             }
         }
@@ -4102,8 +4630,61 @@ void pollRemoteTextBoxes() {
     }
 }
 
-bool dispatchRemoteAction(RemoteControl& control) {
+bool dispatchRemoteAction(RemoteControl& control, bool queueIfOffline, bool reportStatus) {
     RemoteAction& action = control.action;
+    const bool showActionStatus = reportStatus && !control.slider &&
+        strcmp(action.type, "netHomeClimate") != 0;
+    if (strcmp(action.type, "netHomeTemperatureStep") == 0) {
+        for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
+            RemotePage& page = remoteProfile->pages[pageIndex];
+            for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+                RemoteControl& setpoint = page.controls[controlIndex];
+                if (strcmp(setpoint.action.type, "netHomeTemperature") != 0 ||
+                    strcmp(setpoint.action.host, action.host) != 0 ||
+                    strcmp(setpoint.action.computerId, action.computerId) != 0) {
+                    continue;
+                }
+                const int currentTenths = constrain(setpoint.action.valueTenths, 160, 300);
+                if (remoteProfile->useFahrenheit) {
+                    const int currentDisplay = static_cast<int>(roundf(
+                        currentTenths * 9.0f / 50.0f + 32.0f));
+                    const int nextDisplay = constrain(currentDisplay + action.value, 61, 86);
+                    const int halfCelsiusSteps = static_cast<int>(roundf(
+                        (nextDisplay - 32) * 10.0f / 9.0f));
+                    setpoint.action.valueTenths = constrain(halfCelsiusSteps * 5, 160, 300);
+                } else {
+                    setpoint.action.valueTenths = constrain(
+                        currentTenths + action.value * 10, 160, 300);
+                }
+                setpoint.action.value = static_cast<int>(roundf(setpoint.action.valueTenths / 10.0f));
+                if (resolveLocalTextBox(setpoint)) {
+                    redrawRemoteTextBox(page, controlIndex);
+                }
+                persistRemoteSliderPositions(*remoteProfile);
+                deferredThermostatSetpoint.action = setpoint.action;
+                strlcpy(
+                    deferredThermostatSetpoint.controlId,
+                    setpoint.id,
+                    sizeof(deferredThermostatSetpoint.controlId));
+                deferredThermostatSetpoint.pageIndex = pageIndex;
+                deferredThermostatSetpoint.slider = true;
+                deferredThermostatSetpoint.toggle = false;
+                deferredThermostatSetpoint.toggleOn = false;
+                deferredThermostatSetpointPending = true;
+                deferredThermostatSetpointDueAt = millis() + 500;
+                return true;
+            }
+        }
+        displayRemoteActionStatus("Setpoint unavailable");
+        return false;
+    }
+    if (strcmp(action.type, "netHomeAuto") == 0) {
+        resetClimateAutomationController(control);
+        if (reportStatus) {
+            displayRemoteActionStatus(control.toggleOn ? "Auto mode off" : "Auto mode on");
+        }
+        return true;
+    }
     if (strcmp(action.type, "page") == 0) {
         for (uint8_t index = 0; index < remoteProfile->pageCount; ++index) {
             if (strcmp(remoteProfile->pages[index].id, action.text) == 0) {
@@ -4178,8 +4759,13 @@ bool dispatchRemoteAction(RemoteControl& control) {
         url = "http://" + String(macHost) + ":" + macPort + "/action";
         token = macToken;
         document["type"] = action.type;
+        document["host"] = action.host;
         document["text"] = action.text;
         document["value"] = action.value;
+        if (strcmp(action.type, "netHomeTemperature") == 0 ||
+            strcmp(action.type, "netHomeClimate") == 0) {
+            document["valueTenths"] = action.valueTenths;
+        }
         JsonArray modifiers = document["modifiers"].to<JsonArray>();
         for (uint8_t index = 0; index < action.modifierCount; ++index) {
             modifiers.add(action.modifiers[index]);
@@ -4188,20 +4774,626 @@ bool dispatchRemoteAction(RemoteControl& control) {
     String body;
     serializeJson(document, body);
     if (WiFi.status() != WL_CONNECTED) {
+        if (queueIfOffline) {
+            if (control.slider) {
+                for (size_t index = 0; index < pendingRemoteActionCount; ++index) {
+                    PendingRemoteAction& pending = pendingRemoteActions[index];
+                    if (pending.slider && pending.pageIndex == remotePageIndex &&
+                        strcmp(pending.controlId, control.id) == 0) {
+                        pending.action = control.action;
+                        pending.toggleOn = control.toggleOn;
+                        Serial.printf("Updated queued remote action: %s\n", control.id);
+                        if (!homeWifiConnecting) {
+                            connectHomeWifi();
+                        }
+                        return true;
+                    }
+                }
+            }
+            if (pendingRemoteActionCount < kPendingRemoteActionCapacity) {
+                PendingRemoteAction& pending = pendingRemoteActions[pendingRemoteActionCount++];
+                pending.action = control.action;
+                strlcpy(pending.controlId, control.id, sizeof(pending.controlId));
+                pending.pageIndex = remotePageIndex;
+                pending.slider = control.slider;
+                pending.toggle = control.toggle;
+                pending.toggleOn = control.toggleOn;
+                Serial.printf("Queued remote action: %s (%u pending)\n",
+                    control.id, static_cast<unsigned>(pendingRemoteActionCount));
+                if (showActionStatus) {
+                    displayRemoteActionStatus("Queued");
+                }
+                if (!homeWifiConnecting) {
+                    connectHomeWifi();
+                }
+                return true;
+            }
+            if (showActionStatus) {
+                displayRemoteActionStatus("Queue full");
+            }
+            return false;
+        }
         Serial.printf("Remote action %s failed: home Wi-Fi is disconnected\n", action.type);
-        if (!control.slider) {
+        if (queueIfOffline && showActionStatus) {
             displayRemoteActionStatus("Wi-Fi offline");
         }
         return false;
     }
-    const bool sent = postJson(url, body, token);
+    String responseBody;
+    const bool sent = postJsonResponse(url, body, responseBody, token);
+    bool changed = true;
+    if (sent && !responseBody.isEmpty()) {
+        JsonDocument response;
+        if (!deserializeJson(response, responseBody) && response["changed"].is<bool>()) {
+            changed = response["changed"].as<bool>();
+        }
+    }
     Serial.printf("Remote action %s -> %s\n", action.type, sent ? "ok" : "failed");
-    if (!control.slider) {
+    if (showActionStatus) {
         displayRemoteActionStatus(sent
-            ? "Sent"
+            ? (changed ? "Sent" : "Already set")
             : (strncmp(action.type, "wled", 4) == 0 ? "WLED unavailable" : "Computer unavailable"));
     }
     return sent;
+}
+
+uint8_t sht30Crc(const uint8_t* data) {
+    uint8_t crc = 0xFF;
+    for (uint8_t index = 0; index < 2; ++index) {
+        crc ^= data[index];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc & 0x80) != 0 ? static_cast<uint8_t>((crc << 1) ^ 0x31) : crc << 1;
+        }
+    }
+    return crc;
+}
+
+bool readSht30(float& temperatureC, float& humidityPercent) {
+    constexpr uint8_t address = 0x44;
+    constexpr uint8_t command[] = {0x24, 0x00};
+    if (!M5.In_I2C.start(address, false, 100000) ||
+        !M5.In_I2C.write(command, sizeof(command)) ||
+        !M5.In_I2C.stop()) {
+        M5.In_I2C.stop();
+        return false;
+    }
+    delay(20);
+    uint8_t response[6];
+    if (!M5.In_I2C.start(address, true, 100000) ||
+        !M5.In_I2C.read(response, sizeof(response), true) ||
+        !M5.In_I2C.stop() ||
+        sht30Crc(response) != response[2] ||
+        sht30Crc(response + 3) != response[5]) {
+        M5.In_I2C.stop();
+        return false;
+    }
+    const uint16_t rawTemperature = static_cast<uint16_t>(response[0] << 8 | response[1]);
+    const uint16_t rawHumidity = static_cast<uint16_t>(response[3] << 8 | response[4]);
+    temperatureC = -45.0f + 175.0f * rawTemperature / 65535.0f;
+    humidityPercent = 100.0f * rawHumidity / 65535.0f;
+    return temperatureC >= -20 && temperatureC <= 60 &&
+        humidityPercent >= 0 && humidityPercent <= 100;
+}
+
+uint32_t rtcMinuteStamp() {
+    m5::rtc_datetime_t dateTime;
+    if (!M5.Rtc.getDateTime(&dateTime) || dateTime.date.year < 2020) {
+        return millis() / 60000 + 1;
+    }
+    tm calendar = dateTime.get_tm();
+    calendar.tm_isdst = -1;
+    const time_t seconds = mktime(&calendar);
+    return seconds > 0 ? static_cast<uint32_t>(seconds / 60) : millis() / 60000 + 1;
+}
+
+bool isSchedulableRemoteAction(const RemoteControl& control) {
+    const char* type = control.action.type;
+    return control.action.scheduleEnabled && type[0] != '\0' &&
+    strcmp(type, "page") != 0;
+}
+
+ScheduleRunState& scheduleRunStateFor(const RemoteControl& control) {
+    if (scheduleRunStore.magic != kScheduleRunStoreMagic) {
+        memset(&scheduleRunStore, 0, sizeof(scheduleRunStore));
+        scheduleRunStore.magic = kScheduleRunStoreMagic;
+    }
+    const uint64_t hash = remoteControlIdHash(control.id);
+    ScheduleRunState* empty = nullptr;
+    for (ScheduleRunState& state : scheduleRunStore.states) {
+        if (state.controlIdHash == hash) {
+            return state;
+        }
+        if (empty == nullptr && state.controlIdHash == 0) {
+            empty = &state;
+        }
+    }
+    ScheduleRunState& state = empty != nullptr
+        ? *empty
+        : scheduleRunStore.states[hash % kMaximumPersistedSliders];
+    state.controlIdHash = hash;
+    state.dayKey = 0;
+    return state;
+}
+
+void pollScheduledRemoteActions() {
+    static uint32_t lastPolledMinute = UINT32_MAX;
+    if (remoteProfile == nullptr || !remoteProfile->configured) {
+        return;
+    }
+    m5::rtc_datetime_t dateTime;
+    if (!M5.Rtc.getDateTime(&dateTime) || dateTime.date.year < 2020) {
+        return;
+    }
+    const uint16_t minuteOfDay = dateTime.time.hours * 60 + dateTime.time.minutes;
+    const uint32_t dayKey = dateTime.date.year * 10000UL +
+        dateTime.date.month * 100UL + dateTime.date.date;
+    const uint32_t minuteKey = dayKey * 1440UL + minuteOfDay;
+    if (minuteKey == lastPolledMinute) {
+        return;
+    }
+    lastPolledMinute = minuteKey;
+    for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
+        RemotePage& page = remoteProfile->pages[pageIndex];
+        for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+            RemoteControl& control = page.controls[controlIndex];
+            if (!isSchedulableRemoteAction(control)) {
+                continue;
+            }
+            const uint16_t scheduledMinute =
+                control.action.scheduleHour * 60 + control.action.scheduleMinute;
+            ScheduleRunState& runState = scheduleRunStateFor(control);
+            if (runState.dayKey == dayKey || minuteOfDay < scheduledMinute ||
+                minuteOfDay - scheduledMinute > kScheduleCatchUpMinutes) {
+                continue;
+            }
+            Serial.printf(
+                "Running schedule %s at %02u:%02u\n",
+                control.id,
+                control.action.scheduleHour,
+                control.action.scheduleMinute);
+            if (!dispatchRemoteAction(control, true, false)) {
+                continue;
+            }
+            runState.dayKey = dayKey;
+            if (control.toggle) {
+                control.toggleOn = !control.toggleOn;
+                persistRemoteToggleStates(*remoteProfile);
+                if (remoteVisible && remotePageIndex == pageIndex) {
+                    displayRemoteSliderValue(page, controlIndex, true);
+                    refreshReferencedTextBoxes(page, control.id);
+                }
+            }
+        }
+    }
+}
+
+uint64_t backgroundWakeIntervalUs(uint64_t defaultIntervalUs) {
+    if (remoteProfile == nullptr || !remoteProfile->configured) {
+        return defaultIntervalUs;
+    }
+    m5::rtc_datetime_t dateTime;
+    if (!M5.Rtc.getDateTime(&dateTime) || dateTime.date.year < 2020) {
+        return defaultIntervalUs;
+    }
+    const uint32_t secondOfDay = dateTime.time.hours * 3600UL +
+        dateTime.time.minutes * 60UL + dateTime.time.seconds;
+    uint32_t nextSeconds = UINT32_MAX;
+    for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
+        const RemotePage& page = remoteProfile->pages[pageIndex];
+        for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+            const RemoteControl& control = page.controls[controlIndex];
+            if (!isSchedulableRemoteAction(control)) {
+                continue;
+            }
+            const uint32_t scheduledSecond =
+                (control.action.scheduleHour * 60UL + control.action.scheduleMinute) * 60UL;
+            const uint32_t secondsUntil = scheduledSecond > secondOfDay
+                ? scheduledSecond - secondOfDay
+                : 86400UL - secondOfDay + scheduledSecond;
+            nextSeconds = min(nextSeconds, max<uint32_t>(secondsUntil, 1));
+        }
+    }
+    if (nextSeconds == UINT32_MAX) {
+        return defaultIntervalUs;
+    }
+    const uint64_t scheduleIntervalUs =
+        (static_cast<uint64_t>(nextSeconds) + 2ULL) * 1000000ULL;
+    return defaultIntervalUs == M5.Power.sleep_no_timer
+        ? scheduleIntervalUs
+        : min(defaultIntervalUs, scheduleIntervalUs);
+}
+
+ClimateAutomationState& climateStateFor(const RemoteControl& control) {
+    if (climateAutomationStore.magic != kClimateAutomationMagic) {
+        memset(&climateAutomationStore, 0, sizeof(climateAutomationStore));
+        climateAutomationStore.magic = kClimateAutomationMagic;
+    }
+    const uint64_t hash = remoteControlIdHash(control.id);
+    ClimateAutomationState* empty = nullptr;
+    for (ClimateAutomationState& state : climateAutomationStore.states) {
+        if (state.controlIdHash == hash) {
+            return state;
+        }
+        if (empty == nullptr && state.controlIdHash == 0) {
+            empty = &state;
+        }
+    }
+    ClimateAutomationState& state = empty != nullptr
+        ? *empty : climateAutomationStore.states[hash % kMaximumClimateAutomations];
+    memset(&state, 0, sizeof(state));
+    state.controlIdHash = hash;
+    return state;
+}
+
+void resetClimateAutomationController(const RemoteControl& control) {
+    ClimateAutomationState& state = climateStateFor(control);
+    const uint64_t hash = state.controlIdHash;
+    memset(&state, 0, sizeof(state));
+    state.controlIdHash = hash;
+}
+
+bool dispatchClimateCommand(
+    const RemoteControl& automation,
+    const char* type,
+    const char* text,
+    int value,
+    int valueTenths = INT16_MIN) {
+    RemoteControl command = automation;
+    command.slider = false;
+    command.toggle = false;
+    strlcpy(command.action.type, type, sizeof(command.action.type));
+    strlcpy(command.action.text, text, sizeof(command.action.text));
+    command.action.value = value;
+    command.action.valueTenths = valueTenths == INT16_MIN ? value * 10 : valueTenths;
+    return dispatchRemoteAction(command);
+}
+
+bool setClimateOutput(RemoteControl& control, bool turnOn, int targetTenths, int fanSpeed) {
+    if (!turnOn) {
+        return dispatchClimateCommand(control, "netHomePower", "off", 0);
+    }
+    const char* mode = strcmp(control.action.text, "heat") == 0 ? "heat" : "cool";
+    Serial.printf(
+        "Climate command %s -> %s %.1f C, fan %d%%\n",
+        control.action.host,
+        mode,
+        targetTenths / 10.0f,
+        fanSpeed);
+    return dispatchClimateCommand(control, "netHomeClimate", mode, fanSpeed, targetTenths);
+}
+
+RemoteControl* matchingClimateControl(
+    RemotePage& page,
+    const RemoteControl& automation,
+    const char* type,
+    bool requireSlider = false) {
+    for (uint8_t index = 0; index < page.controlCount; ++index) {
+        RemoteControl& candidate = page.controls[index];
+        if (strcmp(candidate.action.type, type) == 0 &&
+            (!requireSlider || candidate.slider) &&
+            strcmp(candidate.action.host, automation.action.host) == 0 &&
+            strcmp(candidate.action.computerId, automation.action.computerId) == 0) {
+            return &candidate;
+        }
+    }
+    return nullptr;
+}
+
+int climateFanSpeed(
+    ClimateAutomationState& state,
+    bool heating,
+    bool outputOn,
+    float temperatureC,
+    float targetC,
+    uint32_t nowMinute) {
+    float elapsedMinutes = 1.0f;
+    if (state.controllerInitialized && nowMinute >= state.lastSampleMinute) {
+        elapsedMinutes = constrain(
+            static_cast<float>(nowMinute - state.lastSampleMinute), 1.0f, 15.0f);
+    }
+    const float filterWeight = min(0.8f, 0.3f * elapsedMinutes);
+    state.filteredTemperatureC = state.controllerInitialized
+        ? state.filteredTemperatureC + filterWeight * (temperatureC - state.filteredTemperatureC)
+        : temperatureC;
+    const float error = heating
+        ? targetC - state.filteredTemperatureC
+        : state.filteredTemperatureC - targetC;
+    const float derivative = state.controllerInitialized
+        ? (error - state.previousError) / elapsedMinutes
+        : 0.0f;
+    if (outputOn) {
+        state.integralError = constrain(
+            state.integralError + error * elapsedMinutes, 0.0f, 12.0f);
+    } else {
+        state.integralError = max(0.0f, state.integralError - elapsedMinutes * 2.0f);
+    }
+    state.previousError = error;
+    state.lastSampleMinute = nowMinute;
+    state.controllerInitialized = true;
+
+    if (!outputOn) {
+        return 20;
+    }
+    const float output = constrain(
+        20.0f + 20.0f * max(0.0f, error) +
+            state.integralError + 20.0f * derivative,
+        20.0f,
+        100.0f);
+    const int fanSpeed = constrain(
+        static_cast<int>(roundf(output / 20.0f)) * 20, 20, 100);
+    Serial.printf(
+        "Climate controller: error %.2f C, integral %.2f, trend %.2f C/min -> %d%%\n",
+        error,
+        state.integralError,
+        derivative,
+        fanSpeed);
+    return fanSpeed;
+}
+
+bool hasEnabledClimateAutomation() {
+    if (remoteProfile == nullptr || !remoteProfile->configured) {
+        return false;
+    }
+    for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
+        RemotePage& page = remoteProfile->pages[pageIndex];
+        for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+            const RemoteControl& control = page.controls[controlIndex];
+            if (control.toggleOn && strcmp(control.action.type, "netHomeAuto") == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void pollClimateAutomation() {
+    if (!hasEnabledClimateAutomation() ||
+        static_cast<int32_t>(millis() - nextClimateSampleAt) < 0) {
+        return;
+    }
+    nextClimateSampleAt = millis() + kClimateSampleIntervalMs;
+    float temperatureC;
+    float humidityPercent;
+    if (!readSht30(temperatureC, humidityPercent)) {
+        climateReadingAvailable = false;
+        Serial.println("SHT30 reading failed; climate automation skipped");
+        return;
+    }
+    climateTemperatureC = temperatureC;
+    climateHumidityPercent = humidityPercent;
+    climateReadingAvailable = true;
+    Serial.printf("Climate: %.2f C, %.1f%% humidity\n", temperatureC, humidityPercent);
+    if (remoteVisible) {
+        M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+        M5.Display.startWrite();
+        drawRemoteStatusLine();
+        M5.Display.endWrite();
+    }
+
+    const uint32_t nowMinute = rtcMinuteStamp();
+    for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
+        RemotePage& page = remoteProfile->pages[pageIndex];
+        for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+            RemoteControl& control = page.controls[controlIndex];
+            if (!control.toggleOn || strcmp(control.action.type, "netHomeAuto") != 0 ||
+                control.action.host[0] == '\0') {
+                continue;
+            }
+            ClimateAutomationState& state = climateStateFor(control);
+            RemoteControl* setpointControl = matchingClimateControl(
+                page, control, "netHomeTemperature");
+            RemoteControl* fanControl = matchingClimateControl(
+                page, control, "netHomeFan", true);
+            const int targetTenths = constrain(
+                setpointControl != nullptr
+                    ? setpointControl->action.valueTenths
+                    : control.action.valueTenths,
+                160,
+                300);
+            const float target = targetTenths / 10.0f;
+            const float halfDeadband = control.action.deadbandTenths / 20.0f;
+            const bool heating = strcmp(control.action.text, "heat") == 0;
+            const bool humidityHigh = !heating &&
+                humidityPercent >= control.action.humidityThreshold;
+            const bool humidityReleased = heating ||
+                humidityPercent <= max<int>(control.action.humidityThreshold - 5, 35);
+            const bool requestOn = heating
+                ? temperatureC <= target - halfDeadband
+                : temperatureC >= target + halfDeadband || humidityHigh;
+            const bool requestOff = heating
+                ? temperatureC >= target + halfDeadband
+                : temperatureC <= target - halfDeadband && humidityReleased;
+            if (!requestOn && !requestOff && !state.outputKnown) {
+                continue;
+            }
+            const bool desiredOn = requestOn || (!requestOff && state.outputOn);
+            const int desiredFanSpeed = climateFanSpeed(
+                state,
+                heating,
+                desiredOn,
+                temperatureC,
+                target,
+                nowMinute);
+            const bool adjustmentIntervalElapsed = state.lastChangeMinute == 0 ||
+                (nowMinute >= state.lastChangeMinute &&
+                 nowMinute - state.lastChangeMinute >= control.action.minimumCycleMinutes);
+            if (state.outputKnown && state.outputOn == desiredOn) {
+                if (adjustmentIntervalElapsed &&
+                    setClimateOutput(control, desiredOn, targetTenths, desiredFanSpeed)) {
+                    state.fanSpeed = desiredOn ? desiredFanSpeed : 0;
+                    state.lastChangeMinute = nowMinute;
+                    if (desiredOn && fanControl != nullptr) {
+                        fanControl->action.value = desiredFanSpeed;
+                        persistRemoteSliderPositions(*remoteProfile);
+                        if (remoteVisible && remotePageIndex == pageIndex) {
+                            const uint8_t fanIndex = static_cast<uint8_t>(fanControl - page.controls);
+                            displayRemoteSliderValue(page, fanIndex, true);
+                            refreshReferencedTextBoxes(page, fanControl->id);
+                        }
+                    }
+                    Serial.printf(
+                        "Climate automation %s refreshed -> %s, fan %d%%\n",
+                        control.action.host,
+                        desiredOn ? "on" : "off",
+                        desiredFanSpeed);
+                }
+                continue;
+            }
+            if (!adjustmentIntervalElapsed) {
+                continue;
+            }
+            if (setClimateOutput(control, desiredOn, targetTenths, desiredFanSpeed)) {
+                state.outputKnown = true;
+                state.outputOn = desiredOn;
+                state.fanSpeed = desiredOn ? desiredFanSpeed : 0;
+                state.lastChangeMinute = nowMinute;
+                if (desiredOn && fanControl != nullptr) {
+                    fanControl->action.value = desiredFanSpeed;
+                    persistRemoteSliderPositions(*remoteProfile);
+                    if (remoteVisible && remotePageIndex == pageIndex) {
+                        const uint8_t fanIndex = static_cast<uint8_t>(fanControl - page.controls);
+                        displayRemoteSliderValue(page, fanIndex, true);
+                        refreshReferencedTextBoxes(page, fanControl->id);
+                    }
+                }
+                Serial.printf("Climate automation %s -> %s\n", control.action.host, desiredOn ? "on" : "off");
+            }
+        }
+    }
+}
+
+void sendNextPendingRemoteAction() {
+    if (pendingRemoteActionCount == 0 || WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+    const PendingRemoteAction pending = pendingRemoteActions[0];
+    RemoteControl control;
+    control.action = pending.action;
+    strlcpy(control.id, pending.controlId, sizeof(control.id));
+    control.slider = pending.slider;
+    control.toggle = pending.toggle;
+    control.toggleOn = pending.toggleOn;
+    const bool sent = dispatchRemoteAction(control, false);
+    if (!sent && WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+    Serial.printf("Processed queued remote action: %s (%s)\n",
+        pending.controlId, sent ? "sent" : "failed");
+    for (size_t index = 1; index < pendingRemoteActionCount; ++index) {
+        pendingRemoteActions[index - 1] = pendingRemoteActions[index];
+    }
+    --pendingRemoteActionCount;
+}
+
+void sendDeferredThermostatSetpoint() {
+    if (!deferredThermostatSetpointPending ||
+        static_cast<int32_t>(millis() - deferredThermostatSetpointDueAt) < 0) {
+        return;
+    }
+    const PendingRemoteAction pending = deferredThermostatSetpoint;
+    deferredThermostatSetpointPending = false;
+    RemoteControl control;
+    control.action = pending.action;
+    strlcpy(control.id, pending.controlId, sizeof(control.id));
+    control.slider = true;
+    dispatchRemoteAction(control);
+}
+
+void scheduleDeferredFanSpeed(const RemoteControl& control) {
+    deferredFanSpeed.action = control.action;
+    strlcpy(deferredFanSpeed.controlId, control.id, sizeof(deferredFanSpeed.controlId));
+    deferredFanSpeed.pageIndex = remotePageIndex;
+    deferredFanSpeed.slider = true;
+    deferredFanSpeed.toggle = false;
+    deferredFanSpeed.toggleOn = false;
+    deferredFanSpeedPending = true;
+    deferredFanSpeedDueAt = millis() + 350;
+}
+
+void sendDeferredFanSpeed() {
+    if (!deferredFanSpeedPending ||
+        static_cast<int32_t>(millis() - deferredFanSpeedDueAt) < 0) {
+        return;
+    }
+    const PendingRemoteAction pending = deferredFanSpeed;
+    deferredFanSpeedPending = false;
+    RemoteControl control;
+    control.action = pending.action;
+    strlcpy(control.id, pending.controlId, sizeof(control.id));
+    control.slider = true;
+    dispatchRemoteAction(control);
+}
+
+void disableMatchingClimateAuto(RemotePage& page, const RemoteControl& fan) {
+    for (uint8_t index = 0; index < page.controlCount; ++index) {
+        RemoteControl& automatic = page.controls[index];
+        if (!automatic.toggleOn || strcmp(automatic.action.type, "netHomeAuto") != 0 ||
+            strcmp(automatic.action.host, fan.action.host) != 0 ||
+            strcmp(automatic.action.computerId, fan.action.computerId) != 0) {
+            continue;
+        }
+        automatic.toggleOn = false;
+        resetClimateAutomationController(automatic);
+        displayRemoteSliderValue(page, index);
+        persistRemoteToggleStates(*remoteProfile);
+    }
+}
+
+void dispatchCapturedWakeTouch() {
+    if (!wakeTouchCaptured || slideshowEnabled || remoteProfile == nullptr ||
+        !remoteProfile->configured || remotePageIndex >= remoteProfile->pageCount) {
+        wakeTouchCaptured = false;
+        return;
+    }
+    wakeTouchCaptured = false;
+    const uint8_t wakePageIndex = remotePageIndex;
+    RemotePage& page = remoteProfile->pages[remotePageIndex];
+    for (uint8_t index = 0; index < page.controlCount; ++index) {
+        RemoteControlFrame frame;
+        if (!remoteControlFrame(page, index, frame) ||
+            wakeTouchX < frame.x || wakeTouchX >= frame.x + frame.width ||
+            wakeTouchY < frame.y || wakeTouchY >= frame.y + frame.height) {
+            continue;
+        }
+        RemoteControl& control = page.controls[index];
+        if (control.slider) {
+            const int sliderMinimum = strcmp(control.action.type, "netHomeTemperature") == 0
+                ? 16 : strcmp(control.action.type, "netHomeFan") == 0 ? 20 : 0;
+            const int sliderMaximum = strcmp(control.action.type, "netHomeTemperature") == 0
+                ? 30 : strcmp(control.action.type, "netHomeFan") == 0 ? 100 : 255;
+            const int sliderPosition = constrain(
+                (wakeTouchX - frame.x) * 255 / frame.width, 0, 255);
+            int nextValue = sliderMinimum +
+                (sliderPosition * (sliderMaximum - sliderMinimum) + 127) / 255;
+            if (strcmp(control.action.type, "netHomeFan") == 0) {
+                nextValue = constrain(((nextValue + 10) / 20) * 20, 20, 100);
+            }
+            const bool changed = nextValue != control.action.value;
+            control.action.value = nextValue;
+            displayRemoteSliderValue(page, index, true);
+            if (strcmp(control.action.type, "netHomeFan") == 0) {
+                if (changed) {
+                    disableMatchingClimateAuto(page, control);
+                    scheduleDeferredFanSpeed(control);
+                }
+                persistRemoteSliderPositions(*remoteProfile);
+                refreshReferencedTextBoxes(page, control.id);
+            } else if (dispatchRemoteAction(control)) {
+                persistRemoteSliderPositions(*remoteProfile);
+                refreshReferencedTextBoxes(page, control.id);
+            }
+        } else if (control.kind == 0 || (control.kind == 2 && control.tapBehavior == 2)) {
+            const bool accepted = dispatchRemoteAction(control);
+            if (accepted && control.toggle && remoteVisible &&
+                remotePageIndex == wakePageIndex) {
+                control.toggleOn = !control.toggleOn;
+                displayRemoteSliderValue(page, index, true);
+                persistRemoteToggleStates(*remoteProfile);
+                refreshReferencedTextBoxes(page, control.id);
+            }
+        }
+        return;
+    }
 }
 
 void navigateRemote(int direction) {
@@ -4223,11 +5415,17 @@ void selectLibraryItem(size_t index) {
     if (index >= libraryItemCount) {
         return;
     }
+    // An explicit media choice supersedes any temporary battery fallback.
+    batteryStillPrepared = false;
+    batterySavedAnimationPath[0] = '\0';
     char path[kMaximumPathBytes];
     strlcpy(path, libraryItems[index].path, sizeof(path));
     libraryVisible = false;
     recoveredFromRenderCrash = false;
     if (loadAnimation(path)) {
+        if (screensaverStyle == ScreensaverStyle::geometricSnake) {
+            screensaverActive = false;
+        }
         persistActiveSelection();
         displayCurrentFrame();
     } else {
@@ -4249,10 +5447,48 @@ void prepareNextSlideshowItem() {
     if (libraryItemCount == 0) {
         return;
     }
-    const size_t nextIndex = (activeLibraryIndex() + 1) % libraryItemCount;
-    if (loadAnimation(libraryItems[nextIndex].path)) {
-        persistActiveSelection();
+    for (size_t offset = 1; offset <= libraryItemCount; ++offset) {
+        const size_t nextIndex = (activeLibraryIndex() + offset) % libraryItemCount;
+        if (batteryImagesOnly && libraryItems[nextIndex].frameCount != 1) continue;
+        if (loadAnimation(libraryItems[nextIndex].path)) {
+            persistActiveSelection();
+            return;
+        }
     }
+}
+
+void displayBatteryStill(bool first) {
+    refreshLibrary();
+    const size_t start = first ? activeLibraryIndex() : batteryStillIndex + 1;
+    for (size_t offset = 0; offset < libraryItemCount; ++offset) {
+        const size_t index = (start + offset) % libraryItemCount;
+        if (libraryItems[index].frameCount != 1) continue;
+        if (!first && index == batteryStillIndex && stillFrameDisplayed) break;
+        if (loadAnimation(libraryItems[index].path)) {
+            batteryStillIndex = index;
+            displayCurrentFrame();
+            nextSlideshowAt = millis() + slideshowIntervalMs();
+            return;
+        }
+    }
+    if (first) {
+        if (animationReady) {
+            // No still available: render exactly one GIF frame, never animate.
+            currentFrame = 0;
+            displayedFrames = 0;
+            previousFrameValid = false;
+            displayCurrentFrame();
+            stillFrameDisplayed = true;
+        } else {
+            M5.Display.setEpdMode(epd_mode_t::epd_quality);
+            M5.Display.fillScreen(TFT_WHITE);
+            M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+            M5.Display.setFont(&fonts::FreeSans12pt7b);
+            M5.Display.setTextDatum(textdatum_t::top_left);
+            M5.Display.drawCenterString("Add a still image to the library", kDisplayWidth / 2, 450);
+        }
+    }
+    nextSlideshowAt = millis() + slideshowIntervalMs();
 }
 
 void showLibrary() {
@@ -4268,7 +5504,10 @@ void closeSlideshowMenu() {
         displaySettings();
     } else {
         deepSleepSuspended = false;
-        if (animationReady) {
+        if (slideshowEnabled && screensaverStyle == ScreensaverStyle::geometricSnake) {
+            screensaverActive = true;
+            nextSnakeFrameAt = millis();
+        } else if (animationReady) {
             stillFrameDisplayed = false;
             displayedFrames = 0;
             nextFrameAt = millis();
@@ -4340,16 +5579,22 @@ void handleSideButtons() {
             displayRemote();
         }
     } else if (screensaverActive && (previousPressed || menuPressed || nextPressed)) {
+        Serial.println("Screen saver wake: side button");
         lastRemoteActivityAt = now;
-        displayRemote();
+        screensaverActive = false;
+        if (remoteProfile != nullptr && remoteProfile->configured) {
+            displayRemote();
+        } else {
+            displaySlideshowMenu();
+        }
     } else if (wifiModeVisible) {
         if (menuPressed) {
             closeWifiMode();
         }
     } else if (slideshowMenuVisible) {
-        if (previousPressed) {
+        if (previousPressed && screensaverStyle == ScreensaverStyle::media) {
             adjustSlideshowInterval(-1);
-        } else if (nextPressed) {
+        } else if (nextPressed && screensaverStyle == ScreensaverStyle::media) {
             adjustSlideshowInterval(1);
         } else if (menuPressed) {
             closeSlideshowMenu();
@@ -4384,22 +5629,44 @@ void handleTouch() {
         return;
     }
 
-    if (screensaverActive && touchInterrupted &&
-        remoteProfile != nullptr && remoteProfile->configured) {
-        lastRemoteActivityAt = millis();
-        displayRemote();
+    if (suppressHeldWakeTouch) {
+        if (M5.Touch.getCount() == 0) {
+            suppressHeldWakeTouch = false;
+        }
         return;
     }
 
     if (M5.Touch.getCount() == 0) {
+        // GT911 INT signals available controller data, not necessarily a
+        // finger. Empty/release reports must never dismiss the screen saver.
+        // M5.update() continues polling, including if its touch read was
+        // throttled on the iteration that received this interrupt.
+        if (screensaverActive && touchInterrupted) {
+            static uint32_t lastIgnoredTouchLogAt = 0;
+            if (millis() - lastIgnoredTouchLogAt >= 5000) {
+                Serial.println("Screen saver: ignored touch IRQ without contact");
+                lastIgnoredTouchLogAt = millis();
+            }
+        }
         return;
     }
     const auto touch = M5.Touch.getDetail();
 
-    if (screensaverActive && remoteProfile != nullptr && remoteProfile->configured) {
-        if (touch.wasPressed() || touch.wasClicked()) {
+    if (screensaverActive) {
+        if ((touch.wasPressed() || touch.wasClicked()) &&
+            touch.x >= 0 && touch.x < kDisplayWidth &&
+            touch.y >= 0 && touch.y < kDisplayHeight) {
+            Serial.println("Screen saver wake: confirmed touch");
             lastRemoteActivityAt = millis();
-            displayRemote();
+            screensaverActive = false;
+            // Consume both the wake press and its release; neither should
+            // activate controls or open Settings on the newly restored remote.
+            suppressHeldWakeTouch = true;
+            if (remoteProfile != nullptr && remoteProfile->configured) {
+                displayRemote();
+            } else {
+                displaySlideshowMenu();
+            }
         }
         return;
     }
@@ -4435,12 +5702,31 @@ void handleTouch() {
                     remotePageIndex, hitControl);
                 RemoteControl& control = page.controls[hitControl];
                 if (control.slider) {
-                    control.action.value = constrain(
+                    const int sliderMinimum = strcmp(control.action.type, "netHomeTemperature") == 0
+                        ? 16 : strcmp(control.action.type, "netHomeFan") == 0 ? 20 : 0;
+                    const int sliderMaximum = strcmp(control.action.type, "netHomeTemperature") == 0
+                        ? 30 : strcmp(control.action.type, "netHomeFan") == 0 ? 100 : 255;
+                    const int sliderPosition = constrain(
                         (touch.x - hitFrame.x) * 255 / hitFrame.width, 0, 255);
+                    int nextValue = sliderMinimum +
+                        (sliderPosition * (sliderMaximum - sliderMinimum) + 127) / 255;
+                    if (strcmp(control.action.type, "netHomeFan") == 0) {
+                        nextValue = constrain(((nextValue + 10) / 20) * 20, 20, 100);
+                    }
+                    const bool changed = nextValue != control.action.value;
+                    control.action.value = nextValue;
                     displayRemoteSliderValue(page, hitControl);
                     activeRemoteSliderRenderedAt = millis();
-                    dispatchRemoteAction(control);
-                    activeRemoteSliderSentAt = millis();
+                    if (strcmp(control.action.type, "netHomeFan") == 0) {
+                        if (changed) {
+                            disableMatchingClimateAuto(page, control);
+                            scheduleDeferredFanSpeed(control);
+                            refreshReferencedTextBoxes(page, control.id);
+                        }
+                    } else {
+                        dispatchRemoteAction(control);
+                        activeRemoteSliderSentAt = millis();
+                    }
                     activeRemoteSliderSentValue = control.action.value;
                 } else if (control.kind == 0) {
                     displayRemoteControlFeedback(hitControl, true);
@@ -4461,16 +5747,32 @@ void handleTouch() {
             if (touch.isPressed() && control.slider) {
                 RemoteControlFrame sliderFrame;
                 if (remoteControlFrame(page, activeRemoteControlIndex, sliderFrame)) {
-                    const int nextValue = constrain(
+                    const int sliderMinimum = strcmp(control.action.type, "netHomeTemperature") == 0
+                        ? 16 : strcmp(control.action.type, "netHomeFan") == 0 ? 20 : 0;
+                    const int sliderMaximum = strcmp(control.action.type, "netHomeTemperature") == 0
+                        ? 30 : strcmp(control.action.type, "netHomeFan") == 0 ? 100 : 255;
+                    const int sliderPosition = constrain(
                         (touch.x - sliderFrame.x) * 255 / sliderFrame.width, 0, 255);
+                    int nextValue = sliderMinimum +
+                        (sliderPosition * (sliderMaximum - sliderMinimum) + 127) / 255;
+                    if (strcmp(control.action.type, "netHomeFan") == 0) {
+                        nextValue = constrain(((nextValue + 10) / 20) * 20, 20, 100);
+                    }
                     if (nextValue != control.action.value) {
                         control.action.value = nextValue;
                         const uint32_t now = millis();
-                        if (now - activeRemoteSliderRenderedAt >= 120) {
+                        if (now - activeRemoteSliderRenderedAt >= 80) {
                             displayRemoteSliderValue(page, activeRemoteControlIndex);
                             activeRemoteSliderRenderedAt = millis();
+                            if (strcmp(control.action.type, "netHomeFan") == 0) {
+                                refreshReferencedTextBoxes(page, control.id);
+                            }
                         }
-                        if (now - activeRemoteSliderSentAt >= 180) {
+                        if (strcmp(control.action.type, "netHomeFan") == 0) {
+                            disableMatchingClimateAuto(page, control);
+                            scheduleDeferredFanSpeed(control);
+                            activeRemoteSliderSentValue = control.action.value;
+                        } else if (now - activeRemoteSliderSentAt >= 180) {
                             dispatchRemoteAction(control);
                             activeRemoteSliderSentAt = millis();
                             activeRemoteSliderSentValue = control.action.value;
@@ -4509,7 +5811,10 @@ void handleTouch() {
                 }
                 if (control.slider) {
                     displayRemoteSliderValue(page, releasedControlIndex, true);
-                    if (control.action.value != activeRemoteSliderSentValue) {
+                    refreshReferencedTextBoxes(page, control.id);
+                    if (strcmp(control.action.type, "netHomeFan") == 0) {
+                        scheduleDeferredFanSpeed(control);
+                    } else if (control.action.value != activeRemoteSliderSentValue) {
                         dispatchRemoteAction(control);
                     }
                     persistRemoteSliderPositions(*remoteProfile);
@@ -4587,18 +5892,40 @@ void handleTouch() {
             slideshowEnabled = !slideshowEnabled;
             persistSettings();
             displaySlideshowMenu();
-        } else if (touch.y >= 250 && touch.y < 354) {
+        } else if (slideshowEnabled && screensaverStyle == ScreensaverStyle::media &&
+               touch.y >= 250 && touch.y < 354) {
             slideshowDeepSleep = !slideshowDeepSleep;
             persistSettings();
             displaySlideshowMenu();
-        } else if (touch.y >= 370 && touch.y < 474 && touch.x >= 250 && touch.x < 350) {
+        } else if (!slideshowEnabled && touch.y >= 250 && touch.y < 354 &&
+                   touch.x >= 250 && touch.x < 350) {
             adjustScreensaverDelay(-1);
-        } else if (touch.y >= 370 && touch.y < 474 && touch.x >= 430) {
+        } else if (!slideshowEnabled && touch.y >= 250 && touch.y < 354 && touch.x >= 430) {
             adjustScreensaverDelay(1);
-        } else if (touch.y >= 490 && touch.y < 594 && touch.x >= 250 && touch.x < 350) {
+        } else if (slideshowEnabled && touch.y >= 370 && touch.y < 474 &&
+                   touch.x >= 250 && touch.x < 350) {
+            adjustScreensaverDelay(-1);
+        } else if (slideshowEnabled && touch.y >= 370 && touch.y < 474 && touch.x >= 430) {
+            adjustScreensaverDelay(1);
+        } else if (slideshowEnabled && screensaverStyle == ScreensaverStyle::media &&
+                   touch.y >= 490 && touch.y < 594 &&
+                   touch.x >= 250 && touch.x < 350) {
             adjustSlideshowInterval(-1);
-        } else if (touch.y >= 490 && touch.y < 594 && touch.x >= 430) {
+        } else if (slideshowEnabled && screensaverStyle == ScreensaverStyle::media &&
+                   touch.y >= 490 && touch.y < 594 && touch.x >= 430) {
             adjustSlideshowInterval(1);
+        } else if (touch.y >= 610 && touch.y < 714 && touch.x >= 32 && touch.x < 508) {
+            screensaverStyle = screensaverStyle == ScreensaverStyle::media
+                ? ScreensaverStyle::geometricSnake : ScreensaverStyle::media;
+            slideshowSleepPending = false;
+            persistSettings();
+            displaySlideshowMenu();
+        } else if (touch.y >= 730 && touch.y < 834 && touch.x >= 32 && touch.x < 508) {
+            imagesOnlyOnBattery = !imagesOnlyOnBattery;
+            batteryPolicySampled = false;
+            updateScreensaverBatteryPolicy();
+            persistSettings();
+            displaySlideshowMenu();
         }
         return;
     }
@@ -4706,6 +6033,117 @@ bool changedFrameBounds(int32_t& x, int32_t& y, int32_t& width, int32_t& height)
     return true;
 }
 
+void enterM5PaperDeepSleep(uint64_t microseconds) {
+    M5.Display.waitDisplay();
+    if (esp_sleep_enable_ext1_wakeup(
+            1ULL << kMenuButtonPin, ESP_EXT1_WAKEUP_ALL_LOW) != ESP_OK) {
+        Serial.println("Button wake could not be armed; sleep cancelled");
+        lastRemoteActivityAt = millis();
+        return;
+    }
+    M5.Power.deepSleep(microseconds, true);
+    lastRemoteActivityAt = millis();
+}
+
+void displayGeometricSnake() {
+    if (static_cast<int32_t>(millis() - nextSnakeFrameAt) < 0) return;
+    // Run at the actual panel rate, not a guessed FPS cap. Polling is throttled
+    // because displayBusy itself performs a synchronous SPI register read.
+    if (M5.Display.displayBusy()) {
+        nextSnakeFrameAt = millis() + 2;
+        return;
+    }
+    if (snakeCanvas.getBuffer() == nullptr) {
+        // Internal DRAM is shared with Wi-Fi/BLE; put the bounded route state
+        // in PSRAM alongside the canvas, never on the task stack or in BSS.
+        void* storage = heap_caps_malloc(sizeof(geometric_snake::Scene),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (storage != nullptr) snakeScene = new (storage) geometric_snake::Scene;
+        snakeCanvas.setColorDepth(1);
+        if (snakeScene == nullptr ||
+            snakeCanvas.createSprite(kDisplayWidth, kDisplayHeight) == nullptr) {
+            if (snakeScene != nullptr) {
+                snakeScene->~Scene();
+                heap_caps_free(snakeScene);
+                snakeScene = nullptr;
+            }
+            Serial.println("Geometric Snake PSRAM allocation failed");
+            screensaverActive = false;
+            lastRemoteActivityAt = millis();
+            if (remoteProfile != nullptr && remoteProfile->configured) {
+                displayRemote();
+            } else {
+                displaySlideshowMenu();
+            }
+            return;
+        }
+        snakeFrames = 0;
+        snakeStatsStartedAt = millis();
+        snakeStatsFrames = snakeStatsRenderUs = snakeStatsTransferUs = snakeStatsPixels = 0;
+        snakeScene->reset(esp_random(), kDisplayWidth, kDisplayHeight);
+        Serial.printf("Geometric Snake: %d lines on %d honeycomb vertices\n",
+            snakeScene->snakeCount, snakeScene->nodeCount);
+    }
+
+    const uint32_t renderStartedUs = micros();
+    renderInProgress = kRenderMarker;
+    geometric_snake::render(snakeCanvas, *snakeScene);
+    const uint32_t renderFinishedUs = micros();
+    M5.Display.clearClipRect();
+    const bool cleanRefresh = snakeFrames % kSnakeCleanRefreshInterval == 0;
+    if (cleanRefresh) {
+        M5.Display.setEpdMode(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        M5.Display.waitDisplay();
+    }
+    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+    const auto* pixels = static_cast<const uint8_t*>(snakeCanvas.getBuffer());
+    uint32_t transferredPixels = 0;
+    if (cleanRefresh || previousFrameBuffer == nullptr) {
+        snakeCanvas.pushSprite(0, 0);
+        transferredPixels = kDisplayWidth * kDisplayHeight;
+    } else {
+        // Nested sprite pushes only upload these clipped areas. The outer
+        // transaction submits ONE display refresh, not one flash per rectangle.
+        M5.Display.startWrite();
+        monochrome_damage::scan(pixels, previousFrameBuffer, kDisplayWidth, kDisplayHeight,
+            [&](const monochrome_damage::Rect& rect) {
+                M5.Display.setClipRect(rect.x, rect.y, rect.width, rect.height);
+                snakeCanvas.pushSprite(0, 0);
+                transferredPixels += rect.width * rect.height;
+            });
+        M5.Display.clearClipRect();
+        M5.Display.endWrite();
+    }
+    const uint32_t transferFinishedUs = micros();
+    // Reuse the existing media comparison buffer; media playback is exclusive
+    // with the saver, and its validity must remain false after borrowing it.
+    if (previousFrameBuffer != nullptr) memcpy(previousFrameBuffer, pixels, kFrameBytes);
+    previousFrameValid = false;
+    renderInProgress = 0;
+    snakeScene->advance();
+    // Waiting snakes can produce an unchanged frame. Do not count that as a
+    // panel refresh or accelerate cleaning flashes when the layout gridlocks.
+    if (transferredPixels > 0) ++snakeFrames;
+    nextSnakeFrameAt = millis() + (transferredPixels == 0 ? 200 : 0);
+    if (!cleanRefresh && transferredPixels > 0) {
+        ++snakeStatsFrames;
+        snakeStatsRenderUs += renderFinishedUs - renderStartedUs;
+        snakeStatsTransferUs += transferFinishedUs - renderFinishedUs;
+        snakeStatsPixels += transferredPixels;
+    }
+    const uint32_t elapsed = millis() - snakeStatsStartedAt;
+    if (elapsed >= 5000 && snakeStatsFrames > 0) {
+        Serial.printf("Snake: %.1f fps, render %.1fms, transfer %.1fms, uploaded %.1f%%\n",
+            snakeStatsFrames * 1000.0f / elapsed,
+            snakeStatsRenderUs / (snakeStatsFrames * 1000.0f),
+            snakeStatsTransferUs / (snakeStatsFrames * 1000.0f),
+            snakeStatsPixels * 100.0f / (snakeStatsFrames * kDisplayWidth * kDisplayHeight));
+        snakeStatsStartedAt = millis();
+        snakeStatsFrames = snakeStatsRenderUs = snakeStatsTransferUs = snakeStatsPixels = 0;
+    }
+}
+
 void displayCurrentFrame() {
     if (!animationReady || upload.active) {
         return;
@@ -4793,7 +6231,7 @@ void displayCurrentFrame() {
     const uint16_t duration = frameDurations[currentFrame];
     currentFrame = (currentFrame + 1) % animationHeader.frameCount;
     ++displayedFrames;
-    stillFrameDisplayed = animationHeader.frameCount == 1;
+    stillFrameDisplayed = animationHeader.frameCount == 1 || (screensaverActive && batteryImagesOnly);
     nextFrameAt += duration;
     const uint32_t now = millis();
     while (animationHeader.frameCount > 1 &&
@@ -4802,14 +6240,20 @@ void displayCurrentFrame() {
         currentFrame = (currentFrame + 1) % animationHeader.frameCount;
     }
 
-    if ((remoteProfile == nullptr || !remoteProfile->configured) &&
-        slideshowEnabled && slideshowDeepSleep && !deepSleepSuspended &&
+    if (slideshowEnabled && screensaverStyle == ScreensaverStyle::media &&
+        slideshowDeepSleep && !deepSleepSuspended &&
         animationHeader.frameCount == 1) {
+        if (deviceConnected) {
+            slideshowSleepPending = true;
+            return;
+        }
+        slideshowSleepPending = false;
         Serial.println("Sleeping until the next slideshow image");
         Serial.flush();
-        esp_sleep_enable_timer_wakeup(slideshowIntervalUs());
-        esp_sleep_enable_ext1_wakeup(1ULL << kMenuButtonPin, ESP_EXT1_WAKEUP_ALL_LOW);
-        esp_deep_sleep_start();
+        const uint64_t wakeInterval = hasEnabledClimateAutomation()
+            ? min<uint64_t>(slideshowIntervalUs(), kClimateWakeIntervalUs)
+            : slideshowIntervalUs();
+        enterM5PaperDeepSleep(backgroundWakeIntervalUs(wakeInterval));
     }
 }
 
@@ -4817,6 +6261,34 @@ void displayCurrentFrame() {
 
 void IRAM_ATTR handleTouchInterrupt() {
     touchInterruptPending = true;
+}
+
+bool captureLatchedWakeTouch(int32_t& rawX, int32_t& rawY) {
+    constexpr uint8_t addresses[] = {0x14, 0x5D};
+    Wire1.begin(21, 22, 400000);
+    for (const uint8_t address : addresses) {
+        Wire1.beginTransmission(address);
+        Wire1.write(0x81);
+        Wire1.write(0x4E);
+        if (Wire1.endTransmission(false) != 0 ||
+            Wire1.requestFrom(
+                static_cast<uint16_t>(address), static_cast<size_t>(9), true) != 9) {
+            continue;
+        }
+        const uint8_t status = Wire1.read();
+        uint8_t point[8];
+        for (uint8_t index = 0; index < sizeof(point); ++index) {
+            point[index] = Wire1.read();
+        }
+        if ((status & 0x80) != 0 && (status & 0x0F) != 0) {
+            rawX = static_cast<int32_t>(point[1] | (point[2] << 8));
+            rawY = static_cast<int32_t>(point[3] | (point[4] << 8));
+            Wire1.end();
+            return true;
+        }
+    }
+    Wire1.end();
+    return false;
 }
 
 void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -4873,14 +6345,44 @@ void setup() {
     }
     WiFi.onEvent(handleWifiEvent);
     wakeupCause = esp_sleep_get_wakeup_cause();
+    int32_t wakeTouchRawX = 0;
+    int32_t wakeTouchRawY = 0;
+    if (wakeupCause == ESP_SLEEP_WAKEUP_EXT0) {
+        wakeTouchCaptured = captureLatchedWakeTouch(wakeTouchRawX, wakeTouchRawY);
+    }
     recoveredFromRenderCrash = renderInProgress == kRenderMarker;
     renderInProgress = 0;
     Serial.printf("Reset reason: %d, render recovery: %s\n",
         static_cast<int>(esp_reset_reason()), recoveredFromRenderCrash ? "yes" : "no");
 
     auto config = M5.config();
+    config.output_power = false;
+    config.clear_display = false;
     M5.begin(config);
+    gpio_hold_dis(kMainPowerPin);
+    gpio_deep_sleep_hold_dis();
+    climateReadingAvailable = readSht30(climateTemperatureC, climateHumidityPercent);
+    if (climateReadingAvailable) {
+        Serial.printf(
+            "SHT30 ready: %.2f C, %.1f%% humidity\n",
+            climateTemperatureC,
+            climateHumidityPercent);
+    } else {
+        Serial.println("SHT30 unavailable");
+    }
     M5.Display.setRotation(0);
+    if (wakeTouchCaptured) {
+        m5gfx::touch_point_t wakePoint = {};
+        wakePoint.x = wakeTouchRawX;
+        wakePoint.y = wakeTouchRawY;
+        M5.Display.convertRawXY(&wakePoint);
+        wakeTouchX = wakePoint.x;
+        wakeTouchY = wakePoint.y;
+    }
+    if (wakeupCause == ESP_SLEEP_WAKEUP_EXT0) {
+        M5.update();
+        suppressHeldWakeTouch = M5.Touch.getCount() > 0;
+    }
     pinMode(36, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(36), handleTouchInterrupt, FALLING);
     Serial.printf("Display: %d x %d\n", M5.Display.width(), M5.Display.height());
@@ -4910,6 +6412,8 @@ void setup() {
         loadRemoteProfile();
     }
 
+    updateScreensaverBatteryPolicy();
+
     frameBuffer = static_cast<uint8_t*>(heap_caps_malloc(
         kGrayscaleFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (frameBuffer == nullptr) {
@@ -4924,8 +6428,9 @@ void setup() {
 
     if (frameBuffer != nullptr && previousFrameBuffer != nullptr) {
         loadAnimation();
-        refreshLibrary();
-        if (wakeupCause == ESP_SLEEP_WAKEUP_TIMER && slideshowEnabled) {
+        if (wakeupCause == ESP_SLEEP_WAKEUP_TIMER && slideshowEnabled &&
+            screensaverStyle == ScreensaverStyle::media) {
+            refreshLibrary();
             prepareNextSlideshowItem();
         }
     }
@@ -4937,21 +6442,40 @@ void setup() {
         menuButton.pressed = true;
         menuButton.changedAt = millis();
     }
-    startBluetooth();
-    if (remoteProfile != nullptr && remoteProfile->configured) {
+    const bool resumeSleepingSlideshow =
+        wakeupCause == ESP_SLEEP_WAKEUP_TIMER && slideshowEnabled &&
+        screensaverStyle == ScreensaverStyle::media && slideshowDeepSleep && animationReady;
+    if (resumeSleepingSlideshow) {
+        screensaverActive = remoteProfile != nullptr && remoteProfile->configured;
+        stillFrameDisplayed = false;
+        displayedFrames = 0;
+        nextFrameAt = millis();
+        nextSlideshowAt = millis() + slideshowIntervalMs();
+    }
+    if (resumeSleepingSlideshow) {
+        Serial.println("Resuming sleeping slideshow");
+    } else if (remoteProfile != nullptr && remoteProfile->configured) {
         lastRemoteActivityAt = millis();
-        displayRemote();
         connectHomeWifi();
+        displayRemote();
+        dispatchCapturedWakeTouch();
+        startBluetooth();
     } else if (recoveredFromRenderCrash && sdReady) {
+        startBluetooth();
         libraryPage = 0;
         displayLibrary();
-    } else if (wakeupCause == ESP_SLEEP_WAKEUP_EXT1 && sdReady) {
+    } else if ((wakeupCause == ESP_SLEEP_WAKEUP_EXT0 ||
+                wakeupCause == ESP_SLEEP_WAKEUP_EXT1) && sdReady) {
+        startBluetooth();
         displaySlideshowMenu();
+    } else {
+        startBluetooth();
     }
 }
 
 void loop() {
     M5.update();
+    updateScreensaverBatteryPolicy();
     handleSideButtons();
     handleTouch();
     if (wifiScanRequested && !upload.active && !remoteProfileUpload.active) {
@@ -4965,6 +6489,15 @@ void loop() {
     if (wifiServerRunning) {
         wifiServer.handleClient();
     }
+    if (libraryRefreshRequested && !upload.active && !remoteProfileUpload.active) {
+        libraryRefreshRequested = false;
+        notifyLibraryCount();
+    }
+    if (requestedLibrarySelection >= 0 && !upload.active && !remoteProfileUpload.active) {
+        const uint8_t selection = static_cast<uint8_t>(requestedLibrarySelection);
+        requestedLibrarySelection = -1;
+        selectLibraryItem(selection);
+    }
     if (bluetoothSuspendRequested && !upload.active &&
         millis() - bluetoothSuspendRequestedAt >= 250) {
         suspendBluetoothForWifiUpload();
@@ -4972,6 +6505,7 @@ void loop() {
     if (bluetoothResumeRequested && !upload.active) {
         resumeBluetoothAfterWifiUpload();
     }
+    ensureBluetoothAdvertising();
     if (bluetoothSuspendedForWifiUpload && !upload.active &&
         millis() - bluetoothSuspendedAt >= 10000) {
         bluetoothResumeRequested = true;
@@ -4986,6 +6520,9 @@ void loop() {
             }
         }
     }
+    sendDeferredThermostatSetpoint();
+    sendDeferredFanSpeed();
+    sendNextPendingRemoteAction();
     if (homeWifiStatusChanged) {
         homeWifiStatusChanged = false;
         if (homeWifiState == 2) {
@@ -5014,6 +6551,8 @@ void loop() {
         refreshRemoteBatteryIndicator();
     }
     pollRemoteTextBoxes();
+    pollScheduledRemoteActions();
+    pollClimateAutomation();
     if (homeWifiAuthenticationRetryPending &&
         millis() - homeWifiAuthenticationRetryRequestedAt >= kHomeWifiAuthenticationRetryDelayMs) {
         homeWifiAuthenticationRetryPending = false;
@@ -5065,22 +6604,94 @@ void loop() {
     }
 
     if (!upload.active && !remoteProfileUpload.active && remoteVisible &&
-        remoteProfile != nullptr && slideshowEnabled && animationReady &&
+        remoteProfile != nullptr && !slideshowEnabled &&
+        !deviceConnected &&
+        pendingRemoteActionCount == 0 && !deferredThermostatSetpointPending &&
+        !deferredFanSpeedPending &&
+        !homeWifiConnecting &&
+        millis() - lastRemoteActivityAt >= screensaverDelayMs()) {
+        Serial.println("Sleeping with remote visible");
+        Serial.flush();
+        const uint64_t wakeInterval = hasEnabledClimateAutomation()
+            ? kClimateWakeIntervalUs
+            : M5.Power.sleep_no_timer;
+        enterM5PaperDeepSleep(backgroundWakeIntervalUs(wakeInterval));
+    }
+
+    if (slideshowSleepPending && !deviceConnected && !upload.active &&
+        !remoteProfileUpload.active && slideshowEnabled && slideshowDeepSleep &&
+        screensaverStyle == ScreensaverStyle::media &&
+        !deepSleepSuspended && animationReady && stillFrameDisplayed &&
+        !remoteVisible && !settingsVisible && !libraryVisible &&
+        !slideshowMenuVisible && !wifiModeVisible) {
+        slideshowSleepPending = false;
+        Serial.println("Sleeping after Bluetooth disconnect");
+        Serial.flush();
+        const uint64_t wakeInterval = hasEnabledClimateAutomation()
+            ? min<uint64_t>(slideshowIntervalUs(), kClimateWakeIntervalUs)
+            : slideshowIntervalUs();
+        enterM5PaperDeepSleep(backgroundWakeIntervalUs(wakeInterval));
+    }
+
+    if (!upload.active && !remoteProfileUpload.active && remoteVisible &&
+        remoteProfile != nullptr && slideshowEnabled &&
+        (screensaverStyle == ScreensaverStyle::geometricSnake || animationReady) &&
         millis() - lastRemoteActivityAt >= screensaverDelayMs()) {
         remoteVisible = false;
         screensaverActive = true;
+        slideshowSleepPending = false;
+        nextSnakeFrameAt = millis();
         stillFrameDisplayed = false;
         displayedFrames = 0;
         nextFrameAt = millis();
         nextSlideshowAt = millis() + slideshowIntervalMs();
     }
 
-    if (!upload.active && !remoteProfileUpload.active && !remoteVisible &&
+    const bool batteryStillActive = screensaverActive && batteryImagesOnly &&
+        !upload.active && !remoteProfileUpload.active && !remoteVisible &&
+        !settingsVisible && !libraryVisible && !slideshowMenuVisible && !wifiModeVisible;
+    if (!batteryStillActive && batteryStillPrepared) {
+        // Restore the user's media selection after the temporary battery fallback.
+        if (!upload.active && !remoteProfileUpload.active && batterySavedAnimationPath[0] != '\0') {
+            loadAnimation(batterySavedAnimationPath);
+        }
+        batterySavedAnimationPath[0] = '\0';
+        batteryStillPrepared = false;
+        previousFrameValid = false;
+    }
+    const bool snakePlaybackActive = screensaverActive && !batteryImagesOnly &&
+        screensaverStyle == ScreensaverStyle::geometricSnake &&
+        !upload.active && !remoteProfileUpload.active && !remoteVisible &&
+        !settingsVisible && !libraryVisible && !slideshowMenuVisible && !wifiModeVisible;
+    if (!snakePlaybackActive && snakeCanvas.getBuffer() != nullptr) {
+        snakeCanvas.deleteSprite();
+        if (snakeScene != nullptr) {
+            snakeScene->~Scene();
+            heap_caps_free(snakeScene);
+            snakeScene = nullptr;
+        }
+        snakeFrames = 0;
+    }
+
+    if (batteryStillActive) {
+        if (!batteryStillPrepared) {
+            strlcpy(batterySavedAnimationPath, activeAnimationPath, sizeof(batterySavedAnimationPath));
+            batteryStillPrepared = true;
+            previousFrameValid = false;
+            slideshowSleepPending = false;
+            displayBatteryStill(true);
+        } else if (static_cast<int32_t>(millis() - nextSlideshowAt) >= 0) {
+            displayBatteryStill(false);
+        }
+    } else if (snakePlaybackActive) {
+        displayGeometricSnake();
+    } else if (!upload.active && !remoteProfileUpload.active && !remoteVisible &&
         !settingsVisible && !libraryVisible && !slideshowMenuVisible && !wifiModeVisible &&
         !animationReady && splashPending) {
         displayDisconnectedSplash();
     } else if (!upload.active && !remoteProfileUpload.active && !remoteVisible &&
         !settingsVisible && !libraryVisible && !slideshowMenuVisible && !wifiModeVisible &&
+        screensaverStyle == ScreensaverStyle::media &&
         (slideshowEnabled || screensaverActive) && animationReady &&
         static_cast<int32_t>(millis() - nextSlideshowAt) >= 0) {
         navigatePlayback(1);
@@ -5090,5 +6701,10 @@ void loop() {
         static_cast<int32_t>(millis() - nextFrameAt) >= 0) {
         displayCurrentFrame();
     }
-    delay(1);
+    const bool animatedPlaybackActive = !batteryStillActive && !remoteVisible && animationReady &&
+        animationHeader.frameCount > 1 && !stillFrameDisplayed;
+    const bool latencySensitiveWork = upload.active || remoteProfileUpload.active ||
+        activeRemoteControlIndex >= 0 || animatedPlaybackActive || snakePlaybackActive || homeWifiConnecting ||
+        bluetoothSuspendRequested || bluetoothResumeRequested;
+    delay(latencySensitiveWork ? 1 : kIdleLoopDelayMs);
 }

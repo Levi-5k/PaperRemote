@@ -207,6 +207,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private var wifiJoinTask: Task<Void, Never>?
     private var wifiScanTimeout: Task<Void, Never>?
     private var expectedDeviceMediaCount = 0
+    private var pendingDeviceMedia: [DeviceMedia] = []
     private var expectedWiFiNetworkCount = 0
     private var wifiSSID: String?
     private var failedWiFiProbes = 0
@@ -408,7 +409,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
               let peripheral,
               let controlCharacteristic else { return }
         deviceLibraryTimeout?.cancel()
-        deviceMedia = []
+          pendingDeviceMedia = []
         expectedDeviceMediaCount = 0
         deviceLibraryError = nil
         isLoadingDeviceLibrary = true
@@ -910,6 +911,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
                 UserDefaults.standard.removeObject(forKey: Self.savedPeripheralKey)
             }
             self.centralManager.cancelPeripheralConnection(peripheral)
+            self.resetConnection()
+            self.beginScanning()
         }
     }
 
@@ -1178,6 +1181,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         wifiScanTimeout?.cancel()
         expectedDeviceMediaCount = Int(data[1])
         if expectedDeviceMediaCount == 0 {
+            deviceMedia = []
             isLoadingDeviceLibrary = false
             return
         }
@@ -1210,23 +1214,25 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     private func handleDeviceLibraryItem(_ data: Data) {
         guard data.count >= 5,
-                            Int(data[1]) == deviceMedia.count else {
+              Int(data[1]) == pendingDeviceMedia.count else {
             failDeviceLibrary("The M5Paper returned an invalid library item")
             return
         }
         deviceLibraryTimeout?.cancel()
         let frameCount = UInt16(data[3]) | UInt16(data[4]) << 8
         let name = String(bytes: data.dropFirst(5), encoding: .utf8) ?? "Untitled"
-        deviceMedia.append(DeviceMedia(
+        pendingDeviceMedia.append(DeviceMedia(
             index: data[1],
             packageID: nil,
             name: name.isEmpty ? "Untitled" : name,
             frameCount: frameCount,
             isActive: data[2] == 1
         ))
-        if deviceMedia.count < expectedDeviceMediaCount {
-            requestDeviceLibraryItem(at: UInt8(deviceMedia.count))
+        if pendingDeviceMedia.count < expectedDeviceMediaCount {
+            requestDeviceLibraryItem(at: UInt8(pendingDeviceMedia.count))
         } else {
+            deviceMedia = pendingDeviceMedia
+            pendingDeviceMedia = []
             isLoadingDeviceLibrary = false
         }
     }
@@ -1263,6 +1269,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     private func failDeviceLibrary(_ message: String) {
         deviceLibraryTimeout?.cancel()
+        pendingDeviceMedia = []
         isLoadingDeviceLibrary = false
         deletingDeviceMediaIndex = nil
         deviceLibraryError = message
@@ -1303,11 +1310,11 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         isAwaitingCompletion = false
         isTransferring = false
         transferMediaID = nil
-        deviceMedia = []
         isLoadingDeviceLibrary = false
         deletingDeviceMediaIndex = nil
         deviceLibraryError = nil
         expectedDeviceMediaCount = 0
+        pendingDeviceMedia = []
         isScanningWiFiNetworks = false
         expectedWiFiNetworkCount = 0
     }
@@ -1354,6 +1361,7 @@ extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
         error: Error?
     ) {
         MainActor.assumeIsolated {
+            guard self.peripheral === peripheral else { return }
             connectionTimeout?.cancel()
             resetConnection()
             beginScanning()
@@ -1366,6 +1374,7 @@ extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
         error: Error?
     ) {
         MainActor.assumeIsolated {
+            guard self.peripheral === peripheral else { return }
             connectionTimeout?.cancel()
             if isBluetoothSuspendedForWiFiTransfer {
                 self.peripheral = nil

@@ -239,6 +239,7 @@ private struct RemoteEditorView: View {
                     page: page,
                     pageIndex: store.selectedPageIndex ?? 0,
                     pageCount: store.profile.pages.count,
+                    temperatureUnit: store.profile.temperatureUnit,
                     selectedControlID: store.selectedControlID,
                     onSelect: { id in
                         store.selectedControlID = id
@@ -274,6 +275,7 @@ private struct RemoteEditorView: View {
                     control: binding,
                     pages: store.profile.pages,
                     computers: store.profile.computers,
+                    temperatureUnit: store.profile.temperatureUnit,
                     discovery: discovery,
                     canUseButtonLayout: store.canChangeSelectedControl(to: .button),
                     canUseTextBoxLayout: store.canChangeSelectedControl(to: .textBox),
@@ -387,6 +389,7 @@ private struct ControlInspector: View {
     @Binding var control: RemoteControl
     let pages: [RemotePage]
     let computers: [RemoteComputer]
+    let temperatureUnit: RemoteTemperatureUnit
     @ObservedObject var discovery: WLEDDiscovery
     let canUseButtonLayout: Bool
     let canUseTextBoxLayout: Bool
@@ -524,7 +527,7 @@ private struct ControlInspector: View {
                     Picker("", selection: referencedControlBinding) {
                         Text("Choose control").tag("")
                         ForEach(referenceableControls) { candidate in
-                            Text(candidate.title).tag(candidate.id.uuidString)
+                            Text(referenceableControlTitle(candidate)).tag(candidate.id.uuidString)
                         }
                     }
                     .labelsHidden()
@@ -682,6 +685,74 @@ private struct ControlInspector: View {
                     Text("\(control.action.value)").monospacedDigit().frame(width: 28)
                 }
             }
+        case .netHomePower:
+            netHomeDeviceField
+            LabeledContent("Power") {
+                Picker("", selection: $control.action.text) {
+                    Text("Toggle").tag("toggle")
+                    Text("On").tag("on")
+                    Text("Off").tag("off")
+                }
+                .labelsHidden()
+            }
+        case .netHomeTemperature:
+            netHomeDeviceField
+            Stepper(
+                "Setpoint: \(temperatureUnit.displayValue(celsiusTenths: control.action.valueTenths ?? control.action.value * 10)) \(temperatureUnit.symbol)",
+                value: temperatureDisplayBinding,
+                in: temperatureDisplayRange
+            )
+        case .netHomeTemperatureStep:
+            netHomeDeviceField
+            Text(control.action.value < 0 ? "Decrease the thermostat setpoint" : "Increase the thermostat setpoint")
+                .foregroundStyle(.secondary)
+        case .netHomeMode:
+            netHomeDeviceField
+            LabeledContent("Mode") {
+                Picker("", selection: $control.action.text) {
+                    Text("Auto").tag("auto")
+                    Text("Cool").tag("cool")
+                    Text("Heat").tag("heat")
+                    Text("Dry").tag("dry")
+                    Text("Fan").tag("fan")
+                }
+                .labelsHidden()
+            }
+        case .netHomeFan:
+            netHomeDeviceField
+            Stepper("Fan: \(control.action.value)%", value: $control.action.value, in: 20...100, step: 20)
+        case .netHomeAuto:
+            netHomeDeviceField
+            Text("Uses the thermostat page setpoint.")
+                .foregroundStyle(.secondary)
+            LabeledContent("Control") {
+                Picker("", selection: $control.action.text) {
+                    Text("Cooling").tag("cool")
+                    Text("Heating").tag("heat")
+                }
+                .labelsHidden()
+            }
+            Stepper(
+                "Deadband: \(deadbandDisplayText)",
+                value: optionalActionValueBinding(\.deadbandTenths, default: 10),
+                in: 5...30,
+                step: 5
+            )
+            Stepper(
+                "Humidity assist: \(control.action.humidityThreshold ?? 65)%",
+                value: optionalActionValueBinding(\.humidityThreshold, default: 65),
+                in: 40...80,
+                step: 5
+            )
+            Stepper(
+                "Adjustment interval: \(control.action.minimumCycleMinutes ?? 10) min",
+                value: optionalActionValueBinding(\.minimumCycleMinutes, default: 10),
+                in: 1...30,
+                step: 1
+            )
+            Text("Humidity assist only extends cooling. The minimum cycle protects the compressor.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .page:
             LabeledContent("Page") {
                 Picker("", selection: $control.action.text) {
@@ -690,6 +761,23 @@ private struct ControlInspector: View {
                 }
                 .labelsHidden()
             }
+        }
+
+        if supportsSchedule {
+            Toggle("Run on a daily schedule", isOn: scheduleEnabledBinding)
+            if control.action.scheduleEnabled == true {
+                DatePicker(
+                    "Time",
+                    selection: scheduleTimeBinding,
+                    displayedComponents: .hourAndMinute
+                )
+            }
+        }
+    }
+
+    @ViewBuilder private var netHomeDeviceField: some View {
+        LabeledContent("NetHome unit") {
+            TextField("Room or East bedroom", text: $control.action.host)
         }
     }
 
@@ -735,11 +823,50 @@ private struct ControlInspector: View {
     }
 
     private var isMacAction: Bool {
-        [.macMedia, .macKey, .macOpen, .macShortcut, .macScript].contains(control.action.type)
+        [.macMedia, .macKey, .macOpen, .macShortcut, .macScript,
+         .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
+         .netHomeMode, .netHomeFan, .netHomeAuto]
+            .contains(control.action.type)
     }
 
     private var isWLEDAction: Bool {
         [.wledPower, .wledPreset, .wledBrightness].contains(control.action.type)
+    }
+
+    private var supportsSchedule: Bool {
+        (control.kind == .button || control.action.type == .netHomeTemperature) &&
+            control.action.type != .page
+    }
+
+    private var scheduleEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { control.action.scheduleEnabled == true },
+            set: { enabled in
+                control.action.scheduleEnabled = enabled
+                if enabled && control.action.scheduleHour == nil {
+                    control.action.scheduleHour = 8
+                    control.action.scheduleMinute = 0
+                }
+            }
+        )
+    }
+
+    private var scheduleTimeBinding: Binding<Date> {
+        Binding(
+            get: {
+                Calendar.current.date(
+                    bySettingHour: control.action.scheduleHour ?? 8,
+                    minute: control.action.scheduleMinute ?? 0,
+                    second: 0,
+                    of: Date()
+                ) ?? Date()
+            },
+            set: { date in
+                let components = Calendar.current.dateComponents([.hour, .minute], from: date)
+                control.action.scheduleHour = components.hour ?? 8
+                control.action.scheduleMinute = components.minute ?? 0
+            }
+        )
     }
 
     private var selectedWLEDDevice: WLEDDiscovery.Device? {
@@ -789,8 +916,24 @@ private struct ControlInspector: View {
 
     private var referenceableControls: [RemoteControl] {
         pages.flatMap(\.controls).filter {
-            $0.id != control.id && ($0.kind == .slider || $0.isToggle == true)
+            ($0.id != control.id || $0.action.type == .netHomeTemperature) &&
+                ($0.kind == .slider || $0.isToggle == true ||
+                    $0.action.type == .netHomeTemperature)
         }
+    }
+
+    private func referenceableControlTitle(_ candidate: RemoteControl) -> String {
+        let isNetHomeControl = switch candidate.action.type {
+        case .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
+             .netHomeMode, .netHomeFan, .netHomeAuto:
+            true
+        default:
+            false
+        }
+        if isNetHomeControl && !candidate.action.host.isEmpty {
+            return "\(candidate.action.host) \(candidate.title)"
+        }
+        return candidate.title
     }
 
     private var referencedControlBinding: Binding<String> {
@@ -882,6 +1025,41 @@ private struct ControlInspector: View {
         Int((Double(control.action.value) / 255 * 100).rounded()).clamped(to: 0...100)
     }
 
+    private var temperatureDisplayRange: ClosedRange<Int> {
+        temperatureUnit.displayValue(celsius: 16)...temperatureUnit.displayValue(celsius: 30)
+    }
+
+    private var temperatureDisplayBinding: Binding<Int> {
+        Binding(
+            get: {
+                temperatureUnit.displayValue(
+                    celsiusTenths: control.action.valueTenths ?? control.action.value * 10
+                )
+            },
+            set: {
+                let tenths = min(max(temperatureUnit.celsiusTenthsValue(displayValue: $0), 160), 300)
+                control.action.valueTenths = tenths
+                control.action.value = Int((Double(tenths) / 10).rounded())
+            }
+        )
+    }
+
+    private var deadbandDisplayText: String {
+        let celsius = Double(control.action.deadbandTenths ?? 10) / 10
+        let value = temperatureUnit == .celsius ? celsius : celsius * 9 / 5
+        return String(format: "%.1f %@", value, temperatureUnit.symbol)
+    }
+
+    private func optionalActionValueBinding(
+        _ keyPath: WritableKeyPath<RemoteAction, Int?>,
+        default defaultValue: Int
+    ) -> Binding<Int> {
+        Binding(
+            get: { control.action[keyPath: keyPath] ?? defaultValue },
+            set: { control.action[keyPath: keyPath] = $0 }
+        )
+    }
+
     private func presetBinding(_ presets: [WLEDDiscovery.Preset]) -> Binding<Int> {
         Binding(
             get: { control.action.value },
@@ -917,13 +1095,43 @@ private struct ControlInspector: View {
                     control.action = RemoteAction(type: type, host: host, value: 1)
                 case .wledBrightness:
                     control.action = RemoteAction(type: type, host: host, value: 128)
+                case .netHomePower:
+                    control.action = RemoteAction(type: type, host: host, text: "toggle", computerID: computerID)
+                case .netHomeTemperature:
+                    control.action = RemoteAction(
+                        type: type,
+                        host: host,
+                        value: 22,
+                        valueTenths: 220,
+                        computerID: computerID
+                    )
+                case .netHomeTemperatureStep:
+                    control.action = RemoteAction(type: type, host: host, value: 1, computerID: computerID)
+                case .netHomeMode:
+                    control.action = RemoteAction(type: type, host: host, text: "auto", computerID: computerID)
+                case .netHomeFan:
+                    control.action = RemoteAction(type: type, host: host, value: 40, computerID: computerID)
+                case .netHomeAuto:
+                    control.action = RemoteAction(
+                        type: type,
+                        host: host,
+                        text: "cool",
+                        value: 22,
+                        computerID: computerID,
+                        deadbandTenths: 10,
+                        humidityThreshold: 65,
+                        minimumCycleMinutes: 10
+                    )
                 case .page:
                     control.action = RemoteAction(type: type)
                 }
                 if control.kind != .textBox {
-                    control.kind = type == .wledBrightness ? .slider : .button
+                    control.kind = (type == .wledBrightness || type == .netHomeTemperature || type == .netHomeFan)
+                        ? .slider : .button
                     if control.kind == .slider {
                         control.isToggle = nil
+                    } else if type == .netHomeAuto {
+                        control.isToggle = true
                     }
                 }
             }
@@ -1026,6 +1234,7 @@ private struct DevicePreview: View {
     let page: RemotePage
     let pageIndex: Int
     let pageCount: Int
+    let temperatureUnit: RemoteTemperatureUnit
     let selectedControlID: UUID?
     let onSelect: (UUID) -> Void
     let onMove: (UUID, Int) -> Void
@@ -1050,7 +1259,12 @@ private struct DevicePreview: View {
 
                 ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
                     let frame = frames[index]
-                    PreviewControl(control: control, selected: selectedControlID == control.id, scale: scale)
+                    PreviewControl(
+                        control: control,
+                        temperatureUnit: temperatureUnit,
+                        selected: selectedControlID == control.id,
+                        scale: scale
+                    )
                         .frame(width: frame.width * scale, height: frame.height * scale)
                         .position(x: frame.midX * scale, y: frame.midY * scale)
                         .onTapGesture { onSelect(control.id) }
@@ -1079,6 +1293,7 @@ private struct DevicePreview: View {
 
 private struct PreviewControl: View {
     let control: RemoteControl
+    let temperatureUnit: RemoteTemperatureUnit
     let selected: Bool
     let scale: CGFloat
 
@@ -1172,7 +1387,14 @@ private struct PreviewControl: View {
         case .staticText: textBox.sourceText
         case .dateTime: "Sep 2, 18:54"
         case .macScript, .macShortcut: "Command output"
-        case .controlValue: "128"
+        case .controlValue:
+            if control.action.type == .netHomeTemperature {
+                "\(temperatureUnit.displayValue(celsiusTenths: control.action.valueTenths ?? control.action.value * 10)) \(temperatureUnit.symbol)"
+            } else if control.action.type == .netHomeFan {
+                "\(control.action.value)%"
+            } else {
+                "128"
+            }
         case .nowPlaying: "Song Title\nArtist"
         }
     }

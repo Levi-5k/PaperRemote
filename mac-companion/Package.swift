@@ -18,6 +18,7 @@ let package = Package(
         .executableTarget(
             name: "PaperGIFMac",
             exclude: ["Info.plist"],
+            resources: [.copy("Resources/net_home_bridge.py")],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",

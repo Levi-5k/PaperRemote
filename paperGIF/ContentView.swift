@@ -302,7 +302,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var deviceLibraryContent: some View {
-        if !bluetoothManager.canAccessDeviceLibrary {
+        if !bluetoothManager.canAccessDeviceLibrary && bluetoothManager.deviceMedia.isEmpty {
             ContentUnavailableView(
                 "Device Unavailable",
                 systemImage: "antenna.radiowaves.left.and.right.slash",
@@ -359,6 +359,11 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.primary)
+                .disabled(
+                    !bluetoothManager.canAccessDeviceLibrary ||
+                    bluetoothManager.isLoadingDeviceLibrary ||
+                    bluetoothManager.deletingDeviceMediaIndex != nil
+                )
                 .swipeActions {
                     Button("Delete", role: .destructive) {
                         bluetoothManager.deleteDeviceMedia(media)

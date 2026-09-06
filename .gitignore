@@ -18,6 +18,9 @@ xcuserdata/
 # PlatformIO
 .pio/
 .pio-venv/
+firmware/.esp-flasher.json
+firmware/.vscode/
+firmware/compile_commands.json
 
 # Local output and credentials
 *.log

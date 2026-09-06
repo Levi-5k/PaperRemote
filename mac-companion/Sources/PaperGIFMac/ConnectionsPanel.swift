@@ -90,6 +90,16 @@ struct ConnectionsPanel: View {
 
                 Divider()
 
+                section("TEMPERATURE", systemImage: "thermometer.medium") {
+                    Picker("Units", selection: $store.profile.temperatureUnit) {
+                        Text("Celsius").tag(RemoteTemperatureUnit.celsius)
+                        Text("Fahrenheit").tag(RemoteTemperatureUnit.fahrenheit)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                Divider()
+
                 section("COMPUTERS", systemImage: "desktopcomputer") {
                     ForEach(store.profile.computers) { computer in
                         HStack(spacing: 8) {
@@ -267,9 +277,58 @@ struct ConnectionsPanel: View {
                         Text(wledStatus).font(.caption).foregroundStyle(.secondary)
                     }
                 }
+
+                Divider()
+
+                section("AIR CONDITIONERS", systemImage: "snowflake") {
+                    HStack {
+                        Button {
+                            Task { await store.refreshNetHomeUnits() }
+                        } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(store.isLoadingNetHomeUnits)
+                        if store.isLoadingNetHomeUnits { ProgressView().controlSize(.small) }
+                    }
+
+                    ForEach(store.netHomeUnits) { unit in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(unit.name)
+                                Text("NetHome Plus")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if store.hasNetHomeControls(unitName: unit.name) {
+                                Label("Added", systemImage: "checkmark.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                            } else {
+                                Button {
+                                    store.addNetHomePage(unit: unit)
+                                } label: {
+                                    Label("Add Page", systemImage: "plus.circle")
+                                }
+                                .disabled(store.profile.pages.count >= 8)
+                            }
+                        }
+                    }
+
+                    if let error = store.netHomeError {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if !store.isLoadingNetHomeUnits && store.netHomeUnits.isEmpty {
+                        Text("Connect NetHome Plus from the menu bar to show your AC units.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             .padding(14)
         }
+        .task { await store.refreshNetHomeUnits() }
     }
 
     private func section<Content: View>(

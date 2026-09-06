@@ -1,5 +1,33 @@
 import Foundation
 
+enum PaperGIFTemperatureUnit: String, Codable, CaseIterable, Identifiable, Sendable {
+    case celsius
+    case fahrenheit
+
+    var id: Self { self }
+    var symbol: String { self == .celsius ? "°C" : "°F" }
+
+    func displayValue(celsius: Int) -> Int {
+        self == .celsius ? celsius : Int((Double(celsius) * 9 / 5 + 32).rounded())
+    }
+
+    func celsiusValue(displayValue: Int) -> Int {
+        self == .celsius ? displayValue : Int((Double(displayValue - 32) * 5 / 9).rounded())
+    }
+
+    func displayValue(celsiusTenths: Int) -> Int {
+        self == .celsius
+            ? Int((Double(celsiusTenths) / 10).rounded())
+            : Int((Double(celsiusTenths) * 9 / 50 + 32).rounded())
+    }
+
+    func celsiusTenthsValue(displayValue: Int) -> Int {
+        self == .celsius
+            ? displayValue * 10
+            : Int((Double(displayValue - 32) * 10 / 9).rounded()) * 5
+    }
+}
+
 enum PaperGIFRemoteControlKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case button
     case slider
@@ -71,6 +99,12 @@ struct PaperGIFRemoteIcon: Identifiable, Sendable {
         .init(id: "power", title: "Power"),
         .init(id: "lightbulb.fill", title: "Light"),
         .init(id: "sun.max.fill", title: "Brightness"),
+        .init(id: "snowflake", title: "Cooling"),
+        .init(id: "drop.fill", title: "Dry"),
+        .init(id: "humidity.fill", title: "Humidity"),
+        .init(id: "thermometer.medium", title: "Temperature"),
+        .init(id: "fan.fill", title: "Fan"),
+        .init(id: "wind", title: "Wind"),
         .init(id: "moon.fill", title: "Moon"),
         .init(id: "sparkles", title: "Effect"),
         .init(id: "house.fill", title: "Home"),
@@ -103,6 +137,12 @@ enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Send
     case wledPower
     case wledPreset
     case wledBrightness
+    case netHomePower
+    case netHomeTemperature
+    case netHomeTemperatureStep
+    case netHomeMode
+    case netHomeFan
+    case netHomeAuto
     case page
 
     var id: Self { self }
@@ -117,6 +157,12 @@ enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Send
         case .wledPower: "WLED power"
         case .wledPreset: "WLED preset"
         case .wledBrightness: "WLED brightness"
+        case .netHomePower: "NetHome power"
+        case .netHomeTemperature: "NetHome temperature"
+        case .netHomeTemperatureStep: "NetHome temperature step"
+        case .netHomeMode: "NetHome mode"
+        case .netHomeFan: "NetHome fan"
+        case .netHomeAuto: "Sensor auto mode"
         case .page: "Open remote page"
         }
     }
@@ -127,8 +173,15 @@ struct PaperGIFRemoteAction: Codable, Equatable, Sendable {
     var host = ""
     var text = ""
     var value = 0
+    var valueTenths: Int?
     var modifiers: [String] = []
     var computerID: String?
+    var deadbandTenths: Int?
+    var humidityThreshold: Int?
+    var minimumCycleMinutes: Int?
+    var scheduleEnabled: Bool?
+    var scheduleHour: Int?
+    var scheduleMinute: Int?
 
     static let playPause = PaperGIFRemoteAction(type: .macMedia, text: "playPause")
 }
@@ -295,8 +348,146 @@ struct PaperGIFRemotePage: Codable, Equatable, Identifiable, Sendable {
     var controls: [PaperGIFRemoteControl]
 }
 
+extension PaperGIFRemotePage {
+    static func netHomeThermostat(
+        unit: String,
+        computerID: String?,
+        setpoint: Int = 22,
+        setpointTenths: Int? = nil,
+        fanSpeed: Int = 40,
+        autoAction: PaperGIFRemoteAction? = nil
+    ) -> Self {
+        let color = "197278"
+        let setpointID = UUID()
+        let fanID = UUID()
+        let automatic = autoAction ?? PaperGIFRemoteAction(
+            type: .netHomeAuto,
+            host: unit,
+            text: "cool",
+            value: setpoint,
+            computerID: computerID,
+            deadbandTenths: 10,
+            humidityThreshold: 65,
+            minimumCycleMinutes: 10
+        )
+        return Self(name: unit, controls: [
+            PaperGIFRemoteControl(
+                title: "Power", symbol: "power", tintHex: color, kind: .button,
+                isToggle: true, buttonHeight: 2,
+                action: .init(type: .netHomePower, host: unit, text: "toggle", computerID: computerID),
+                layoutSlot: 0
+            ),
+            PaperGIFRemoteControl(
+                title: "Auto", symbol: "humidity.fill", tintHex: "D1495B", kind: .button,
+                isToggle: true, buttonHeight: 2, action: automatic, layoutSlot: 1
+            ),
+            PaperGIFRemoteControl(
+                id: setpointID,
+                title: "Setpoint", symbol: "thermometer.medium", tintHex: color, kind: .textBox,
+                action: .init(
+                    type: .netHomeTemperature,
+                    host: unit,
+                    value: setpoint,
+                    valueTenths: setpointTenths ?? setpoint * 10,
+                    computerID: computerID
+                ),
+                layoutSlot: 4,
+                textBox: PaperGIFRemoteTextBox(
+                    source: .controlValue,
+                    sourceText: "",
+                    referencedControlID: setpointID,
+                    placeholder: "--",
+                    gridWidth: 2,
+                    gridHeight: 1,
+                    textSize: .extraLarge,
+                    horizontalAlignment: .center,
+                    verticalAlignment: .center
+                )
+            ),
+            temperatureStepControl("Down", symbol: "minus", step: -1, unit: unit, computerID: computerID, slot: 6),
+            temperatureStepControl("Up", symbol: "plus", step: 1, unit: unit, computerID: computerID, slot: 7),
+            PaperGIFRemoteControl(
+                id: fanID,
+                title: "Fan Speed", symbol: "fan.fill", tintHex: color, kind: .slider,
+                action: .init(type: .netHomeFan, host: unit, value: fanSpeed, computerID: computerID),
+                layoutSlot: 8
+            ),
+            PaperGIFRemoteControl(
+                title: "Fan", symbol: "fan.fill", tintHex: color, kind: .textBox,
+                action: .init(type: .netHomeFan, host: unit, value: fanSpeed, computerID: computerID),
+                layoutSlot: 9,
+                textBox: PaperGIFRemoteTextBox(
+                    source: .controlValue,
+                    sourceText: "",
+                    referencedControlID: fanID,
+                    placeholder: "--",
+                    gridWidth: 1,
+                    gridHeight: 1,
+                    textSize: .large,
+                    horizontalAlignment: .center,
+                    verticalAlignment: .center
+                )
+            ),
+            modeControl("Cool", symbol: "snowflake", mode: "cool", unit: unit, computerID: computerID, slot: 10),
+            modeControl("Heat", symbol: "sun.max.fill", mode: "heat", unit: unit, computerID: computerID, slot: 11),
+            modeControl("Dry", symbol: "drop.fill", mode: "dry", unit: unit, computerID: computerID, slot: 12),
+            modeControl("Fan Only", symbol: "wind", mode: "fan", unit: unit, computerID: computerID, slot: 13),
+        ])
+    }
+
+    func upgradingGeneratedThermostat() -> Self {
+          guard (controls.count == 8 || controls.count == 11),
+              let setpoint = controls.first(where: { $0.action.type == .netHomeTemperature }),
+              let automatic = controls.first(where: { $0.action.type == .netHomeAuto }),
+              let fan = controls.first(where: { $0.action.type == .netHomeFan && $0.kind == .slider }),
+              controls.contains(where: { $0.action.type == .netHomePower }),
+              controls.filter({ $0.action.type == .netHomeMode }).count == 4 else { return self }
+        var upgraded = Self.netHomeThermostat(
+            unit: setpoint.action.host,
+            computerID: setpoint.action.computerID,
+            setpoint: setpoint.action.value,
+            setpointTenths: setpoint.action.valueTenths,
+            fanSpeed: fan.action.value,
+            autoAction: automatic.action
+        )
+        upgraded.id = id
+        upgraded.name = name
+        return upgraded
+    }
+
+    private static func temperatureStepControl(
+        _ title: String,
+        symbol: String,
+        step: Int,
+        unit: String,
+        computerID: String?,
+        slot: Int
+    ) -> PaperGIFRemoteControl {
+        PaperGIFRemoteControl(
+            title: title, symbol: symbol, tintHex: "197278", kind: .button, buttonHeight: 1,
+            action: .init(type: .netHomeTemperatureStep, host: unit, value: step, computerID: computerID),
+            layoutSlot: slot
+        )
+    }
+
+    private static func modeControl(
+        _ title: String,
+        symbol: String,
+        mode: String,
+        unit: String,
+        computerID: String?,
+        slot: Int
+    ) -> PaperGIFRemoteControl {
+        PaperGIFRemoteControl(
+            title: title, symbol: symbol, tintHex: "197278", kind: .button, buttonHeight: 1,
+            action: .init(type: .netHomeMode, host: unit, text: mode, computerID: computerID),
+            layoutSlot: slot
+        )
+    }
+}
+
 struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
-    static let currentVersion = 2
+    static let currentVersion = 6
 
     var version = currentVersion
     var wifiSSID = ""
@@ -306,6 +497,7 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     var macToken = ""
     var computers: [PaperGIFRemoteComputer]
     var screensaverDelaySeconds = 30
+    var temperatureUnit: PaperGIFTemperatureUnit = .celsius
     var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
     var pages: [PaperGIFRemotePage]
 
@@ -351,9 +543,13 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         macToken = try container.decodeIfPresent(String.self, forKey: .macToken) ?? ""
         computers = try container.decodeIfPresent([PaperGIFRemoteComputer].self, forKey: .computers) ?? []
         screensaverDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .screensaverDelaySeconds) ?? 30
+        temperatureUnit = try container.decodeIfPresent(PaperGIFTemperatureUnit.self, forKey: .temperatureUnit) ?? .celsius
         timeZoneOffsetMinutes = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutes)
             ?? TimeZone.current.secondsFromGMT() / 60
         pages = try container.decode([PaperGIFRemotePage].self, forKey: .pages)
+        if decodedVersion < 6 {
+            pages = pages.map { $0.upgradingGeneratedThermostat() }
+        }
 
         if computers.isEmpty, !macHost.isEmpty {
             computers = [PaperGIFRemoteComputer(

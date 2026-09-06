@@ -18,7 +18,19 @@
     <string>1</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>NSAppleEventsUsageDescription</key>
     <string>paperGIF Mac reads the current track from Music to show it on your paperGIF display.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_papergif._tcp</string>
+        <string>_papergif-device._tcp</string>
+    </array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>paperGIF Mac finds and configures your M5Paper and companion computers on your local network.</string>
 </dict>
 </plist>

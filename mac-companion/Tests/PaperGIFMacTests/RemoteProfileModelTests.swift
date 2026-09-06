@@ -9,6 +9,7 @@ final class RemoteProfileModelTests: XCTestCase {
         let profile = try JSONDecoder().decode(RemoteProfile.self, from: data)
 
         XCTAssertEqual(profile.version, RemoteProfile.currentVersion)
+        XCTAssertEqual(profile.temperatureUnit, .celsius)
     }
 
     func testTextBoxPlacementUsesEveryCellInItsSpan() throws {
@@ -90,6 +91,98 @@ final class RemoteProfileModelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(clock["year"] ?? 0, 2020)
         XCTAssertNotNil(clock["weekday"])
         XCTAssertNil(stored?["deviceClock"])
+    }
+
+    func testNetHomeAutoSettingsRoundTripAndRemainOptionalForLegacyActions() throws {
+        let configured = RemoteAction(
+            type: .netHomeAuto,
+            host: "Room",
+            text: "cool",
+            value: 22,
+            deadbandTenths: 15,
+            humidityThreshold: 60,
+            minimumCycleMinutes: 10
+        )
+        let decoded = try JSONDecoder().decode(
+            RemoteAction.self,
+            from: JSONEncoder().encode(configured)
+        )
+        let legacy = try JSONDecoder().decode(
+            RemoteAction.self,
+            from: Data(#"{"type":"macMedia","text":"playPause","value":0,"host":"","modifiers":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(decoded, configured)
+        XCTAssertNil(legacy.deadbandTenths)
+        XCTAssertNil(legacy.humidityThreshold)
+        XCTAssertNil(legacy.minimumCycleMinutes)
+    }
+
+    func testDailyScheduleRoundTripsAndRemainsOptionalForLegacyActions() throws {
+        let configured = RemoteAction(
+            type: .netHomeTemperature,
+            host: "Room",
+            value: 22,
+            valueTenths: 220,
+            scheduleEnabled: true,
+            scheduleHour: 7,
+            scheduleMinute: 30
+        )
+        let decoded = try JSONDecoder().decode(
+            RemoteAction.self,
+            from: JSONEncoder().encode(configured)
+        )
+        let legacy = try JSONDecoder().decode(
+            RemoteAction.self,
+            from: Data(#"{"type":"macMedia","text":"playPause","value":0,"host":"","modifiers":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(decoded, configured)
+        XCTAssertNil(legacy.scheduleEnabled)
+        XCTAssertNil(legacy.scheduleHour)
+        XCTAssertNil(legacy.scheduleMinute)
+    }
+
+    func testFahrenheitPreferenceRoundTripsWithoutChangingStoredCelsius() throws {
+        var profile = RemoteProfile(pages: [])
+        profile.temperatureUnit = .fahrenheit
+        let decoded = try JSONDecoder().decode(
+            RemoteProfile.self,
+            from: JSONEncoder().encode(profile)
+        )
+
+        XCTAssertEqual(decoded.temperatureUnit, .fahrenheit)
+        XCTAssertEqual(decoded.temperatureUnit.displayValue(celsius: 22), 72)
+        XCTAssertEqual(decoded.temperatureUnit.celsiusValue(displayValue: 72), 22)
+        XCTAssertEqual(decoded.temperatureUnit.celsiusTenthsValue(displayValue: 72), 220)
+        XCTAssertEqual(decoded.temperatureUnit.celsiusTenthsValue(displayValue: 71), 215)
+        XCTAssertEqual(decoded.temperatureUnit.displayValue(celsiusTenths: 215), 71)
+    }
+
+    func testVersionFourGeneratedThermostatMigratesToResponsiveTemplate() throws {
+        var profile = RemoteProfile(pages: [])
+        profile.version = 4
+        profile.pages = [RemotePage(name: "Room", controls: [
+            RemoteControl(title: "Power", symbol: "power", kind: .button, action: .init(type: .netHomePower, host: "Room")),
+            RemoteControl(title: "Auto", symbol: "humidity.fill", kind: .button, action: .init(type: .netHomeAuto, host: "Room", value: 23)),
+            RemoteControl(title: "Setpoint", symbol: "thermometer.medium", kind: .slider, action: .init(type: .netHomeTemperature, host: "Room", value: 23)),
+            RemoteControl(title: "Fan", symbol: "fan.fill", kind: .slider, action: .init(type: .netHomeFan, host: "Room", value: 40)),
+            RemoteControl(title: "Cool", symbol: "snowflake", kind: .button, action: .init(type: .netHomeMode, host: "Room", text: "cool")),
+            RemoteControl(title: "Heat", symbol: "sun.max.fill", kind: .button, action: .init(type: .netHomeMode, host: "Room", text: "heat")),
+            RemoteControl(title: "Dry", symbol: "drop.fill", kind: .button, action: .init(type: .netHomeMode, host: "Room", text: "dry")),
+            RemoteControl(title: "Fan Only", symbol: "wind", kind: .button, action: .init(type: .netHomeMode, host: "Room", text: "fan")),
+        ])]
+
+        let decoded = try JSONDecoder().decode(RemoteProfile.self, from: JSONEncoder().encode(profile))
+        let controls = try XCTUnwrap(decoded.pages.first?.controls)
+
+        XCTAssertEqual(decoded.version, 6)
+        let setpoint = controls.first(where: { $0.action.type == .netHomeTemperature })
+        XCTAssertEqual(setpoint?.kind, .textBox)
+        XCTAssertEqual(setpoint?.textBox?.gridHeight, 1)
+        XCTAssertEqual(setpoint?.action.valueTenths, 230)
+        XCTAssertEqual(controls.filter { $0.action.type == .netHomeTemperatureStep }.map(\.action.value).sorted(), [-1, 1])
+        XCTAssertEqual(setpoint?.action.value, 23)
     }
 
 }

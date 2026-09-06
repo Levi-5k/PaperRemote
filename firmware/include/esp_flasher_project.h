@@ -1,0 +1,7 @@
+#ifndef ESP_FLASHER_PROJECT_H
+#define ESP_FLASHER_PROJECT_H
+
+#define ESP_FLASHER_PROJECT_ID "b2cbcbba-c946-459c-8b8c-6956fd93efd1"
+#define ESP_FLASHER_PROJECT_NAME "firmware"
+
+#endif

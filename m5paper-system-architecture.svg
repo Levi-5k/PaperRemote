@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1200" viewBox="0 0 1800 1200" role="img" aria-labelledby="title desc">
+  <title id="title">Inside paperGIF: M5Paper System Architecture</title>
+  <desc id="desc">Technical architecture poster showing an M5Paper e-paper device connected to an iPhone app, Mac companion, SD media library, and NetHome Plus climate units.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#17212B" stroke-opacity="0.055" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#17212B" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow-coral" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#F2553D"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#315EFB"/>
+    </marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#079A86"/>
+    </marker>
+    <style>
+      .display { font-family: "Avenir Next", "Helvetica Neue", sans-serif; }
+      .mono { font-family: "SFMono-Regular", Menlo, monospace; }
+      .ink { fill: #17212B; }
+      .muted { fill: #62707D; }
+      .small { font-size: 17px; letter-spacing: 0; }
+      .label { font-size: 19px; font-weight: 700; letter-spacing: 0; }
+      .node-title { font-size: 25px; font-weight: 700; letter-spacing: 0; }
+      .hairline { stroke: #17212B; stroke-opacity: 0.18; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1200" fill="#F5F2E9"/>
+  <rect width="1800" height="1200" fill="url(#grid)"/>
+  <rect x="0" y="0" width="26" height="1200" fill="#F2553D"/>
+
+  <g class="display">
+    <text x="86" y="100" class="ink" font-size="55" font-weight="800" letter-spacing="0">Inside paperGIF: M5Paper System Architecture</text>
+    <text x="90" y="146" class="muted" font-size="25" letter-spacing="0">A low-power e-paper control surface linking media, automation, and climate systems.</text>
+    <g transform="translate(1510 61)">
+      <rect width="204" height="72" fill="#17212B"/>
+      <text x="20" y="29" fill="#F5F2E9" class="mono" font-size="15">SYSTEM MAP</text>
+      <text x="20" y="54" fill="#F2C14E" class="mono" font-size="14">ESP32 / v6</text>
+    </g>
+    <line x1="88" y1="180" x2="1714" y2="180" stroke="#17212B" stroke-width="3"/>
+
+    <!-- iPhone client -->
+    <g transform="translate(105 292)" filter="url(#shadow)">
+      <rect x="0" y="0" width="310" height="470" rx="38" fill="#17212B"/>
+      <rect x="13" y="13" width="284" height="444" rx="29" fill="#FCFAF4"/>
+      <rect x="103" y="25" width="104" height="22" rx="11" fill="#17212B"/>
+      <text x="38" y="101" class="ink" font-size="16" font-weight="700">PAPERGIF</text>
+      <text x="38" y="138" class="ink" font-size="31" font-weight="800">iPhone app</text>
+      <line x1="38" y1="164" x2="260" y2="164" class="hairline"/>
+      <g transform="translate(38 195)">
+        <rect width="96" height="76" rx="5" fill="#315EFB"/>
+        <path d="M20 53L40 31L55 45L68 27L82 53Z" fill="#FCFAF4"/>
+        <circle cx="71" cy="19" r="7" fill="#F2C14E"/>
+        <text x="116" y="29" class="label ink">Convert</text>
+        <text x="116" y="54" class="small muted">GIF + image</text>
+      </g>
+      <g transform="translate(38 300)">
+        <rect width="96" height="76" rx="5" fill="#079A86"/>
+        <path d="M23 22H73V58H23ZM31 30V50H65V30Z" fill="#FCFAF4"/>
+        <text x="116" y="29" class="label ink">Manage</text>
+        <text x="116" y="54" class="small muted">Library + remote</text>
+      </g>
+      <text x="155" y="421" text-anchor="middle" class="mono muted" font-size="14">PHYSICAL CLIENT</text>
+    </g>
+
+    <!-- Main communication lanes -->
+    <path d="M415 405H596" fill="none" stroke="#315EFB" stroke-width="7" marker-end="url(#arrow-blue)"/>
+    <path d="M596 482H415" fill="none" stroke="#079A86" stroke-width="7" marker-end="url(#arrow-teal)"/>
+    <rect x="448" y="370" width="112" height="32" fill="#F5F2E9"/>
+    <text x="504" y="392" text-anchor="middle" class="mono" font-size="15" fill="#315EFB">BLE GATT</text>
+    <rect x="435" y="489" width="138" height="32" fill="#F5F2E9"/>
+    <text x="504" y="511" text-anchor="middle" class="mono" font-size="15" fill="#079A86">WI-FI HTTP</text>
+
+    <!-- M5Paper central device -->
+    <g transform="translate(598 232)" filter="url(#shadow)">
+      <rect x="0" y="0" width="604" height="614" rx="12" fill="#252F38"/>
+      <rect x="24" y="25" width="556" height="526" rx="3" fill="#E8E6DD" stroke="#111820" stroke-width="4"/>
+      <circle cx="52" cy="581" r="9" fill="#F2553D"/>
+      <circle cx="302" cy="581" r="9" fill="#F2C14E"/>
+      <circle cx="552" cy="581" r="9" fill="#079A86"/>
+
+      <text x="56" y="80" class="mono muted" font-size="15">M5STACK M5PAPER V1</text>
+      <text x="56" y="128" class="ink" font-size="40" font-weight="800">EDGE RUNTIME</text>
+      <text x="56" y="158" class="mono muted" font-size="15">ESP32-D0WDQ6-V3  •  540 × 960 E-INK</text>
+
+      <g transform="translate(56 198)">
+        <rect width="492" height="76" rx="4" fill="#17212B"/>
+        <text x="24" y="33" fill="#F5F2E9" class="label">Profile engine</text>
+        <text x="24" y="58" fill="#BFC7CD" class="small">Pages • controls • schedules • state</text>
+        <circle cx="447" cy="38" r="17" fill="#F2553D"/>
+        <path d="M439 38L445 44L456 31" fill="none" stroke="#F5F2E9" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+
+      <g transform="translate(56 292)">
+        <rect width="235" height="106" rx="4" fill="#315EFB"/>
+        <text x="21" y="34" fill="#FCFAF4" class="label">Display pipeline</text>
+        <text x="21" y="61" fill="#DDE5FF" class="small">PGIF decode</text>
+        <text x="21" y="84" fill="#DDE5FF" class="small">Adaptive refresh</text>
+      </g>
+      <g transform="translate(313 292)">
+        <rect width="235" height="106" rx="4" fill="#079A86"/>
+        <text x="21" y="34" fill="#FCFAF4" class="label">Automation</text>
+        <text x="21" y="61" fill="#DDF5F0" class="small">Daily schedules</text>
+        <text x="21" y="84" fill="#DDF5F0" class="small">PI-D climate loop</text>
+      </g>
+
+      <g transform="translate(56 422)">
+        <rect width="492" height="82" rx="4" fill="#FCFAF4" stroke="#17212B" stroke-width="2"/>
+        <text x="22" y="32" class="label ink">Low-power coordinator</text>
+        <text x="22" y="59" class="small muted">RTC state • wake sources • BLE watchdog • queueing</text>
+      </g>
+    </g>
+
+    <!-- SD card -->
+    <g transform="translate(760 860)">
+      <path d="M0 0H219L258 39V170H0Z" fill="#17212B"/>
+      <path d="M28 0V55H181V0" fill="#F2553D"/>
+      <rect x="31" y="83" width="196" height="57" fill="#FCFAF4"/>
+      <text x="129" y="107" text-anchor="middle" class="mono ink" font-size="16">SD LIBRARY</text>
+      <text x="129" y="130" text-anchor="middle" class="mono muted" font-size="13">PGIF • JSON • STATE</text>
+    </g>
+    <path d="M899 846V860" stroke="#F2553D" stroke-width="7" marker-end="url(#arrow-coral)"/>
+
+    <!-- Mac companion -->
+    <g transform="translate(1324 278)" filter="url(#shadow)">
+      <rect x="0" y="0" width="360" height="258" rx="8" fill="#17212B"/>
+      <rect x="17" y="17" width="326" height="204" rx="3" fill="#FCFAF4"/>
+      <rect x="52" y="53" width="256" height="27" fill="#F2553D"/>
+      <rect x="52" y="99" width="118" height="72" fill="#315EFB"/>
+      <rect x="190" y="99" width="118" height="72" fill="#079A86"/>
+      <path d="M126 258H234L258 284H102Z" fill="#17212B"/>
+      <text x="180" y="330" text-anchor="middle" class="node-title ink">Mac companion</text>
+      <text x="180" y="359" text-anchor="middle" class="small muted">Editor • bridge • automation host</text>
+    </g>
+    <path d="M1203 354H1324" fill="none" stroke="#F2553D" stroke-width="7" marker-end="url(#arrow-coral)"/>
+    <path d="M1324 456H1203" fill="none" stroke="#315EFB" stroke-width="7" marker-end="url(#arrow-blue)"/>
+    <rect x="1219" y="312" width="91" height="30" fill="#F5F2E9"/>
+    <text x="1264" y="333" text-anchor="middle" class="mono" font-size="14" fill="#F2553D">ACTIONS</text>
+    <rect x="1211" y="464" width="104" height="30" fill="#F5F2E9"/>
+    <text x="1263" y="485" text-anchor="middle" class="mono" font-size="14" fill="#315EFB">PROFILE</text>
+
+    <!-- NetHome and HVAC -->
+    <path d="M1504 647V728H1139" fill="none" stroke="#079A86" stroke-width="7" marker-end="url(#arrow-teal)"/>
+    <rect x="1337" y="683" width="131" height="30" fill="#F5F2E9"/>
+    <text x="1402" y="704" text-anchor="middle" class="mono" font-size="14" fill="#079A86">NETHOME API</text>
+
+    <g transform="translate(1160 694)">
+      <path d="M54 77C25 77 4 60 4 37C4 16 22 0 45 0C58 0 69 5 77 14C87 2 102-5 120-5C147-5 168 13 170 36C194 37 212 53 212 74C212 96 192 112 165 112H51C22 112 0 98 0 78Z" fill="#079A86"/>
+      <text x="106" y="55" text-anchor="middle" fill="#FCFAF4" font-size="22" font-weight="800">NetHome</text>
+      <text x="106" y="80" text-anchor="middle" fill="#DDF5F0" class="mono" font-size="13">PLUS CLOUD</text>
+    </g>
+
+    <g transform="translate(1425 750)">
+      <rect width="286" height="112" rx="5" fill="#FCFAF4" stroke="#17212B" stroke-width="3"/>
+      <circle cx="49" cy="56" r="25" fill="#F2553D"/>
+      <path d="M49 38V59L62 69" fill="none" stroke="#FCFAF4" stroke-width="5" stroke-linecap="round"/>
+      <text x="89" y="48" class="node-title ink">Room</text>
+      <text x="89" y="75" class="small muted">Senville heat pump</text>
+    </g>
+    <g transform="translate(1425 884)">
+      <rect width="286" height="112" rx="5" fill="#FCFAF4" stroke="#17212B" stroke-width="3"/>
+      <circle cx="49" cy="56" r="25" fill="#315EFB"/>
+      <path d="M49 38V59L62 69" fill="none" stroke="#FCFAF4" stroke-width="5" stroke-linecap="round"/>
+      <text x="89" y="48" class="node-title ink">East bedroom</text>
+      <text x="89" y="75" class="small muted">Senville heat pump</text>
+    </g>
+    <path d="M1346 785H1425" stroke="#079A86" stroke-width="6" marker-end="url(#arrow-teal)"/>
+    <path d="M1346 804H1380V940H1425" fill="none" stroke="#079A86" stroke-width="6" marker-end="url(#arrow-teal)"/>
+
+    <!-- Protocol legend -->
+    <g transform="translate(92 820)">
+      <text x="0" y="0" class="mono muted" font-size="15">LINK LEGEND</text>
+      <line x1="0" y1="38" x2="74" y2="38" stroke="#315EFB" stroke-width="7"/>
+      <text x="92" y="44" class="small ink">Content + configuration</text>
+      <line x1="0" y1="82" x2="74" y2="82" stroke="#F2553D" stroke-width="7"/>
+      <text x="92" y="88" class="small ink">Commands + events</text>
+      <line x1="0" y1="126" x2="74" y2="126" stroke="#079A86" stroke-width="7"/>
+      <text x="92" y="132" class="small ink">Status + external services</text>
+    </g>
+
+    <!-- Footer capability strip -->
+    <g transform="translate(82 1052)">
+      <rect x="0" y="0" width="1630" height="105" fill="#17212B"/>
+      <line x1="530" y1="20" x2="530" y2="85" stroke="#F5F2E9" stroke-opacity="0.22" stroke-width="2"/>
+      <line x1="1080" y1="20" x2="1080" y2="85" stroke="#F5F2E9" stroke-opacity="0.22" stroke-width="2"/>
+      <text x="28" y="38" fill="#F2C14E" class="mono" font-size="14">MEDIA PATH</text>
+      <text x="28" y="71" fill="#F5F2E9" font-size="20" font-weight="600">Convert → transfer → persist → render</text>
+      <text x="558" y="38" fill="#F2C14E" class="mono" font-size="14">CONTROL PATH</text>
+      <text x="558" y="71" fill="#F5F2E9" font-size="20" font-weight="600">Touch → action queue → Mac / NetHome</text>
+      <text x="1108" y="38" fill="#F2C14E" class="mono" font-size="14">RELIABILITY</text>
+      <text x="1108" y="71" fill="#F5F2E9" font-size="20" font-weight="600">RTC recovery • watchdogs • offline queue</text>
+    </g>
+  </g>
+</svg>

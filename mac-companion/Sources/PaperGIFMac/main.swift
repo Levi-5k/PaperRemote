@@ -8,10 +8,14 @@ import Network
 
 private struct RemoteRequest: Decodable {
     let type: String
+    let host: String?
     let text: String
     let value: Int
+    let valueTenths: Int?
     let modifiers: [String]
 }
+
+private typealias RemoteActionResult = (succeeded: Bool, changed: Bool)
 
 private struct PairingRequest: Decodable {
     let deviceName: String
@@ -58,25 +62,34 @@ private struct CompanionConfiguration: Codable {
 }
 
 private final class CompanionServer {
+    private static let maximumConnections = 16
+    private static let requestDeadline: TimeInterval = 10
+
     private let port: UInt16
     private let token: String
     private let pairingHandler: (PairingRequest) -> Bool
-    private let actionHandler: (RemoteRequest) -> Bool
+    private let actionHandler: (RemoteRequest) -> RemoteActionResult
+    private let netHomeUnitsHandler: () -> [NetHomeUnit]?
     private let textSourceHandler: (TextSourceBatchRequest, String?) -> TextSourceBatchResponse
     private var listener: NWListener?
+    private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private var respondingConnections: Set<ObjectIdentifier> = []
     private let queue = DispatchQueue(label: "paperGIF.companion.server")
+    private let workQueue = DispatchQueue(label: "paperGIF.companion.actions", qos: .utility)
 
     init(
         port: UInt16,
         token: String,
         pairingHandler: @escaping (PairingRequest) -> Bool,
-        actionHandler: @escaping (RemoteRequest) -> Bool,
+        actionHandler: @escaping (RemoteRequest) -> RemoteActionResult,
+        netHomeUnitsHandler: @escaping () -> [NetHomeUnit]?,
         textSourceHandler: @escaping (TextSourceBatchRequest, String?) -> TextSourceBatchResponse
     ) {
         self.port = port
         self.token = token
         self.pairingHandler = pairingHandler
         self.actionHandler = actionHandler
+        self.netHomeUnitsHandler = netHomeUnitsHandler
         self.textSourceHandler = textSourceHandler
     }
 
@@ -105,11 +118,37 @@ private final class CompanionServer {
     func stop() {
         listener?.cancel()
         listener = nil
+        connections.values.forEach { $0.cancel() }
+        connections.removeAll()
+        respondingConnections.removeAll()
     }
 
     private func accept(_ connection: NWConnection) {
+        guard connections.count < Self.maximumConnections else {
+            connection.start(queue: queue)
+            respond(connection, status: 503, body: "{\"ok\":false}")
+            return
+        }
+        let identifier = ObjectIdentifier(connection)
+        connections[identifier] = connection
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self, let connection else { return }
+            switch state {
+            case .failed, .cancelled:
+                let identifier = ObjectIdentifier(connection)
+                self.connections.removeValue(forKey: identifier)
+                self.respondingConnections.remove(identifier)
+            default:
+                break
+            }
+        }
         connection.start(queue: queue)
         receive(connection, buffer: Data())
+        queue.asyncAfter(deadline: .now() + Self.requestDeadline) { [weak self, weak connection] in
+            guard let self, let connection,
+                  self.connections[ObjectIdentifier(connection)] != nil else { return }
+            self.respond(connection, status: 408, body: "{\"ok\":false}")
+        }
     }
 
     private func receive(_ connection: NWConnection, buffer: Data) {
@@ -119,28 +158,19 @@ private final class CompanionServer {
             if let data {
                 requestData.append(data)
             }
-            if let request = self.completeRequest(from: requestData) {
+            switch HTTPRequestParser.parse(requestData) {
+            case let .complete(request):
                 self.handle(request, connection: connection)
-            } else if error != nil || isComplete || requestData.count >= 64 * 1024 {
+            case .invalid:
                 self.respond(connection, status: 400, body: "{\"ok\":false}")
-            } else {
-                self.receive(connection, buffer: requestData)
+            case .incomplete:
+                if error != nil || isComplete {
+                    self.respond(connection, status: 400, body: "{\"ok\":false}")
+                } else {
+                    self.receive(connection, buffer: requestData)
+                }
             }
         }
-    }
-
-    private func completeRequest(from data: Data) -> Data? {
-        let separator = Data("\r\n\r\n".utf8)
-        guard let headerEnd = data.range(of: separator),
-              let header = String(data: data[..<headerEnd.lowerBound], encoding: .utf8) else {
-            return nil
-        }
-        let contentLength = header.split(separator: "\r\n")
-            .first { $0.lowercased().hasPrefix("content-length:") }
-            .flatMap { Int($0.split(separator: ":", maxSplits: 1)[1].trimmingCharacters(in: .whitespaces)) } ?? 0
-        let totalLength = headerEnd.upperBound + contentLength
-        guard data.count >= totalLength else { return nil }
-        return data.prefix(totalLength)
     }
 
     private func handle(_ data: Data, connection: NWConnection) {
@@ -169,9 +199,7 @@ private final class CompanionServer {
             return
         }
 
-        guard header.split(separator: "\r\n").contains(where: {
-            $0.caseInsensitiveCompare("Authorization: Bearer \(token)") == .orderedSame
-        }) else {
+        guard HTTPRequestParser.hasBearerToken(token, in: data) else {
             respond(connection, status: 401, body: "{\"ok\":false}")
             return
         }
@@ -182,13 +210,34 @@ private final class CompanionServer {
         }
 
         if header.hasPrefix("GET /applications ") {
-            let applications = Self.installedApplications()
-            let data = try? JSONEncoder().encode(applications)
-            respond(
-                connection,
-                status: 200,
-                body: data.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-            )
+            workQueue.async { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                let applications = Self.installedApplications()
+                let data = try? JSONEncoder().encode(applications)
+                self.queue.async {
+                    self.respond(
+                        connection,
+                        status: 200,
+                        body: data.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+                    )
+                }
+            }
+            return
+        }
+
+        if header.hasPrefix("GET /nethome-units ") {
+            workQueue.async { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                let units = self.netHomeUnitsHandler()
+                let data = units.flatMap { try? JSONEncoder().encode($0) }
+                self.queue.async {
+                    self.respond(
+                        connection,
+                        status: data == nil ? 400 : 200,
+                        body: data.flatMap { String(data: $0, encoding: .utf8) } ?? "{\"ok\":false}"
+                    )
+                }
+            }
             return
         }
 
@@ -200,17 +249,19 @@ private final class CompanionServer {
                 respond(connection, status: 400, body: "{\"ok\":false}")
                 return
             }
-            var response: TextSourceBatchResponse?
             let subscriberHost = Self.host(from: connection.endpoint)
-            DispatchQueue.main.sync {
-                response = textSourceHandler(request, subscriberHost)
+            workQueue.async { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                let response = self.textSourceHandler(request, subscriberHost)
+                let encoded = try? JSONEncoder().encode(response)
+                self.queue.async {
+                    self.respond(
+                        connection,
+                        status: encoded == nil ? 400 : 200,
+                        body: encoded.flatMap { String(data: $0, encoding: .utf8) } ?? "{\"ok\":false}"
+                    )
+                }
             }
-            let encoded = response.flatMap { try? JSONEncoder().encode($0) }
-            respond(
-                connection,
-                status: encoded == nil ? 400 : 200,
-                body: encoded.flatMap { String(data: $0, encoding: .utf8) } ?? "{\"ok\":false}"
-            )
             return
         }
 
@@ -220,15 +271,20 @@ private final class CompanionServer {
             return
         }
 
-        var succeeded = false
-        DispatchQueue.main.sync {
-            succeeded = actionHandler(request)
+        workQueue.async { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            let result = self.actionHandler(request)
+            let responseBody = result.succeeded
+                ? "{\"ok\":true,\"changed\":\(result.changed ? "true" : "false")}"
+                : "{\"ok\":false}"
+            self.queue.async {
+                self.respond(
+                    connection,
+                    status: result.succeeded ? 200 : 400,
+                    body: responseBody
+                )
+            }
         }
-        respond(
-            connection,
-            status: succeeded ? 200 : 400,
-            body: succeeded ? "{\"ok\":true}" : "{\"ok\":false}"
-        )
     }
 
     private static func host(from endpoint: NWEndpoint) -> String? {
@@ -319,11 +375,15 @@ private final class CompanionServer {
     }
 
     private func respond(_ connection: NWConnection, status: Int, body: String) {
+        let identifier = ObjectIdentifier(connection)
+        guard respondingConnections.insert(identifier).inserted else { return }
         let reason: String
         switch status {
         case 200: reason = "OK"
         case 401: reason = "Unauthorized"
         case 403: reason = "Forbidden"
+        case 408: reason = "Request Timeout"
+        case 503: reason = "Service Unavailable"
         default: reason = "Bad Request"
         }
         let response = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
@@ -338,7 +398,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusMenuItem: NSMenuItem!
     private var pairedDevicesMenuItem: NSMenuItem!
     private var recentActionMenuItem: NSMenuItem!
+    private var netHomeMenuItem: NSMenuItem!
     private var server: CompanionServer?
+    private let netHomeService = NetHomeService()
     private var configuration = CompanionConfiguration.initial
     private var editorWindowController: RemoteEditorWindowController?
     private var nowPlayingSubscriptions: [String: Set<String>] = [:]
@@ -354,6 +416,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         configureMenu()
         startNowPlayingObservation()
         restartServer()
+        if !netHomeService.isSignedIn {
+            DispatchQueue.main.async { [weak self] in self?.showNetHomeLogin() }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -419,12 +484,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Open Controls Editor…", action: #selector(showControlsEditor), keyEquivalent: "e"))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ","))
+        netHomeMenuItem = NSMenuItem(title: "NetHome Plus…", action: #selector(showNetHomeAccount), keyEquivalent: "")
+        menu.addItem(netHomeMenuItem)
         menu.addItem(NSMenuItem(title: "Accessibility Settings…", action: #selector(openAccessibilitySettings), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Forget Paired Devices…", action: #selector(forgetPairedDevices), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit paperGIF Mac", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         updatePairedDevicesMenuItem()
+        updateNetHomeMenuItem()
     }
 
     private func restartServer() {
@@ -436,7 +504,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.approvePairing(request) ?? false
             },
             actionHandler: { [weak self] request in
-                self?.perform(request) ?? false
+                self?.perform(request) ?? (false, false)
+            },
+            netHomeUnitsHandler: { [weak self] in
+                guard let self else { return nil }
+                return try? self.netHomeService.listUnits()
             },
             textSourceHandler: { [weak self] request, subscriberHost in
                 self?.resolveTextSources(request, subscriberHost: subscriberHost)
@@ -458,6 +530,72 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             : "\(count) paired device\(count == 1 ? "" : "s")"
     }
 
+    private func updateNetHomeMenuItem() {
+        netHomeMenuItem?.title = netHomeService.isSignedIn
+            ? "NetHome Plus: Connected…"
+            : "Connect NetHome Plus…"
+    }
+
+    @MainActor @objc private func showNetHomeAccount() {
+        guard netHomeService.isSignedIn else {
+            showNetHomeLogin()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "NetHome Plus Connected"
+        alert.informativeText = "Signed in as \(netHomeService.account ?? "NetHome user"). Credentials are stored in macOS Keychain."
+        alert.addButton(withTitle: "Done")
+        alert.addButton(withTitle: "Sign Out")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn {
+            netHomeService.signOut()
+            updateNetHomeMenuItem()
+            showNetHomeLogin()
+        }
+    }
+
+    @MainActor private func showNetHomeLogin() {
+        let alert = NSAlert()
+        alert.messageText = "Connect NetHome Plus"
+        alert.informativeText = "Sign in with the email and password used by the NetHome Plus app. Your password is stored only in macOS Keychain."
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Not Now")
+
+        let accountField = NSTextField(string: netHomeService.account ?? "")
+        accountField.placeholderString = "Email"
+        let passwordField = NSSecureTextField(string: "")
+        passwordField.placeholderString = "Password"
+        let stack = NSStackView(views: [
+            labeled("Account", accountField),
+            labeled("Password", passwordField),
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.frame = NSRect(x: 0, y: 0, width: 390, height: 95)
+        accountField.widthAnchor.constraint(equalToConstant: 390).isActive = true
+        passwordField.widthAnchor.constraint(equalToConstant: 390).isActive = true
+        alert.accessoryView = stack
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            let devices = try netHomeService.signIn(
+                account: accountField.stringValue,
+                password: passwordField.stringValue
+            )
+            updateNetHomeMenuItem()
+            let confirmation = NSAlert()
+            confirmation.messageText = "NetHome Plus Connected"
+            confirmation.informativeText = "Found \(devices.joined(separator: ", "))."
+            confirmation.runModal()
+        } catch {
+            let failure = NSAlert(error: error)
+            failure.messageText = "Could Not Connect NetHome Plus"
+            failure.runModal()
+        }
+    }
+
     @objc private func openAccessibilitySettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else { return }
         NSWorkspace.shared.open(url)
@@ -469,7 +607,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 computerName: Host.current().localizedName ?? "This Mac",
                 host: ProcessInfo.processInfo.hostName,
                 port: Int(port),
-                token: token
+                token: token,
+                netHomeService: netHomeService
             )
             editorWindowController = RemoteEditorWindowController(store: store)
         }
@@ -518,12 +657,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    @objc private func showSettings() {
+    @MainActor @objc private func showSettings() {
         let alert = NSAlert()
         alert.messageText = "paperGIF Mac Settings"
         alert.informativeText = "Host: \(ProcessInfo.processInfo.hostName)\nPair from the iPhone Remote tab and approve the request here. Only exact script lines listed below may run."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "NetHome Account…")
 
         let portField = NSTextField(string: String(port))
         portField.placeholderString = "Port"
@@ -544,7 +684,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         scriptsField.widthAnchor.constraint(equalToConstant: 430).isActive = true
         alert.accessoryView = stack
 
-        guard alert.runModal() == .alertFirstButtonReturn,
+        let response = alert.runModal()
+        if response == .alertThirdButtonReturn {
+            showNetHomeAccount()
+            return
+        }
+        guard response == .alertFirstButtonReturn,
               let newPort = UInt16(portField.stringValue) else { return }
         configuration = CompanionConfiguration(
             token: token,
@@ -569,32 +714,52 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return stack
     }
 
-    private func perform(_ request: RemoteRequest) -> Bool {
-        let succeeded: Bool
+    private func perform(_ request: RemoteRequest) -> RemoteActionResult {
+        let result: RemoteActionResult
         switch request.type {
         case "macMedia":
-            succeeded = request.text == "volume"
+            let succeeded = request.text == "volume"
                 ? setOutputVolume(request.value)
                 : sendMediaCommand(request.text)
+            result = (succeeded, succeeded)
         case "macKey":
-            succeeded = sendKey(request.text, modifiers: request.modifiers)
+            let succeeded = sendKey(request.text, modifiers: request.modifiers)
+            result = (succeeded, succeeded)
         case "macOpen":
-            succeeded = open(request.text)
+            let succeeded = open(request.text)
+            result = (succeeded, succeeded)
         case "macShortcut":
-            succeeded = launch("/usr/bin/shortcuts", arguments: ["run", request.text])
+            let succeeded = launch("/usr/bin/shortcuts", arguments: ["run", request.text])
+            result = (succeeded, succeeded)
         case "macScript":
-            succeeded = allowedScripts.contains(request.text) &&
+            var scriptAllowed = false
+            DispatchQueue.main.sync {
+                scriptAllowed = allowedScripts.contains(request.text)
+            }
+            let succeeded = scriptAllowed &&
                 launch("/bin/zsh", arguments: ["-lc", request.text])
+            result = (succeeded, succeeded)
+        case "netHomePower", "netHomeTemperature", "netHomeMode", "netHomeFan", "netHomeClimate":
+            result = netHomeService.perform(
+                type: request.type,
+                unit: request.host ?? "",
+                text: request.text,
+                value: request.value,
+                valueTenths: request.valueTenths
+            )
         default:
-            succeeded = false
+            result = (false, false)
         }
         let actionName = request.text.isEmpty ? request.type : request.text
-        recentActionMenuItem.title = "\(succeeded ? "Ran" : "Failed"): \(actionName)"
-        statusItem.button?.image = NSImage(
-            systemSymbolName: succeeded ? "checkmark.rectangle" : "exclamationmark.rectangle",
-            accessibilityDescription: succeeded ? "Last action succeeded" : "Last action failed"
-        )
-        return succeeded
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            recentActionMenuItem.title = "\(result.succeeded ? (result.changed ? "Ran" : "Already set") : "Failed"): \(actionName)"
+            statusItem.button?.image = NSImage(
+                systemSymbolName: result.succeeded ? "checkmark.rectangle" : "exclamationmark.rectangle",
+                accessibilityDescription: result.succeeded ? "Last action succeeded" : "Last action failed"
+            )
+        }
+        return result
     }
 
     private func resolveTextSources(
@@ -604,14 +769,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let nowPlayingControlIDs = Set(request.items.lazy
             .filter { $0.source == "nowPlaying" }
             .map { String($0.id.prefix(40)) })
-        if let subscriberHost, !nowPlayingControlIDs.isEmpty {
-            nowPlayingSubscriptions[subscriberHost] = nowPlayingControlIDs
+        var permittedScripts: Set<String> = []
+        DispatchQueue.main.sync {
+            if let subscriberHost, !nowPlayingControlIDs.isEmpty {
+                nowPlayingSubscriptions[subscriberHost] = nowPlayingControlIDs
+            }
+            permittedScripts = allowedScripts
         }
         let items = request.items.map { item -> TextSourceResponse in
             let output: String?
             switch item.source {
             case "macScript":
-                output = allowedScripts.contains(item.sourceText)
+                output = permittedScripts.contains(item.sourceText)
                     ? commandOutput("/bin/zsh", arguments: ["-lc", item.sourceText])
                     : nil
             case "macShortcut":
@@ -798,23 +967,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func commandOutput(_ executable: String, arguments: [String]) -> String? {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = output
         do {
-            try process.run()
-            let timeout = DispatchWorkItem { [weak process] in
-                if process?.isRunning == true { process?.terminate() }
-            }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: timeout)
-            process.waitUntilExit()
-            timeout.cancel()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            guard process.terminationStatus == 0 else { return nil }
-            return String(data: data.prefix(4096), encoding: .utf8)
+            let result = try BoundedProcessRunner.run(
+                executableURL: URL(fileURLWithPath: executable),
+                arguments: arguments,
+                timeout: 5,
+                maximumOutputBytes: 4096
+            )
+            guard result.status == 0, !result.timedOut else { return nil }
+            return String(data: result.output, encoding: .utf8)
         } catch {
             return nil
         }
@@ -858,13 +1019,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setOutputVolume(_ value: Int) -> Bool {
         let percentage = Int((Double(value.clamped(to: 0...255)) / 255 * 100).rounded())
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", "set volume output volume \(percentage)"]
         do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
+            let result = try BoundedProcessRunner.run(
+                executableURL: URL(fileURLWithPath: "/usr/bin/osascript"),
+                arguments: ["-e", "set volume output volume \(percentage)"],
+                captureOutput: false,
+                timeout: 5
+            )
+            return result.status == 0 && !result.timedOut
         } catch {
             return false
         }

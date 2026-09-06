@@ -11,6 +11,18 @@ private struct PaperGIFPairingResponse: Decodable {
     let token: String
 }
 
+private struct PaperGIFNetHomeUnit: Decodable, Sendable {
+    let id: String
+    let name: String
+}
+
+private struct PaperGIFConnectedNetHomeUnit: Identifiable, Sendable {
+    let unit: PaperGIFNetHomeUnit
+    let computer: PaperGIFRemoteComputer
+
+    var id: String { "\(computer.id.uuidString):\(unit.id)" }
+}
+
 private enum PaperGIFRemoteEditorPanel: String, CaseIterable, Identifiable {
     case layout = "Layout"
     case connections = "Connections"
@@ -32,6 +44,9 @@ struct PaperGIFRemoteView: View {
     @State private var isReadingWiFi = false
     @State private var isConnectingComputer = false
     @State private var isConnectingWLED = false
+    @State private var isLoadingNetHomeUnits = false
+    @State private var netHomeUnits: [PaperGIFConnectedNetHomeUnit] = []
+    @State private var netHomeStatus: String?
     @State private var showsAdvancedComputerSettings = false
     @State private var showsManualWLED = false
     @State private var selectedComputerID: UUID?
@@ -63,6 +78,8 @@ struct PaperGIFRemoteView: View {
                     } else {
                         deviceWiFiSection
                         computerSection
+                        temperatureUnitSection
+                        netHomeSection
                         wledSection
                     }
                 }
@@ -87,6 +104,7 @@ struct PaperGIFRemoteView: View {
                 wledDiscovery.stop()
                 liveSyncTask?.cancel()
             }
+            .task { await refreshNetHomeUnits() }
             .onChange(of: bluetoothManager.remoteSyncStatus) {
                 if let status = bluetoothManager.remoteSyncStatus,
                    wifiStatus != nil {
@@ -345,6 +363,69 @@ struct PaperGIFRemoteView: View {
         }
     }
 
+    private var temperatureUnitSection: some View {
+        Section("Temperature") {
+            Picker("Units", selection: $profile.temperatureUnit) {
+                Text("Celsius").tag(PaperGIFTemperatureUnit.celsius)
+                Text("Fahrenheit").tag(PaperGIFTemperatureUnit.fahrenheit)
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var netHomeSection: some View {
+        Section {
+            Button {
+                Task { await refreshNetHomeUnits() }
+            } label: {
+                Label(
+                    isLoadingNetHomeUnits ? "Refreshing…" : "Refresh AC Units",
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(isLoadingNetHomeUnits || profile.computers.isEmpty)
+
+            if isLoadingNetHomeUnits {
+                ProgressView()
+            }
+
+            ForEach(netHomeUnits) { connection in
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label(connection.unit.name, systemImage: "snowflake")
+                        Spacer()
+                        if hasNetHomeControls(for: connection) {
+                            Label("Added", systemImage: "checkmark.circle.fill")
+                                .font(.subheadline)
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    Text("NetHome Plus via \(connection.computer.name)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if !hasNetHomeControls(for: connection) {
+                        Button {
+                            addNetHomePage(for: connection)
+                        } label: {
+                            Label("Add Thermostat Page", systemImage: "plus.circle.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(profile.pages.count >= 8)
+                    }
+                }
+            }
+
+            if let netHomeStatus {
+                Text(netHomeStatus)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Air Conditioners")
+        } footer: {
+            Text("Sign in to NetHome Plus on a paired Mac. Adding a unit creates power, setpoint, fan, mode, and sensor auto controls.")
+        }
+    }
+
     private var wledSection: some View {
         Section {
             Button {
@@ -440,6 +521,7 @@ struct PaperGIFRemoteView: View {
                         page: livePageBinding(page),
                         pages: profile.pages,
                         computers: profile.computers,
+                        temperatureUnit: profile.temperatureUnit,
                         wledDiscovery: wledDiscovery
                     )
                 } label: {
@@ -725,6 +807,7 @@ struct PaperGIFRemoteView: View {
                 selectedComputerID = computer.id
                 syncDefaultComputer()
                 guard save() else { return }
+                await refreshNetHomeUnits()
                 if isPairing, bluetoothManager.connectionState == .connected {
                     computerStatus = "Paired with \(computer.name); syncing M5Paper…"
                     bluetoothManager.syncRemoteProfile(profile)
@@ -870,12 +953,75 @@ struct PaperGIFRemoteView: View {
         return normalized
     }
 
+    private func refreshNetHomeUnits() async {
+        guard !profile.computers.isEmpty else {
+            netHomeUnits = []
+            netHomeStatus = "Pair a Mac to load NetHome Plus units."
+            return
+        }
+        isLoadingNetHomeUnits = true
+        netHomeStatus = nil
+        defer { isLoadingNetHomeUnits = false }
+        var discovered: [PaperGIFConnectedNetHomeUnit] = []
+        var failures: [String] = []
+        for computer in profile.computers {
+            var components = URLComponents()
+            components.scheme = "http"
+            components.host = computer.host
+            components.port = computer.port
+            components.path = "/nethome-units"
+            guard let url = components.url else { continue }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 20
+            request.setValue("Bearer \(computer.token)", forHTTPHeaderField: "Authorization")
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
+                    failures.append(computer.name)
+                    continue
+                }
+                let units = try JSONDecoder().decode([PaperGIFNetHomeUnit].self, from: data)
+                discovered.append(contentsOf: units.map {
+                    PaperGIFConnectedNetHomeUnit(unit: $0, computer: computer)
+                })
+            } catch {
+                failures.append(computer.name)
+            }
+        }
+        netHomeUnits = discovered
+        if discovered.isEmpty {
+            netHomeStatus = failures.isEmpty
+                ? "No NetHome Plus air conditioners were found."
+                : "Couldn’t load AC units from \(failures.joined(separator: ", "))."
+        }
+    }
+
+    private func hasNetHomeControls(for connection: PaperGIFConnectedNetHomeUnit) -> Bool {
+        profile.pages.flatMap(\.controls).contains {
+            $0.action.host.caseInsensitiveCompare(connection.unit.name) == .orderedSame &&
+                $0.action.computerID == connection.computer.id.uuidString &&
+                [.netHomePower, .netHomeTemperature, .netHomeMode, .netHomeFan, .netHomeAuto]
+                    .contains($0.action.type)
+        }
+    }
+
+    private func addNetHomePage(for connection: PaperGIFConnectedNetHomeUnit) {
+        guard profile.pages.count < 8, !hasNetHomeControls(for: connection) else { return }
+        let unit = connection.unit.name
+        let computerID = connection.computer.id.uuidString
+        var updatedProfile = profile
+        updatedProfile.pages.append(.netHomeThermostat(unit: unit, computerID: computerID))
+        applyLiveProfile(updatedProfile)
+        netHomeStatus = "Added \(unit). Open Layout to arrange its thermostat controls."
+    }
+
 }
 
 private struct PaperGIFRemotePageEditor: View {
     @Binding var page: PaperGIFRemotePage
     let pages: [PaperGIFRemotePage]
     let computers: [PaperGIFRemoteComputer]
+    let temperatureUnit: PaperGIFTemperatureUnit
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     @State private var selectedControlID: UUID?
 
@@ -886,6 +1032,7 @@ private struct PaperGIFRemotePageEditor: View {
                     page: $page,
                     pageIndex: pages.firstIndex { $0.id == page.id } ?? 0,
                     pageCount: pages.count,
+                    temperatureUnit: temperatureUnit,
                     onEditControl: { selectedControlID = $0 }
                 )
                 .aspectRatio(540.0 / 960.0, contentMode: .fit)
@@ -905,6 +1052,7 @@ private struct PaperGIFRemotePageEditor: View {
                             control: $control,
                             pages: pages,
                             computers: computers,
+                            temperatureUnit: temperatureUnit,
                             wledDiscovery: wledDiscovery
                         )
                     } label: {
@@ -961,6 +1109,7 @@ private struct PaperGIFRemotePageEditor: View {
                     control: $page.controls[index],
                     pages: pages,
                     computers: computers,
+                    temperatureUnit: temperatureUnit,
                     wledDiscovery: wledDiscovery
                 )
             }
@@ -1017,6 +1166,7 @@ private struct PaperGIFRemotePagePreview: View {
     @Binding var page: PaperGIFRemotePage
     let pageIndex: Int
     let pageCount: Int
+    let temperatureUnit: PaperGIFTemperatureUnit
     let onEditControl: (UUID) -> Void
     @State private var draggedControlID: UUID?
     @State private var dragLocation: CGPoint?
@@ -1163,7 +1313,14 @@ private struct PaperGIFRemotePagePreview: View {
         case .staticText: return textBox.sourceText
         case .dateTime: return "Sep 2, 18:54"
         case .macScript, .macShortcut: return textBox.placeholder == "Unavailable" ? "Command output" : textBox.placeholder
-        case .controlValue: return "128"
+        case .controlValue:
+            if control.action.type == .netHomeTemperature {
+                return "\(temperatureUnit.displayValue(celsiusTenths: control.action.valueTenths ?? control.action.value * 10)) \(temperatureUnit.symbol)"
+            }
+            if control.action.type == .netHomeFan {
+                return "\(control.action.value)%"
+            }
+            return "128"
         case .nowPlaying: return "Song Title - Artist"
         }
     }
@@ -1283,6 +1440,7 @@ private struct PaperGIFRemoteControlEditor: View {
     @Binding var control: PaperGIFRemoteControl
     let pages: [PaperGIFRemotePage]
     let computers: [PaperGIFRemoteComputer]
+    let temperatureUnit: PaperGIFTemperatureUnit
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     @StateObject private var applicationCatalog = PaperGIFMacApplicationCatalog()
 
@@ -1348,10 +1506,11 @@ private struct PaperGIFRemoteControlEditor: View {
         }
         .navigationTitle(control.title)
         .onChange(of: control.action.type) {
+            applyActionDefaults()
             if control.action.type != .macOpen {
                 control.iconBitmap = nil
             }
-            if control.kind != .textBox && control.action.type == .wledBrightness {
+            if control.kind != .textBox && [.wledBrightness, .netHomeTemperature, .netHomeFan].contains(control.action.type) {
                 control.kind = .slider
                 control.isToggle = nil
             } else if control.kind == .slider {
@@ -1403,7 +1562,7 @@ private struct PaperGIFRemoteControlEditor: View {
                 Picker("Control", selection: referencedControlBinding) {
                     Text("Choose Control").tag("")
                     ForEach(referenceableControls) { candidate in
-                        Text(candidate.title).tag(candidate.id.uuidString)
+                        Text(referenceableControlTitle(candidate)).tag(candidate.id.uuidString)
                     }
                 }
             case .nowPlaying:
@@ -1551,6 +1710,65 @@ private struct PaperGIFRemoteControlEditor: View {
             wledDevicePicker
             LabeledContent("Brightness", value: "\(control.action.value)")
             Slider(value: brightnessBinding, in: 0...255, step: 1)
+        case .netHomePower:
+            netHomeDeviceField
+            Picker("Power", selection: $control.action.text) {
+                Text("Toggle").tag("toggle")
+                Text("On").tag("on")
+                Text("Off").tag("off")
+            }
+        case .netHomeTemperature:
+            netHomeDeviceField
+            Stepper(
+                "Setpoint: \(temperatureUnit.displayValue(celsiusTenths: control.action.valueTenths ?? control.action.value * 10)) \(temperatureUnit.symbol)",
+                value: temperatureDisplayBinding,
+                in: temperatureDisplayRange
+            )
+        case .netHomeTemperatureStep:
+            netHomeDeviceField
+            Text(control.action.value < 0 ? "Decrease the thermostat setpoint" : "Increase the thermostat setpoint")
+                .foregroundStyle(.secondary)
+        case .netHomeMode:
+            netHomeDeviceField
+            Picker("Mode", selection: $control.action.text) {
+                Text("Auto").tag("auto")
+                Text("Cool").tag("cool")
+                Text("Heat").tag("heat")
+                Text("Dry").tag("dry")
+                Text("Fan").tag("fan")
+            }
+        case .netHomeFan:
+            netHomeDeviceField
+            Stepper("Fan: \(control.action.value)%", value: $control.action.value, in: 20...100, step: 20)
+        case .netHomeAuto:
+            netHomeDeviceField
+            Text("Uses the thermostat page setpoint.")
+                .foregroundStyle(.secondary)
+            Picker("Control", selection: $control.action.text) {
+                Text("Cooling").tag("cool")
+                Text("Heating").tag("heat")
+            }
+            Stepper(
+                "Deadband: \(deadbandDisplayText)",
+                value: optionalActionValueBinding(\.deadbandTenths, default: 10),
+                in: 5...30,
+                step: 5
+            )
+            Stepper(
+                "Humidity assist: \(control.action.humidityThreshold ?? 65)%",
+                value: optionalActionValueBinding(\.humidityThreshold, default: 65),
+                in: 40...80,
+                step: 5
+            )
+            Stepper(
+                "Adjustment interval: \(control.action.minimumCycleMinutes ?? 10) min",
+                value: optionalActionValueBinding(\.minimumCycleMinutes, default: 10),
+                in: 1...30,
+                step: 1
+            )
+            Text("Humidity assist only extends cooling. The minimum cycle protects the compressor.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .page:
             Picker("Page", selection: $control.action.text) {
                 Text("Choose Page").tag("")
@@ -1559,6 +1777,24 @@ private struct PaperGIFRemoteControlEditor: View {
                 }
             }
         }
+
+        if supportsSchedule {
+            Toggle("Run on a daily schedule", isOn: scheduleEnabledBinding)
+            if control.action.scheduleEnabled == true {
+                DatePicker(
+                    "Time",
+                    selection: scheduleTimeBinding,
+                    displayedComponents: .hourAndMinute
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var netHomeDeviceField: some View {
+        TextField("NetHome unit name", text: $control.action.host)
+            .textInputAutocapitalization(.words)
+            .autocorrectionDisabled()
     }
 
     @ViewBuilder
@@ -1698,6 +1934,42 @@ private struct PaperGIFRemoteControlEditor: View {
         return normalized
     }
 
+    private var supportsSchedule: Bool {
+        (control.kind == .button || control.action.type == .netHomeTemperature) &&
+            control.action.type != .page
+    }
+
+    private var scheduleEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { control.action.scheduleEnabled == true },
+            set: { enabled in
+                control.action.scheduleEnabled = enabled
+                if enabled && control.action.scheduleHour == nil {
+                    control.action.scheduleHour = 8
+                    control.action.scheduleMinute = 0
+                }
+            }
+        )
+    }
+
+    private var scheduleTimeBinding: Binding<Date> {
+        Binding(
+            get: {
+                Calendar.current.date(
+                    bySettingHour: control.action.scheduleHour ?? 8,
+                    minute: control.action.scheduleMinute ?? 0,
+                    second: 0,
+                    of: Date()
+                ) ?? Date()
+            },
+            set: { date in
+                let components = Calendar.current.dateComponents([.hour, .minute], from: date)
+                control.action.scheduleHour = components.hour ?? 8
+                control.action.scheduleMinute = components.minute ?? 0
+            }
+        )
+    }
+
     private func textBoxBinding<Value>(
         _ keyPath: WritableKeyPath<PaperGIFRemoteTextBox, Value>
     ) -> Binding<Value> {
@@ -1713,8 +1985,24 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private var referenceableControls: [PaperGIFRemoteControl] {
         pages.flatMap(\.controls).filter {
-            $0.id != control.id && ($0.kind == .slider || $0.isToggle == true)
+            ($0.id != control.id || $0.action.type == .netHomeTemperature) &&
+                ($0.kind == .slider || $0.isToggle == true ||
+                    $0.action.type == .netHomeTemperature)
         }
+    }
+
+    private func referenceableControlTitle(_ candidate: PaperGIFRemoteControl) -> String {
+        let isNetHomeControl = switch candidate.action.type {
+        case .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
+             .netHomeMode, .netHomeFan, .netHomeAuto:
+            true
+        default:
+            false
+        }
+        if isNetHomeControl && !candidate.action.host.isEmpty {
+            return "\(candidate.action.host) \(candidate.title)"
+        }
+        return candidate.title
     }
 
     private var referencedControlBinding: Binding<String> {
@@ -1785,6 +2073,41 @@ private struct PaperGIFRemoteControlEditor: View {
         )
     }
 
+    private var temperatureDisplayRange: ClosedRange<Int> {
+        temperatureUnit.displayValue(celsius: 16)...temperatureUnit.displayValue(celsius: 30)
+    }
+
+    private var temperatureDisplayBinding: Binding<Int> {
+        Binding(
+            get: {
+                temperatureUnit.displayValue(
+                    celsiusTenths: control.action.valueTenths ?? control.action.value * 10
+                )
+            },
+            set: {
+                let tenths = min(max(temperatureUnit.celsiusTenthsValue(displayValue: $0), 160), 300)
+                control.action.valueTenths = tenths
+                control.action.value = Int((Double(tenths) / 10).rounded())
+            }
+        )
+    }
+
+    private var deadbandDisplayText: String {
+        let celsius = Double(control.action.deadbandTenths ?? 10) / 10
+        let value = temperatureUnit == .celsius ? celsius : celsius * 9 / 5
+        return String(format: "%.1f %@", value, temperatureUnit.symbol)
+    }
+
+    private func optionalActionValueBinding(
+        _ keyPath: WritableKeyPath<PaperGIFRemoteAction, Int?>,
+        default defaultValue: Int
+    ) -> Binding<Int> {
+        Binding(
+            get: { control.action[keyPath: keyPath] ?? defaultValue },
+            set: { control.action[keyPath: keyPath] = $0 }
+        )
+    }
+
     private var volumePercentageBinding: Binding<Double> {
         Binding(
             get: { Double(volumePercentage) },
@@ -1845,10 +2168,37 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private var isMacAction: Bool {
         switch control.action.type {
-        case .macMedia, .macKey, .macOpen, .macShortcut, .macScript:
+        case .macMedia, .macKey, .macOpen, .macShortcut, .macScript,
+               .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
+               .netHomeMode, .netHomeFan, .netHomeAuto:
             true
         default:
             false
+        }
+    }
+
+    private func applyActionDefaults() {
+        switch control.action.type {
+        case .netHomePower:
+            control.action.text = "toggle"
+        case .netHomeTemperature:
+            control.action.value = 22
+            control.action.valueTenths = 220
+        case .netHomeTemperatureStep:
+            control.action.value = 1
+        case .netHomeAuto:
+            control.action.text = "cool"
+            control.action.value = 22
+            control.action.deadbandTenths = 10
+            control.action.humidityThreshold = 65
+            control.action.minimumCycleMinutes = 10
+            control.isToggle = true
+        case .netHomeMode:
+            control.action.text = "auto"
+        case .netHomeFan:
+            control.action.value = 40
+        default:
+            break
         }
     }
 

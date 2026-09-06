@@ -20,7 +20,10 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     @Published var profile: RemoteProfile {
-        didSet { scheduleSave() }
+        didSet {
+            scheduleSave()
+            scheduleLiveSync()
+        }
     }
     @Published var deviceAddress: String {
         didSet { scheduleSave() }
@@ -31,11 +34,24 @@ final class RemoteEditorStore: ObservableObject {
     @Published private(set) var wifiNetworks: [DeviceWiFiNetwork] = []
     @Published private(set) var isScanningWiFi = false
     @Published private(set) var wifiScanError: String?
+    @Published private(set) var netHomeUnits: [NetHomeUnit] = []
+    @Published private(set) var isLoadingNetHomeUnits = false
+    @Published private(set) var netHomeError: String?
     let localComputer: RemoteComputer
 
     private var saveTask: Task<Void, Never>?
+    private var liveSyncTask: Task<Void, Never>?
+    private var isApplyingDeviceProfile = false
+    private let netHomeService: NetHomeService?
 
-    init(computerName: String, host: String, port: Int, token: String) {
+    init(
+        computerName: String,
+        host: String,
+        port: Int,
+        token: String,
+        netHomeService: NetHomeService? = nil
+    ) {
+        self.netHomeService = netHomeService
         let document = Self.loadDocument()
         profile = document?.profile ?? .starter
         deviceAddress = document?.deviceAddress ?? "192.168.4.1"
@@ -222,6 +238,42 @@ final class RemoteEditorStore: ObservableObject {
         }
     }
 
+    func refreshNetHomeUnits() async {
+        guard let netHomeService else {
+            netHomeError = "NetHome Plus is unavailable."
+            return
+        }
+        isLoadingNetHomeUnits = true
+        netHomeError = nil
+        let result = await Task.detached { () -> (units: [NetHomeUnit], error: String?) in
+            do {
+                return (try netHomeService.listUnits(), nil)
+            } catch {
+                return ([], error.localizedDescription)
+            }
+        }.value
+        netHomeUnits = result.units
+        netHomeError = result.error
+        isLoadingNetHomeUnits = false
+    }
+
+    func addNetHomePage(unit: NetHomeUnit) {
+        guard profile.pages.count < 8, !hasNetHomeControls(unitName: unit.name) else { return }
+        let computerID = profile.computers.first(where: { $0.host == localComputer.host })?.id.uuidString
+        let page = RemotePage.netHomeThermostat(unit: unit.name, computerID: computerID)
+        profile.pages.append(page)
+        selectedPageID = page.id
+        selectedControlID = nil
+    }
+
+    func hasNetHomeControls(unitName: String) -> Bool {
+        profile.pages.flatMap(\.controls).contains {
+            $0.action.host.caseInsensitiveCompare(unitName) == .orderedSame &&
+                [.netHomePower, .netHomeTemperature, .netHomeMode, .netHomeFan, .netHomeAuto]
+                    .contains($0.action.type)
+        }
+    }
+
     func layoutUnitsUsed(on page: RemotePage) -> Int {
         page.controls.reduce(0) { $0 + layoutUnits(for: $1) }
     }
@@ -255,6 +307,8 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     func send() async {
+        liveSyncTask?.cancel()
+        liveSyncTask = nil
         if let validationMessage {
             sendState = .failed(validationMessage)
             return
@@ -298,7 +352,9 @@ final class RemoteEditorStore: ObservableObject {
             guard Self.validationMessage(for: loadedProfile) == nil else {
                 throw SendError.invalidProfile
             }
+            isApplyingDeviceProfile = true
             profile = loadedProfile
+            isApplyingDeviceProfile = false
             selectedPageID = loadedProfile.pages.first?.id
             selectedControlID = nil
             sendState = .succeeded("Loaded settings from \(url.host ?? deviceAddress)")
@@ -350,6 +406,17 @@ final class RemoteEditorStore: ObservableObject {
             try? await Task.sleep(for: .milliseconds(350))
             guard !Task.isCancelled else { return }
             self?.saveImmediately()
+        }
+    }
+
+    private func scheduleLiveSync() {
+        guard !isApplyingDeviceProfile else { return }
+        liveSyncTask?.cancel()
+        liveSyncTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self, self.validationMessage == nil else { return }
+            self.liveSyncTask = nil
+            await self.send()
         }
     }
 
