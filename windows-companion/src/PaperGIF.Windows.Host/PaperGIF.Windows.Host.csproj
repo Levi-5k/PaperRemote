@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Makaretu.Dns.Multicast" Version="0.27.0" />
+    <PackageReference Include="SocketIOClient" Version="3.1.2" />
     <ProjectReference Include="../PaperGIF.Windows.Core/PaperGIF.Windows.Core.csproj" />
   </ItemGroup>
   <ItemGroup>

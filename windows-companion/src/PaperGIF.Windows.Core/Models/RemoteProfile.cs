@@ -60,6 +60,7 @@ public enum RemoteActionType
     MacOpen,
     MacShortcut,
     MacScript,
+    OpenBuilds,
     WledPower,
     WledPreset,
     WledBrightness,

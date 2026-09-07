@@ -23,6 +23,7 @@ internal static class Program
         builder.Services.AddSingleton<WindowsTextSourceResolver>();
         builder.Services.AddSingleton<WindowsApplicationCatalog>();
         builder.Services.AddSingleton<NetHomeService>();
+        builder.Services.AddSingleton<OpenBuildsControlService>();
         builder.Services.AddSingleton<StartupRegistration>();
         builder.Services.AddSingleton<RemoteEditorStore>();
         builder.Services.AddSingleton<NetworkDiscoveryService>();

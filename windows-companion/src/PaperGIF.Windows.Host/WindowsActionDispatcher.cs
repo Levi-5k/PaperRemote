@@ -7,7 +7,8 @@ namespace PaperGIF.Windows.Host;
 internal sealed class WindowsActionDispatcher(
     CompanionConfiguration configuration,
     CompanionActivity activity,
-    NetHomeService netHomeService)
+    NetHomeService netHomeService,
+    OpenBuildsControlService openBuildsService)
 {
     private const uint KeyEventKeyUp = 0x0002;
     private const byte VirtualKeyControl = 0x11;
@@ -31,6 +32,7 @@ internal sealed class WindowsActionDispatcher(
             "macOpen" => Open(request.Text),
             "macScript" => RunApprovedScript(request.Text),
             "macShortcut" => false,
+            "openBuilds" => openBuildsService.Perform(request),
             _ => false,
         };
         var result = new RemoteActionResult(succeeded, succeeded);

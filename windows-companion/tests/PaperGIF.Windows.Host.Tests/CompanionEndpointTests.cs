@@ -140,6 +140,7 @@ public sealed class CompanionEndpointTests
             builder.Services.AddSingleton<WindowsTextSourceResolver>();
             builder.Services.AddSingleton<WindowsApplicationCatalog>();
             builder.Services.AddSingleton<NetHomeService>();
+            builder.Services.AddSingleton<OpenBuildsControlService>();
             var app = builder.Build();
             Program.ConfigureEndpoints(app, configuration);
             await app.StartAsync();

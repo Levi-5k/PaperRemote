@@ -1715,6 +1715,27 @@ private struct PaperGIFRemoteControlEditor: View {
         case .macScript:
             TextField("Shell command", text: $control.action.text, axis: .vertical)
                 .lineLimit(3...8)
+        case .openBuilds:
+            TextField("CONTROL address", text: $control.action.host)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Picker("Command", selection: $control.action.text) {
+                Text("Jog X -").tag("jogXNegative")
+                Text("Jog X +").tag("jogXPositive")
+                Text("Jog Y -").tag("jogYNegative")
+                Text("Jog Y +").tag("jogYPositive")
+                Text("Jog Z -").tag("jogZNegative")
+                Text("Jog Z +").tag("jogZPositive")
+                Text("Pause job").tag("pause")
+                Text("Resume job").tag("resume")
+                Text("Stop job").tag("stop")
+                Text("Abort / reset").tag("abort")
+                Text("Unlock alarm").tag("unlock")
+                Text("Home machine").tag("home")
+            }
+            if control.action.text.hasPrefix("jog") {
+                Stepper("Distance: \(control.action.value) mm", value: $control.action.value, in: 1...100)
+            }
         case .wledPower:
             wledDevicePicker
             Picker("Power", selection: $control.action.text) {
@@ -1951,7 +1972,7 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private var supportsSchedule: Bool {
         (control.kind == .button || control.action.type == .netHomeTemperature) &&
-            control.action.type != .page
+            control.action.type != .page && control.action.type != .openBuilds
     }
 
     private var scheduleEnabledBinding: Binding<Bool> {
@@ -2390,7 +2411,7 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private var isMacAction: Bool {
         switch control.action.type {
-        case .macMedia, .macKey, .macOpen, .macShortcut, .macScript,
+        case .macMedia, .macKey, .macOpen, .macShortcut, .macScript, .openBuilds,
                .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
                .netHomeMode, .netHomeFan, .netHomeAuto:
             true
@@ -2407,6 +2428,10 @@ private struct PaperGIFRemoteControlEditor: View {
             control.symbol = "playpause.fill"
             control.iconBitmap = nil
             control.isToggle = nil
+        case .openBuilds:
+            control.action.host = "127.0.0.1"
+            control.action.text = "jogXPositive"
+            control.action.value = 1
         case .netHomePower:
             control.action.text = "toggle"
         case .netHomeTemperature:

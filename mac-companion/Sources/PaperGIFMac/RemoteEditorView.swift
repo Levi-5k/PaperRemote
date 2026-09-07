@@ -808,6 +808,30 @@ private struct ControlInspector: View {
             Text("The command must exactly match a line allowed in the menu bar app's Settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .openBuilds:
+            LabeledContent("CONTROL address") {
+                TextField("127.0.0.1 or private IP", text: $control.action.host)
+            }
+            LabeledContent("Command") {
+                Picker("", selection: $control.action.text) {
+                    Text("Jog X -").tag("jogXNegative")
+                    Text("Jog X +").tag("jogXPositive")
+                    Text("Jog Y -").tag("jogYNegative")
+                    Text("Jog Y +").tag("jogYPositive")
+                    Text("Jog Z -").tag("jogZNegative")
+                    Text("Jog Z +").tag("jogZPositive")
+                    Text("Pause job").tag("pause")
+                    Text("Resume job").tag("resume")
+                    Text("Stop job").tag("stop")
+                    Text("Abort / reset").tag("abort")
+                    Text("Unlock alarm").tag("unlock")
+                    Text("Home machine").tag("home")
+                }
+                .labelsHidden()
+            }
+            if control.action.text.hasPrefix("jog") {
+                Stepper("Distance: \(control.action.value) mm", value: $control.action.value, in: 1...100)
+            }
         case .wledPower:
             wledDeviceFields
             LabeledContent("Power") {
@@ -964,6 +988,7 @@ private struct ControlInspector: View {
 
     private var isMacAction: Bool {
         [.macMedia, .macKey, .macOpen, .macShortcut, .macScript,
+         .openBuilds,
          .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
          .netHomeMode, .netHomeFan, .netHomeAuto]
             .contains(control.action.type)
@@ -975,7 +1000,7 @@ private struct ControlInspector: View {
 
     private var supportsSchedule: Bool {
         (control.kind == .button || control.action.type == .netHomeTemperature) &&
-            control.action.type != .page
+            control.action.type != .page && control.action.type != .openBuilds
     }
 
     private var scheduleEnabledBinding: Binding<Bool> {
@@ -1460,6 +1485,14 @@ private struct ControlInspector: View {
                     control.action = RemoteAction(type: type, text: "https://", computerID: computerID)
                 case .macShortcut, .macScript:
                     control.action = RemoteAction(type: type, computerID: computerID)
+                case .openBuilds:
+                    control.action = RemoteAction(
+                        type: type,
+                        host: "127.0.0.1",
+                        text: "jogXPositive",
+                        value: 1,
+                        computerID: computerID
+                    )
                 case .wledPower:
                     control.action = RemoteAction(type: type, host: host, text: "toggle")
                 case .wledPreset:

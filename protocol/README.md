@@ -22,11 +22,13 @@ credentials in protocol fixtures.
 2. `macMedia`, `macKey`, `macOpen`, `macShortcut`, and `macScript` are legacy
    protocol names. New platforms may present platform-specific labels while
    continuing to use these values on the wire.
-3. Readers must tolerate optional fields they do not use. Writers must respect
+3. `openBuilds` actions are executed by the selected desktop companion and may
+   contain only the command names documented in `companion-api.md`.
+4. Readers must tolerate optional fields they do not use. Writers must respect
    the firmware limits encoded in the schema.
-4. Stored profiles do not contain `deviceClock`. Clients may add it only to the
+5. Stored profiles do not contain `deviceClock`. Clients may add it only to the
    payload sent to M5Paper.
-5. A fixture change is incomplete until Mac, iPhone, Windows, and firmware
+6. A fixture change is incomplete until Mac, iPhone, Windows, and firmware
    contract tests agree on it.
 
 ## Validation

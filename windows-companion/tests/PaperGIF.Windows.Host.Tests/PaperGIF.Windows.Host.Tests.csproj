@@ -21,5 +21,8 @@
     <Content Include="../../../modules/media-controls.json" Link="media-controls.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="../../../modules/openbuilds-control.json" Link="openbuilds-control.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

@@ -1,0 +1,167 @@
+{
+  "$schema": "../protocol/module-manifest-v1.schema.json",
+  "schemaVersion": 1,
+  "id": "openbuilds-control",
+  "name": "OpenBuilds CONTROL",
+  "summary": "Local CNC jogging and run-state controls for OpenBuilds CONTROL.",
+  "version": "1.0.0",
+  "author": "paperGIF",
+  "controls": [
+    {
+      "id": "jog-x-negative",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog X by -1 mm",
+      "control": {
+        "id": "7591ded5-9873-40f9-b171-84484dbf4374",
+        "title": "X -",
+        "symbol": "arrow.left",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegative", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-x-positive",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog X by +1 mm",
+      "control": {
+        "id": "23cb960c-62e0-4b22-b8a4-cd68bf4d6b90",
+        "title": "X +",
+        "symbol": "arrow.right",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositive", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-y-negative",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog Y by -1 mm",
+      "control": {
+        "id": "3cfa2496-4441-4857-9cb3-aee75566cb36",
+        "title": "Y -",
+        "symbol": "arrow.down",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogYNegative", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-y-positive",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog Y by +1 mm",
+      "control": {
+        "id": "6418d3ed-509d-4b4d-bbd6-e0f5a04b3d73",
+        "title": "Y +",
+        "symbol": "arrow.up",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogYPositive", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-z-negative",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog Z by -1 mm",
+      "control": {
+        "id": "3130e752-3409-47f2-b3cf-f6b09957a416",
+        "title": "Z -",
+        "symbol": "minus",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogZNegative", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-z-positive",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog Z by +1 mm",
+      "control": {
+        "id": "db56424a-8fc2-4a8f-802e-cb7bcf243d3e",
+        "title": "Z +",
+        "symbol": "plus",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogZPositive", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "pause",
+      "category": "OpenBuilds Job",
+      "detail": "Pause the running job",
+      "control": {
+        "id": "c7e993bf-2bdb-4a9c-b26e-ac53ae3500d6",
+        "title": "Pause",
+        "symbol": "pause.fill",
+        "tintHex": "C58917",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "pause", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "resume",
+      "category": "OpenBuilds Job",
+      "detail": "Resume the paused job",
+      "control": {
+        "id": "0c30199a-2c98-40e1-9ab1-9989f5e58861",
+        "title": "Resume",
+        "symbol": "play.fill",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "resume", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "stop",
+      "category": "OpenBuilds Safety",
+      "detail": "Stop the running job",
+      "control": {
+        "id": "d0b29fe6-a1d5-4be7-9353-e9ab6e8718a4",
+        "title": "Stop",
+        "symbol": "stop.fill",
+        "tintHex": "D1495B",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "stop", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "abort",
+      "category": "OpenBuilds Safety",
+      "detail": "Immediately abort and reset the controller",
+      "control": {
+        "id": "2bb80b41-c39f-425d-b52a-843c3e6eff81",
+        "title": "Abort",
+        "symbol": "xmark",
+        "tintHex": "A61B1B",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "abort", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "unlock",
+      "category": "OpenBuilds Safety",
+      "detail": "Clear the controller alarm and queue",
+      "control": {
+        "id": "0f13ec9f-6413-4ca6-b523-fe3c5202c17e",
+        "title": "Unlock",
+        "symbol": "lock.fill",
+        "tintHex": "C58917",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "unlock", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "home",
+      "category": "OpenBuilds Machine",
+      "detail": "Run the machine homing cycle",
+      "control": {
+        "id": "0c9d188b-56fa-4f16-a0fa-84550651c030",
+        "title": "Home",
+        "symbol": "house.fill",
+        "tintHex": "3568A8",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "home", "value": 0, "modifiers": [] }
+      }
+    }
+  ]
+}

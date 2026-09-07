@@ -410,6 +410,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var netHomeMenuItem: NSMenuItem!
     private var server: CompanionServer?
     private let netHomeService = NetHomeService()
+    private let openBuildsService = OpenBuildsControlService()
     private var configuration = CompanionConfiguration.initial
     private var editorStore: RemoteEditorStore?
     private var editorWindowController: RemoteEditorWindowController?
@@ -771,6 +772,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let succeeded = scriptAllowed &&
                 launch("/bin/zsh", arguments: ["-lc", request.text])
+            result = (succeeded, succeeded)
+        case "openBuilds":
+            let succeeded = openBuildsService.perform(
+                host: request.host,
+                command: request.text,
+                value: request.value
+            )
             result = (succeeded, succeeded)
         case "netHomePower", "netHomeTemperature", "netHomeMode", "netHomeFan", "netHomeClimate":
             result = netHomeService.perform(

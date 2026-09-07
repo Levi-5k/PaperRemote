@@ -134,6 +134,7 @@ enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Send
     case macOpen
     case macShortcut
     case macScript
+    case openBuilds
     case wledPower
     case wledPreset
     case wledBrightness
@@ -154,6 +155,7 @@ enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Send
         case .macOpen: "Open app or URL"
         case .macShortcut: "Run Apple Shortcut"
         case .macScript: "Run script"
+        case .openBuilds: "OpenBuilds CONTROL"
         case .wledPower: "WLED power"
         case .wledPreset: "WLED preset"
         case .wledBrightness: "WLED brightness"

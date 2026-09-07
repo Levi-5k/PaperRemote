@@ -26,4 +26,17 @@ public sealed class ModuleCatalogTests
         Assert.NotEqual(first.Id, second.Id);
         Assert.Equal(source.Action.Type, first.Action.Type);
     }
+
+    [Fact]
+    public void OpenBuildsModuleContainsOnlyOpenBuildsActions()
+    {
+        var json = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "openbuilds-control.json"));
+        var module = JsonSerializer.Deserialize<PaperModuleManifest>(json, RemoteProfileJson.Options);
+
+        Assert.NotNull(module);
+        Assert.Equal("openbuilds-control", module.Id);
+        Assert.Equal(12, module.Controls.Count);
+        Assert.All(module.Controls, definition =>
+            Assert.Equal(PaperGIF.Windows.Core.Models.RemoteActionType.OpenBuilds, definition.Control.Action.Type));
+    }
 }

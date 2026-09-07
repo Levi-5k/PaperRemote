@@ -22,6 +22,17 @@ final class ModuleCatalogTests: XCTestCase {
         XCTAssertNotEqual(first.id, second.id)
         XCTAssertEqual(definition.control.action, first.action)
     }
+
+    func testOpenBuildsModuleContainsOnlyOpenBuildsActions() throws {
+        let module = try JSONDecoder().decode(
+            PaperModuleManifest.self,
+            from: Data(contentsOf: moduleFixture("openbuilds-control.json"))
+        )
+
+        XCTAssertEqual(module.id, "openbuilds-control")
+        XCTAssertEqual(module.controls.count, 12)
+        XCTAssertTrue(module.controls.allSatisfy { $0.control.action.type == .openBuilds })
+    }
 }
 
 private func moduleFixture(_ name: String) -> URL {

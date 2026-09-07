@@ -120,6 +120,7 @@
             "macOpen",
             "macShortcut",
             "macScript",
+            "openBuilds",
             "wledPower",
             "wledPreset",
             "wledBrightness",

@@ -837,7 +837,8 @@ internal sealed class RemoteEditorWindow : Form
         var showKeyCommand = control?.Action.Type == RemoteActionType.MacKey;
         var showActionHost = control is not null && IsDeviceAction(control.Action.Type);
         var showActionChoice = control?.Action.Type is RemoteActionType.WledPower or
-            RemoteActionType.NetHomePower or RemoteActionType.NetHomeMode or RemoteActionType.NetHomeAuto;
+            RemoteActionType.NetHomePower or RemoteActionType.NetHomeMode or RemoteActionType.NetHomeAuto or
+            RemoteActionType.OpenBuilds;
         var showActionValue = control is not null && UsesActionValue(control.Action);
         var showTargetPage = control?.Action.Type == RemoteActionType.Page;
         var showReferencedControl = control?.Kind == RemoteControlKind.TextBox &&
@@ -885,10 +886,20 @@ internal sealed class RemoteEditorWindow : Form
             RemoteActionType.NetHomeMode =>
                 [new("auto", "Auto"), new("cool", "Cool"), new("heat", "Heat"), new("dry", "Dry"), new("fan", "Fan")],
             RemoteActionType.NetHomeAuto => [new("cool", "Cooling"), new("heat", "Heating")],
+            RemoteActionType.OpenBuilds =>
+            [
+                new("jogXNegative", "Jog X -"), new("jogXPositive", "Jog X +"),
+                new("jogYNegative", "Jog Y -"), new("jogYPositive", "Jog Y +"),
+                new("jogZNegative", "Jog Z -"), new("jogZPositive", "Jog Z +"),
+                new("pause", "Pause job"), new("resume", "Resume job"),
+                new("stop", "Stop job"), new("abort", "Abort / reset"),
+                new("unlock", "Unlock alarm"), new("home", "Home machine"),
+            ],
             _ => [],
         };
         actionChoiceLabel.Text = control?.Action.Type == RemoteActionType.NetHomeMode ? "Mode" :
-            control?.Action.Type == RemoteActionType.NetHomeAuto ? "Control" : "Power";
+            control?.Action.Type == RemoteActionType.NetHomeAuto ? "Control" :
+            control?.Action.Type == RemoteActionType.OpenBuilds ? "Command" : "Power";
         SetControlOptions(actionChoice, actionChoices, control?.Action.Text);
         ConfigureActionValue(control);
         SetControlOptions(targetPage,
@@ -957,6 +968,11 @@ internal sealed class RemoteEditorWindow : Form
                 actionValue.Minimum = 20;
                 actionValue.Maximum = 100;
                 actionValue.Increment = 20;
+                break;
+            case RemoteActionType.OpenBuilds:
+                actionValueLabel.Text = "Distance (mm)";
+                actionValue.Minimum = 1;
+                actionValue.Maximum = 100;
                 break;
         }
         actionValue.Value = Math.Clamp(displayedValue, actionValue.Minimum, actionValue.Maximum);
@@ -1330,16 +1346,19 @@ internal sealed class RemoteEditorWindow : Form
 
     private static bool IsComputerAction(RemoteActionType type) => type is
         RemoteActionType.MacMedia or RemoteActionType.MacKey or RemoteActionType.MacOpen or
-        RemoteActionType.MacShortcut or RemoteActionType.MacScript || IsNetHomeAction(type);
+        RemoteActionType.MacShortcut or RemoteActionType.MacScript or RemoteActionType.OpenBuilds ||
+        IsNetHomeAction(type);
 
     private static bool IsDeviceAction(RemoteActionType type) => type is
-        RemoteActionType.WledPower or RemoteActionType.WledPreset or RemoteActionType.WledBrightness ||
+        RemoteActionType.WledPower or RemoteActionType.WledPreset or RemoteActionType.WledBrightness or
+        RemoteActionType.OpenBuilds ||
         IsNetHomeAction(type);
 
     private static bool UsesActionValue(RemoteAction action) =>
         action.Type is RemoteActionType.WledPreset or RemoteActionType.WledBrightness or
             RemoteActionType.NetHomeTemperature or RemoteActionType.NetHomeTemperatureStep or
             RemoteActionType.NetHomeFan ||
+        action.Type == RemoteActionType.OpenBuilds && action.Text.StartsWith("jog", StringComparison.Ordinal) ||
         action.Type == RemoteActionType.MacMedia && action.Text == "volume";
 
     private void AddNetHomePage()

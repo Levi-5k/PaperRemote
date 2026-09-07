@@ -87,6 +87,7 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
     case macOpen
     case macShortcut
     case macScript
+    case openBuilds
     case wledPower
     case wledPreset
     case wledBrightness
@@ -107,6 +108,7 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .macOpen: "Open app or URL"
         case .macShortcut: "Apple Shortcut"
         case .macScript: "Approved script"
+        case .openBuilds: "OpenBuilds CONTROL"
         case .wledPower: "WLED power"
         case .wledPreset: "WLED preset"
         case .wledBrightness: "WLED brightness"
@@ -127,6 +129,7 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .macOpen: "arrow.up.forward.app"
         case .macShortcut: "command"
         case .macScript: "terminal"
+        case .openBuilds: "move.3d"
         case .wledPower: "power"
         case .wledPreset: "sparkles"
         case .wledBrightness: "sun.max.fill"
