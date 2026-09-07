@@ -19,6 +19,18 @@ final class RemoteEditorStore: ObservableObject {
         case failed(String)
     }
 
+    private struct ProfileSyncRequest {
+        let generation: UInt64
+        let url: URL
+        let token: String
+        let payload: Data
+    }
+
+    private enum ProfileSyncResult {
+        case succeeded(String)
+        case failed(String)
+    }
+
     @Published var profile: RemoteProfile {
         didSet {
             scheduleSave()
@@ -41,8 +53,14 @@ final class RemoteEditorStore: ObservableObject {
 
     private var saveTask: Task<Void, Never>?
     private var liveSyncTask: Task<Void, Never>?
+    private var profileSyncTask: Task<Void, Never>?
+    private var profileSyncRetryTask: Task<Void, Never>?
+    private var pendingProfileSync: ProfileSyncRequest?
+    private var profileSyncGeneration: UInt64 = 0
     private var isApplyingDeviceProfile = false
     private let netHomeService: NetHomeService?
+    private var knownNetHomeUnits: [NetHomeUnit] = []
+    private var netHomeNameAliases: [String: String] = [:]
 
     init(
         computerName: String,
@@ -55,17 +73,41 @@ final class RemoteEditorStore: ObservableObject {
         let document = Self.loadDocument()
         profile = document?.profile ?? .starter
         deviceAddress = document?.deviceAddress ?? "192.168.4.1"
+        knownNetHomeUnits = document?.netHomeUnits ?? []
+        netHomeNameAliases = document?.netHomeNameAliases ?? [:]
+        netHomeService?.registerUnitNameAliases(netHomeNameAliases)
 
-        let computer = RemoteComputer(name: computerName, host: host, port: port, token: token)
+        var computer = RemoteComputer(name: computerName, host: host, port: port, token: token)
+        if let existing = document?.profile.computers.first(where: { $0.host.caseInsensitiveCompare(host) == .orderedSame }) {
+            computer.id = existing.id
+        }
         localComputer = computer
         if profile.computers.isEmpty {
             profile.computers = [computer]
-        } else if let index = profile.computers.firstIndex(where: { $0.host == host }) {
-            profile.computers[index].name = computerName
-            profile.computers[index].port = port
-            profile.computers[index].token = token
+        } else if let index = profile.computers.firstIndex(where: { $0.host.caseInsensitiveCompare(host) == .orderedSame }) {
+            profile.computers[index] = computer
         } else {
             profile.computers.append(computer)
+        }
+        let duplicateComputerIDs = Set(profile.computers.compactMap { candidate in
+            candidate.id != computer.id && candidate.host.caseInsensitiveCompare(host) == .orderedSame
+                ? candidate.id.uuidString
+                : nil
+        })
+        if !duplicateComputerIDs.isEmpty {
+            profile.computers.removeAll { duplicateComputerIDs.contains($0.id.uuidString) }
+            for pageIndex in profile.pages.indices {
+                for controlIndex in profile.pages[pageIndex].controls.indices {
+                    if let computerID = profile.pages[pageIndex].controls[controlIndex].action.computerID,
+                       duplicateComputerIDs.contains(computerID) {
+                        profile.pages[pageIndex].controls[controlIndex].action.computerID = computer.id.uuidString
+                    }
+                    if let computerID = profile.pages[pageIndex].controls[controlIndex].textBox?.tapAction?.computerID,
+                       duplicateComputerIDs.contains(computerID) {
+                        profile.pages[pageIndex].controls[controlIndex].textBox?.tapAction?.computerID = computer.id.uuidString
+                    }
+                }
+            }
         }
         profile.macHost = host
         profile.macPort = port
@@ -74,7 +116,7 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     func addLocalComputer() {
-        if let existing = profile.computers.first(where: { $0.host == localComputer.host }) {
+        if let existing = profile.computers.first(where: { $0.host.caseInsensitiveCompare(localComputer.host) == .orderedSame }) {
             var updated = localComputer
             updated.id = existing.id
             upsertComputer(updated)
@@ -110,8 +152,12 @@ final class RemoteEditorStore: ObservableObject {
         if profile.pages.contains(where: { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
             return "Every page needs a name."
         }
-        if profile.pages.flatMap(\.controls).contains(where: { $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            return "Every control needs a label."
+        if profile.pages.flatMap(\.controls).contains(where: {
+            $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                $0.symbol.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                ($0.iconBitmap?.isEmpty ?? true)
+        }) {
+            return "Every control needs a label or icon."
         }
         return nil
     }
@@ -252,14 +298,35 @@ final class RemoteEditorStore: ObservableObject {
                 return ([], error.localizedDescription)
             }
         }.value
+        let reconciliation = Self.reconcileNetHomeProfile(
+            profile,
+            previousUnits: knownNetHomeUnits,
+            currentUnits: result.units,
+            existingAliases: netHomeNameAliases,
+            localComputerID: localComputer.id.uuidString
+        )
+        knownNetHomeUnits = result.units
+        netHomeNameAliases = reconciliation.aliases
+        netHomeService.registerUnitNameAliases(reconciliation.aliases)
         netHomeUnits = result.units
+        if reconciliation.profile != profile {
+            profile = reconciliation.profile
+        }
         netHomeError = result.error
         isLoadingNetHomeUnits = false
+        saveImmediately()
+        if result.error == nil {
+            liveSyncTask?.cancel()
+            liveSyncTask = nil
+            enqueueProfileSync(validateEditorFields: false)
+        }
     }
 
     func addNetHomePage(unit: NetHomeUnit) {
         guard profile.pages.count < 8, !hasNetHomeControls(unitName: unit.name) else { return }
-        let computerID = profile.computers.first(where: { $0.host == localComputer.host })?.id.uuidString
+        let computerID = profile.computers.first(where: {
+            $0.host.caseInsensitiveCompare(localComputer.host) == .orderedSame
+        })?.id.uuidString
         let page = RemotePage.netHomeThermostat(unit: unit.name, computerID: computerID)
         profile.pages.append(page)
         selectedPageID = page.id
@@ -309,33 +376,106 @@ final class RemoteEditorStore: ObservableObject {
     func send() async {
         liveSyncTask?.cancel()
         liveSyncTask = nil
+        enqueueProfileSync()
+    }
+
+    private func enqueueProfileSync(validateEditorFields: Bool = true) {
+        let validationMessage = validateEditorFields
+            ? validationMessage
+            : Self.validationMessage(for: profile)
         if let validationMessage {
             sendState = .failed(validationMessage)
             return
         }
-        sendState = .sending
         do {
+            profileSyncRetryTask?.cancel()
+            profileSyncRetryTask = nil
             let url = try Self.remoteURL(from: deviceAddress)
-            var request = URLRequest(url: url)
+            profileSyncGeneration &+= 1
+            pendingProfileSync = ProfileSyncRequest(
+                generation: profileSyncGeneration,
+                url: url,
+                token: localComputer.token,
+                payload: try profile.devicePayload
+            )
+            sendState = .sending
+            startProfileSyncIfNeeded()
+        } catch {
+            sendState = .failed(error.localizedDescription)
+        }
+    }
+
+    private func startProfileSyncIfNeeded() {
+        guard profileSyncTask == nil, pendingProfileSync != nil else { return }
+        profileSyncTask = Task { [weak self] in
+            await self?.drainProfileSyncQueue()
+        }
+    }
+
+    private func drainProfileSyncQueue() async {
+        while let sync = pendingProfileSync {
+            pendingProfileSync = nil
+            let result = await Self.performProfileSync(sync)
+            guard sync.generation == profileSyncGeneration,
+                  pendingProfileSync == nil else { continue }
+            switch result {
+            case .succeeded(let host):
+                profileSyncRetryTask?.cancel()
+                profileSyncRetryTask = nil
+                sendState = .succeeded("Remote installed on \(host)")
+                saveImmediately()
+            case .failed(let message):
+                sendState = .failed(message)
+                scheduleProfileSyncRetry(sync)
+            }
+        }
+        profileSyncTask = nil
+    }
+
+    private func scheduleProfileSyncRetry(_ sync: ProfileSyncRequest) {
+        profileSyncRetryTask?.cancel()
+        profileSyncRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled, let self,
+                  sync.generation == self.profileSyncGeneration,
+                  self.pendingProfileSync == nil else { return }
+            self.profileSyncRetryTask = nil
+            self.pendingProfileSync = sync
+            self.startProfileSyncIfNeeded()
+        }
+    }
+
+    private nonisolated static func performProfileSync(
+        _ sync: ProfileSyncRequest
+    ) async -> ProfileSyncResult {
+        do {
+            var request = URLRequest(url: sync.url)
             request.httpMethod = "POST"
             request.timeoutInterval = 15
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("Bearer \(localComputer.token)", forHTTPHeaderField: "Authorization")
-            request.httpBody = try profile.devicePayload
+            request.setValue("Bearer \(sync.token)", forHTTPHeaderField: "Authorization")
+            request.httpBody = sync.payload
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let response = response as? HTTPURLResponse,
                   response.statusCode == 200 || response.statusCode == 201 else {
                 let detail = String(data: data, encoding: .utf8) ?? "No response body"
                 throw SendError.rejected(detail)
             }
-            sendState = .succeeded("Remote installed on \(url.host ?? deviceAddress)")
-            saveImmediately()
+            return .succeeded(sync.url.host ?? sync.url.absoluteString)
         } catch {
-            sendState = .failed(error.localizedDescription)
+            return .failed(error.localizedDescription)
         }
     }
 
     func loadFromDevice() async {
+        guard pendingProfileSync == nil, profileSyncTask == nil, profileSyncRetryTask == nil else {
+            sendState = .failed("Waiting to install local changes on M5Paper")
+            return
+        }
+        profileSyncGeneration &+= 1
+        pendingProfileSync = nil
+        liveSyncTask?.cancel()
+        liveSyncTask = nil
         sendState = .loading
         do {
             let url = try Self.remoteURL(from: deviceAddress)
@@ -349,13 +489,20 @@ final class RemoteEditorStore: ObservableObject {
                 throw SendError.loadRejected(detail)
             }
             let loadedProfile = try JSONDecoder().decode(RemoteProfile.self, from: data)
-            guard Self.validationMessage(for: loadedProfile) == nil else {
+            let reconciledProfile = Self.reconcileNetHomeProfile(
+                loadedProfile,
+                previousUnits: knownNetHomeUnits,
+                currentUnits: netHomeUnits,
+                existingAliases: netHomeNameAliases,
+                localComputerID: localComputer.id.uuidString
+            ).profile
+            guard Self.validationMessage(for: reconciledProfile) == nil else {
                 throw SendError.invalidProfile
             }
             isApplyingDeviceProfile = true
-            profile = loadedProfile
+            profile = reconciledProfile
             isApplyingDeviceProfile = false
-            selectedPageID = loadedProfile.pages.first?.id
+            selectedPageID = reconciledProfile.pages.first?.id
             selectedControlID = nil
             sendState = .succeeded("Loaded settings from \(url.host ?? deviceAddress)")
             saveImmediately()
@@ -388,7 +535,12 @@ final class RemoteEditorStore: ObservableObject {
 
     func saveImmediately() {
         saveTask?.cancel()
-        let document = RemoteEditorDocument(profile: profile, deviceAddress: deviceAddress)
+        let document = RemoteEditorDocument(
+            profile: profile,
+            deviceAddress: deviceAddress,
+            netHomeUnits: knownNetHomeUnits,
+            netHomeNameAliases: netHomeNameAliases
+        )
         do {
             let directory = Self.documentURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -416,7 +568,7 @@ final class RemoteEditorStore: ObservableObject {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, let self, self.validationMessage == nil else { return }
             self.liveSyncTask = nil
-            await self.send()
+            self.enqueueProfileSync()
         }
     }
 
@@ -482,11 +634,97 @@ final class RemoteEditorStore: ObservableObject {
         while normalized.hasSuffix("/") { normalized.removeLast() }
         return normalized
     }
+
+    static func reconcileNetHomeProfile(
+        _ source: RemoteProfile,
+        previousUnits: [NetHomeUnit],
+        currentUnits: [NetHomeUnit],
+        existingAliases: [String: String] = [:],
+        localComputerID: String
+    ) -> (profile: RemoteProfile, aliases: [String: String]) {
+        var aliases = Dictionary(uniqueKeysWithValues: existingAliases.map {
+            ($0.key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), $0.value)
+        })
+        let previousByID = Dictionary(uniqueKeysWithValues: previousUnits.map { ($0.id, $0) })
+        for unit in currentUnits {
+            guard let previous = previousByID[unit.id],
+                  previous.name.caseInsensitiveCompare(unit.name) != .orderedSame else { continue }
+            aliases[previous.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = unit.name
+        }
+
+        let defaultComputerID = source.computers.first?.id.uuidString
+        let targetsLocalComputer: (RemoteAction) -> Bool = { action in
+            action.computerID.map { $0 == localComputerID } ?? (defaultComputerID == localComputerID)
+        }
+        let isNetHomeAction: (RemoteActionType) -> Bool = { type in
+            switch type {
+            case .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
+                 .netHomeMode, .netHomeFan, .netHomeAuto:
+                true
+            default:
+                false
+            }
+        }
+        let configuredNames = Set(source.pages.flatMap(\.controls).compactMap { control -> String? in
+            guard isNetHomeAction(control.action.type), targetsLocalComputer(control.action) else { return nil }
+            return control.action.host
+        })
+        let currentNames = Set(currentUnits.map { $0.name.lowercased() })
+        let unresolvedNames = configuredNames.filter {
+            let normalized = $0.lowercased()
+            let resolved = aliases[normalized]?.lowercased() ?? normalized
+            return !currentNames.contains(resolved)
+        }
+        let usedCurrentNames = Set(configuredNames.compactMap { name -> String? in
+            let normalized = name.lowercased()
+            let resolved = aliases[normalized]?.lowercased() ?? normalized
+            return currentNames.contains(resolved) ? resolved : nil
+        })
+        let unusedUnits = currentUnits.filter { !usedCurrentNames.contains($0.name.lowercased()) }
+        if unresolvedNames.count == 1, unusedUnits.count == 1,
+           let oldName = unresolvedNames.first, let unit = unusedUnits.first {
+            aliases[oldName.lowercased()] = unit.name
+        }
+
+        for key in aliases.keys {
+            var resolved = aliases[key] ?? key
+            var visited: Set<String> = [key]
+            while let next = aliases[resolved.lowercased()], visited.insert(resolved.lowercased()).inserted {
+                resolved = next
+            }
+            aliases[key] = resolved
+        }
+
+        var profile = source
+        for pageIndex in profile.pages.indices {
+            let originalPageName = profile.pages[pageIndex].name
+            if let renamedPage = aliases[originalPageName.lowercased()] {
+                profile.pages[pageIndex].name = renamedPage
+            }
+            for controlIndex in profile.pages[pageIndex].controls.indices {
+                var action = profile.pages[pageIndex].controls[controlIndex].action
+                if isNetHomeAction(action.type), targetsLocalComputer(action),
+                   let renamedUnit = aliases[action.host.lowercased()] {
+                    action.host = renamedUnit
+                    profile.pages[pageIndex].controls[controlIndex].action = action
+                }
+                if var tapAction = profile.pages[pageIndex].controls[controlIndex].textBox?.tapAction,
+                   isNetHomeAction(tapAction.type), targetsLocalComputer(tapAction),
+                   let renamedUnit = aliases[tapAction.host.lowercased()] {
+                    tapAction.host = renamedUnit
+                    profile.pages[pageIndex].controls[controlIndex].textBox?.tapAction = tapAction
+                }
+            }
+        }
+        return (profile, aliases)
+    }
 }
 
 private struct RemoteEditorDocument: Codable {
     var profile: RemoteProfile
     var deviceAddress: String
+    var netHomeUnits: [NetHomeUnit]?
+    var netHomeNameAliases: [String: String]?
 }
 
 private struct DeviceWiFiScanResponse: Decodable {

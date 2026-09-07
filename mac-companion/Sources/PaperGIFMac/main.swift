@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CoreAudio
 import CoreGraphics
 import Darwin
 import Foundation
@@ -40,6 +41,14 @@ private struct TextSourceResponse: Encodable {
     let id: String
     let text: String
     let available: Bool
+    let value: Int?
+
+    init(id: String, text: String, available: Bool, value: Int? = nil) {
+        self.id = id
+        self.text = text
+        self.available = available
+        self.value = value
+    }
 }
 
 private struct InstalledApplication: Encodable {
@@ -402,27 +411,42 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var server: CompanionServer?
     private let netHomeService = NetHomeService()
     private var configuration = CompanionConfiguration.initial
+    private var editorStore: RemoteEditorStore?
     private var editorWindowController: RemoteEditorWindowController?
     private var nowPlayingSubscriptions: [String: Set<String>] = [:]
+    private var playbackStateSubscriptions: [String: Set<String>] = [:]
+    private var outputVolumeSubscriptions: [String: Set<String>] = [:]
     private var nowPlayingNotificationObservers: [NSObjectProtocol] = []
     private var distributedNowPlayingObservers: [NSObjectProtocol] = []
     private var mediaRemoteRegistrationHandle: UnsafeMutableRawPointer?
     private var nowPlayingUpdateGeneration = 0
     private var lastPushedNowPlayingText: String?
+    private var lastPushedPlaybackState: Bool?
+    private var hasPushedPlaybackState = false
+    private var defaultOutputDeviceListener: AudioObjectPropertyListenerBlock?
+    private var outputVolumeListener: AudioObjectPropertyListenerBlock?
+    private var observedOutputDevice = AudioObjectID(kAudioObjectUnknown)
+    private var outputVolumeUpdateGeneration = 0
+    private var lastPushedOutputVolume: Int?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configuration = loadConfiguration()
         configureMenu()
         startNowPlayingObservation()
+        startOutputVolumeObservation()
         restartServer()
-        if !netHomeService.isSignedIn {
+        let store = controlsEditorStore()
+        if netHomeService.isSignedIn {
+            Task { await store.refreshNetHomeUnits() }
+        } else {
             DispatchQueue.main.async { [weak self] in self?.showNetHomeLogin() }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         stopNowPlayingObservation()
+        stopOutputVolumeObservation()
     }
 
     private var token: String {
@@ -585,6 +609,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 password: passwordField.stringValue
             )
             updateNetHomeMenuItem()
+            Task { await controlsEditorStore().refreshNetHomeUnits() }
             let confirmation = NSAlert()
             confirmation.messageText = "NetHome Plus Connected"
             confirmation.informativeText = "Found \(devices.joined(separator: ", "))."
@@ -603,19 +628,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func showControlsEditor() {
         if editorWindowController == nil {
-            let store = RemoteEditorStore(
-                computerName: Host.current().localizedName ?? "This Mac",
-                host: ProcessInfo.processInfo.hostName,
-                port: Int(port),
-                token: token,
-                netHomeService: netHomeService
-            )
-            editorWindowController = RemoteEditorWindowController(store: store)
+            editorWindowController = RemoteEditorWindowController(store: controlsEditorStore())
         }
         editorWindowController?.showWindow(nil)
         editorWindowController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         editorWindowController?.loadFromDevice()
+    }
+
+    @MainActor private func controlsEditorStore() -> RemoteEditorStore {
+        if let editorStore {
+            return editorStore
+        }
+        let store = RemoteEditorStore(
+            computerName: Host.current().localizedName ?? "This Mac",
+            host: ProcessInfo.processInfo.hostName,
+            port: Int(port),
+            token: token,
+            netHomeService: netHomeService
+        )
+        editorStore = store
+        return store
     }
 
     @objc private func forgetPairedDevices() {
@@ -758,8 +791,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 systemSymbolName: result.succeeded ? "checkmark.rectangle" : "exclamationmark.rectangle",
                 accessibilityDescription: result.succeeded ? "Last action succeeded" : "Last action failed"
             )
+            if result.succeeded && request.type == "macMedia" && request.text == "playPause" {
+                refreshPlaybackStateAfterCommand()
+            }
         }
         return result
+    }
+
+    private func refreshPlaybackStateAfterCommand() {
+        for delay in [0.2, 0.8] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.pushPlaybackStateIfChanged()
+            }
+        }
     }
 
     private func resolveTextSources(
@@ -769,14 +813,44 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let nowPlayingControlIDs = Set(request.items.lazy
             .filter { $0.source == "nowPlaying" }
             .map { String($0.id.prefix(40)) })
+        let playbackStateControlIDs = Set(request.items.lazy
+            .filter { $0.source == "playbackState" }
+            .map { String($0.id.prefix(40)) })
+        let outputVolumeControlIDs = Set(request.items.lazy
+            .filter { $0.source == "outputVolume" }
+            .map { String($0.id.prefix(40)) })
         var permittedScripts: Set<String> = []
         DispatchQueue.main.sync {
             if let subscriberHost, !nowPlayingControlIDs.isEmpty {
                 nowPlayingSubscriptions[subscriberHost] = nowPlayingControlIDs
             }
+            if let subscriberHost, !playbackStateControlIDs.isEmpty {
+                playbackStateSubscriptions[subscriberHost] = playbackStateControlIDs
+            }
+            if let subscriberHost, !outputVolumeControlIDs.isEmpty {
+                outputVolumeSubscriptions[subscriberHost] = outputVolumeControlIDs
+            }
             permittedScripts = allowedScripts
         }
         let items = request.items.map { item -> TextSourceResponse in
+            if item.source == "playbackState" {
+                let isPlaying = playbackIsPlaying()
+                return TextSourceResponse(
+                    id: String(item.id.prefix(40)),
+                    text: "",
+                    available: isPlaying != nil,
+                    value: isPlaying.map { $0 ? 1 : 0 }
+                )
+            }
+            if item.source == "outputVolume" {
+                let value = outputVolumeValue()
+                return TextSourceResponse(
+                    id: String(item.id.prefix(40)),
+                    text: "",
+                    available: value != nil,
+                    value: value
+                )
+            }
             let output: String?
             switch item.source {
             case "macScript":
@@ -854,6 +928,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self, generation == self.nowPlayingUpdateGeneration else { return }
             self.pushNowPlayingIfChanged()
+            self.pushPlaybackStateIfChanged()
         }
     }
 
@@ -883,6 +958,184 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func pushPlaybackStateIfChanged() {
+        let playbackState = playbackIsPlaying()
+        guard !hasPushedPlaybackState || playbackState != lastPushedPlaybackState else { return }
+        hasPushedPlaybackState = true
+        lastPushedPlaybackState = playbackState
+        for (host, controlIDs) in playbackStateSubscriptions where !controlIDs.isEmpty {
+            var components = URLComponents()
+            components.scheme = "http"
+            components.host = host
+            components.port = 80
+            components.path = "/text-source/update"
+            guard let url = components.url else { continue }
+            let body = TextSourceBatchResponse(items: controlIDs.map {
+                TextSourceResponse(
+                    id: $0,
+                    text: "",
+                    available: playbackState != nil,
+                    value: playbackState.map { $0 ? 1 : 0 }
+                )
+            })
+            guard let payload = try? JSONEncoder().encode(body) else { continue }
+            var request = URLRequest(url: url, timeoutInterval: 3)
+            request.httpMethod = "POST"
+            request.httpBody = payload
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            URLSession.shared.dataTask(with: request).resume()
+        }
+    }
+
+    private func startOutputVolumeObservation() {
+        let defaultDeviceListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            DispatchQueue.main.async {
+                self?.observeCurrentOutputDevice()
+                self?.scheduleOutputVolumePush()
+            }
+        }
+        var defaultDeviceAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultDeviceAddress,
+            .main,
+            defaultDeviceListener
+        ) == noErr else { return }
+        defaultOutputDeviceListener = defaultDeviceListener
+        observeCurrentOutputDevice()
+    }
+
+    private func stopOutputVolumeObservation() {
+        if let listener = outputVolumeListener,
+           observedOutputDevice != AudioObjectID(kAudioObjectUnknown) {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioObjectPropertySelectorWildcard,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementWildcard
+            )
+            AudioObjectRemovePropertyListenerBlock(observedOutputDevice, &address, .main, listener)
+        }
+        outputVolumeListener = nil
+        observedOutputDevice = AudioObjectID(kAudioObjectUnknown)
+        if let listener = defaultOutputDeviceListener {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                .main,
+                listener
+            )
+        }
+        defaultOutputDeviceListener = nil
+    }
+
+    private func observeCurrentOutputDevice() {
+        let outputDevice = defaultOutputDevice()
+        guard outputDevice != observedOutputDevice else { return }
+        if let listener = outputVolumeListener,
+           observedOutputDevice != AudioObjectID(kAudioObjectUnknown) {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioObjectPropertySelectorWildcard,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementWildcard
+            )
+            AudioObjectRemovePropertyListenerBlock(observedOutputDevice, &address, .main, listener)
+        }
+        outputVolumeListener = nil
+        observedOutputDevice = outputDevice
+        guard outputDevice != AudioObjectID(kAudioObjectUnknown) else { return }
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            DispatchQueue.main.async { self?.scheduleOutputVolumePush() }
+        }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertySelectorWildcard,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementWildcard
+        )
+        guard AudioObjectAddPropertyListenerBlock(outputDevice, &address, .main, listener) == noErr else {
+            return
+        }
+        outputVolumeListener = listener
+    }
+
+    private func scheduleOutputVolumePush() {
+        outputVolumeUpdateGeneration += 1
+        let generation = outputVolumeUpdateGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self, generation == self.outputVolumeUpdateGeneration else { return }
+            self.pushOutputVolumeIfChanged()
+        }
+    }
+
+    private func pushOutputVolumeIfChanged() {
+        guard let value = outputVolumeValue(), value != lastPushedOutputVolume else { return }
+        lastPushedOutputVolume = value
+        for (host, controlIDs) in outputVolumeSubscriptions where !controlIDs.isEmpty {
+            var components = URLComponents()
+            components.scheme = "http"
+            components.host = host
+            components.port = 80
+            components.path = "/text-source/update"
+            guard let url = components.url else { continue }
+            let body = TextSourceBatchResponse(items: controlIDs.map {
+                TextSourceResponse(id: $0, text: "", available: true, value: value)
+            })
+            guard let payload = try? JSONEncoder().encode(body) else { continue }
+            var request = URLRequest(url: url, timeoutInterval: 3)
+            request.httpMethod = "POST"
+            request.httpBody = payload
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            URLSession.shared.dataTask(with: request).resume()
+        }
+    }
+
+    private func defaultOutputDevice() -> AudioObjectID {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var device = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout.size(ofValue: device))
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size,
+            &device
+        ) == noErr else { return AudioObjectID(kAudioObjectUnknown) }
+        return device
+    }
+
+    private func outputVolumeValue() -> Int? {
+        let device = defaultOutputDevice()
+        guard device != AudioObjectID(kAudioObjectUnknown) else { return nil }
+        for element in [AudioObjectPropertyElement(kAudioObjectPropertyElementMain), 1, 2] {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element
+            )
+            var scalar = Float32.zero
+            var size = UInt32(MemoryLayout.size(ofValue: scalar))
+            if AudioObjectGetPropertyData(device, &address, 0, nil, &size, &scalar) == noErr {
+                return Int((Double(min(max(scalar, 0), 1)) * 255).rounded())
+            }
+        }
+        return nil
+    }
+
     private func nowPlayingText() -> String? {
         let applications = [
             (name: "Music", bundleID: "com.apple.Music"),
@@ -901,7 +1154,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             let script = """
             if application "\(application.name)" is running then
                 tell application "\(application.name)"
-                    if player state is playing then return (name of current track) & " - " & (artist of current track)
+                    set currentState to player state
+                    if currentState is playing or currentState is paused then
+                        return (name of current track) & " - " & (artist of current track)
+                    end if
                 end tell
             end if
             """
@@ -911,6 +1167,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return mediaRemoteNowPlayingText()
+    }
+
+    private func playbackIsPlaying() -> Bool? {
+        let applications = [
+            (name: "Music", bundleID: "com.apple.Music"),
+            (name: "Spotify", bundleID: "com.spotify.client"),
+        ]
+        for application in applications where
+            !NSRunningApplication.runningApplications(withBundleIdentifier: application.bundleID).isEmpty {
+            guard requestAutomationPermission(for: application.bundleID) else { continue }
+            let script = """
+            if application "\(application.name)" is running then
+                tell application "\(application.name)"
+                    if player state is playing then return "playing"
+                    if player state is paused then return "paused"
+                    return "unavailable"
+                end tell
+            end if
+            """
+            if let output = appleScriptOutput(script)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                if output == "playing" { return true }
+                if output == "paused" { return false }
+            }
+        }
+        return mediaRemotePlaybackIsPlaying()
     }
 
     private func requestAutomationPermission(for bundleIdentifier: String) -> Bool {
@@ -949,6 +1230,33 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                   !title.isEmpty else { return }
             let artist = values["kMRMediaRemoteNowPlayingInfoArtist"] as? String
             result = artist?.isEmpty == false ? "\(title) - \(artist!)" : title
+        }
+        getNowPlayingInfo(DispatchQueue.global(qos: .utility), callback)
+        guard semaphore.wait(timeout: .now() + 1) == .success else { return nil }
+        return result
+    }
+
+    private func mediaRemotePlaybackIsPlaying() -> Bool? {
+        let path = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+        guard let handle = dlopen(path, RTLD_LAZY),
+              let symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingInfo") else {
+            return nil
+        }
+        defer { dlclose(handle) }
+
+        typealias Callback = @convention(block) (CFDictionary?) -> Void
+        typealias GetNowPlayingInfo = @convention(c) (DispatchQueue, Callback) -> Void
+        let getNowPlayingInfo = unsafeBitCast(symbol, to: GetNowPlayingInfo.self)
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Bool?
+        let callback: Callback = { information in
+            defer { semaphore.signal() }
+            guard let values = information as? [String: Any],
+                  values["kMRMediaRemoteNowPlayingInfoTitle"] != nil,
+                  let playbackRate = values["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? NSNumber else {
+                return
+            }
+            result = playbackRate.doubleValue > 0
         }
         getNowPlayingInfo(DispatchQueue.global(qos: .utility), callback)
         guard semaphore.wait(timeout: .now() + 1) == .success else { return nil }

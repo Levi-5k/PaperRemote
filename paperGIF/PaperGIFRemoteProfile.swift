@@ -149,7 +149,7 @@ enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Send
 
     var title: String {
         switch self {
-        case .macMedia: "Mac media"
+        case .macMedia: "Media"
         case .macKey: "Mac keyboard shortcut"
         case .macOpen: "Open app or URL"
         case .macShortcut: "Run Apple Shortcut"
@@ -182,8 +182,19 @@ struct PaperGIFRemoteAction: Codable, Equatable, Sendable {
     var scheduleEnabled: Bool?
     var scheduleHour: Int?
     var scheduleMinute: Int?
+    var schedules: [PaperGIFRemoteScheduleEntry]?
 
     static let playPause = PaperGIFRemoteAction(type: .macMedia, text: "playPause")
+}
+
+struct PaperGIFRemoteScheduleEntry: Codable, Equatable, Identifiable, Sendable {
+    var id = UUID()
+    var weekdays = Array(1...7)
+    var hour = 8
+    var minute = 0
+    var text: String?
+    var value: Int?
+    var valueTenths: Int?
 }
 
 struct PaperGIFRemoteComputer: Codable, Equatable, Identifiable, Sendable {

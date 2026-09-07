@@ -1,6 +1,37 @@
 import CoreGraphics
 import SwiftUI
 
+private actor PaperGIFPreviewRenderer {
+    static let shared = PaperGIFPreviewRenderer()
+
+    func render(
+        image: CGImage,
+        monochromeMode: PaperGIFMonochromeMode,
+        threshold: UInt8,
+        monochromeLevels: Int,
+        halftoneDotSpacing: Int,
+        halftoneAngle: Int,
+        halftoneDotGain: Int,
+        cropRect: CGRect?,
+        rotationQuarterTurns: Int
+    ) throws -> CGImage {
+        try Task.checkCancellation()
+        let preview = try PaperGIFEncoder.monochromePreview(
+            image: image,
+            monochromeMode: monochromeMode,
+            threshold: threshold,
+            monochromeLevels: monochromeLevels,
+            halftoneDotSpacing: halftoneDotSpacing,
+            halftoneAngle: halftoneAngle,
+            halftoneDotGain: halftoneDotGain,
+            cropRect: cropRect,
+            rotationQuarterTurns: rotationQuarterTurns
+        )
+        try Task.checkCancellation()
+        return preview
+    }
+}
+
 struct PaperGIFAdjustmentView: View {
     private struct PreviewKey: Hashable {
         let cropX: Double?
@@ -189,19 +220,18 @@ struct PaperGIFAdjustmentView: View {
         let cropRect = recipe.cropRect
         let rotationQuarterTurns = recipe.rotationQuarterTurns
         do {
-            let image = try await Task.detached(priority: .userInitiated) {
-                try PaperGIFEncoder.monochromePreview(
-                    image: sourcePreview,
-                    monochromeMode: monochromeMode,
-                    threshold: threshold,
-                    monochromeLevels: monochromeLevels,
-                    halftoneDotSpacing: halftoneDotSpacing,
-                    halftoneAngle: halftoneAngle,
-                    halftoneDotGain: halftoneDotGain,
-                    cropRect: cropRect,
-                    rotationQuarterTurns: rotationQuarterTurns
-                )
-            }.value
+            try await Task.sleep(for: .milliseconds(100))
+            let image = try await PaperGIFPreviewRenderer.shared.render(
+                image: sourcePreview,
+                monochromeMode: monochromeMode,
+                threshold: threshold,
+                monochromeLevels: monochromeLevels,
+                halftoneDotSpacing: halftoneDotSpacing,
+                halftoneAngle: halftoneAngle,
+                halftoneDotGain: halftoneDotGain,
+                cropRect: cropRect,
+                rotationQuarterTurns: rotationQuarterTurns
+            )
             guard !Task.isCancelled else { return }
             previewImage = image
         } catch {

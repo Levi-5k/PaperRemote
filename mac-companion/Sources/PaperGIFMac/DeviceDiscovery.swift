@@ -5,6 +5,10 @@ private struct SendableDeviceService: @unchecked Sendable {
     let value: NetService
 }
 
+private struct SendableDeviceBrowser: @unchecked Sendable {
+    let value: NetServiceBrowser
+}
+
 @MainActor
 final class DeviceDiscovery: NSObject, ObservableObject {
     struct Device: Identifiable, Equatable, Sendable {
@@ -53,9 +57,10 @@ extension DeviceDiscovery: NetServiceBrowserDelegate {
         didFind service: NetService,
         moreComing: Bool
     ) {
+        let sendableBrowser = SendableDeviceBrowser(value: browser)
         let sendable = SendableDeviceService(value: service)
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.browser === sendableBrowser.value else { return }
             let service = sendable.value
             services[key(for: service)] = service
             service.delegate = self
@@ -68,9 +73,10 @@ extension DeviceDiscovery: NetServiceBrowserDelegate {
         didRemove service: NetService,
         moreComing: Bool
     ) {
+        let sendableBrowser = SendableDeviceBrowser(value: browser)
         let sendable = SendableDeviceService(value: service)
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.browser === sendableBrowser.value else { return }
             let service = sendable.value
             services.removeValue(forKey: key(for: service))
             devices.removeAll { $0.name == service.name }
@@ -84,9 +90,13 @@ extension DeviceDiscovery: NetServiceDelegate {
         Task { @MainActor [weak self] in
             let sender = sendable.value
             guard let self,
+                services[key(for: sender)] === sender,
                   let host = sender.hostName?.trimmingCharacters(in: CharacterSet(charactersIn: ".")),
                   !host.isEmpty,
                   sender.port > 0 else { return }
+            services.removeValue(forKey: key(for: sender))
+            sender.stop()
+            sender.delegate = nil
             let device = Device(name: sender.name, host: host, port: sender.port)
             devices.removeAll { $0.id == device.id || $0.name == device.name }
             devices.append(device)
@@ -101,7 +111,11 @@ extension DeviceDiscovery: NetServiceDelegate {
         let sendable = SendableDeviceService(value: sender)
         Task { @MainActor [weak self] in
             guard let self else { return }
-            services.removeValue(forKey: key(for: sendable.value))
+            let sender = sendable.value
+            guard services[key(for: sender)] === sender else { return }
+            services.removeValue(forKey: key(for: sender))
+            sender.stop()
+            sender.delegate = nil
         }
     }
 }

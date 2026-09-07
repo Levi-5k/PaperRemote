@@ -12,11 +12,15 @@
 #include <Wire.h>
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 #include <nvs.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
 #include "geometric_snake.h"
 #include "monochrome_damage.h"
+#include "remote_schedule.h"
 #include "screensaver_battery.h"
 
 namespace {
@@ -30,9 +34,14 @@ constexpr char kTemporaryPath[] = "/animation.tmp";
 constexpr char kBackupPath[] = "/animation.bak";
 constexpr char kLibraryDirectory[] = "/library";
 constexpr char kActivePath[] = "/library/active.txt";
+constexpr char kActiveTemporaryPath[] = "/library/active.tmp";
+constexpr char kActiveBackupPath[] = "/library/active.bak";
 constexpr char kSettingsPath[] = "/library/settings.bin";
+constexpr char kSettingsTemporaryPath[] = "/library/settings.tmp";
+constexpr char kSettingsBackupPath[] = "/library/settings.bak";
 constexpr char kRemoteProfilePath[] = "/library/remote.json";
 constexpr char kRemoteProfileTemporaryPath[] = "/library/remote.tmp";
+constexpr char kRemoteProfileBackupPath[] = "/library/remote.bak";
 constexpr char kWifiPassword[] = "paperdisplay";
 
 constexpr uint8_t kBeginUpload = 0x10;
@@ -111,6 +120,7 @@ constexpr size_t kLibraryRowsPerPage = 7;
 constexpr size_t kMaximumRemotePages = 8;
 constexpr size_t kMaximumRemoteControls = 16;
 constexpr size_t kMaximumRemoteComputers = 8;
+constexpr size_t kMaximumSchedulesPerAction = 8;
 constexpr size_t kRemoteIconDimension = 64;
 constexpr size_t kRemoteIconBytes = kRemoteIconDimension * kRemoteIconDimension / 8;
 constexpr size_t kMaximumRemoteProfileBytes = 256 * 1024;
@@ -125,11 +135,15 @@ constexpr int32_t kLibraryRowTop = 166;
 constexpr int32_t kLibraryRowHeight = 88;
 constexpr uint32_t kRenderMarker = 0x50474946;
 constexpr size_t kPendingRemoteActionCapacity = 8;
+constexpr size_t kRemoteNetworkQueueCapacity = 8;
+constexpr size_t kRemoteRequestUrlBytes = 160;
+constexpr size_t kRemoteRequestBodyBytes = 768;
+constexpr size_t kRemoteResponseBodyBytes = 4097;
 constexpr uint32_t kClimateSampleIntervalMs = 60000;
 constexpr uint64_t kClimateWakeIntervalUs = 5ULL * 60ULL * 1000000ULL;
 constexpr uint32_t kClimateAutomationMagic = 0x434C4933;
 constexpr size_t kMaximumClimateAutomations = 8;
-constexpr uint32_t kScheduleRunStoreMagic = 0x53434831;
+constexpr uint32_t kScheduleRunStoreMagic = 0x53434832;
 constexpr uint16_t kScheduleCatchUpMinutes = 15;
 
 constexpr int kSdSclk = 14;
@@ -177,6 +191,18 @@ struct RemoteProfileUploadState {
     bool finishRequested = false;
 };
 
+struct RemoteScheduleEntry {
+    uint8_t weekdaysMask = remote_schedule::everyDayMask;
+    uint8_t hour = 8;
+    uint8_t minute = 0;
+    char text[24] = {};
+    int value = 0;
+    int16_t valueTenths = 0;
+    bool hasText = false;
+    bool hasValue = false;
+    bool hasValueTenths = false;
+};
+
 struct RemoteAction {
     char type[24] = {};
     char host[64] = {};
@@ -192,6 +218,8 @@ struct RemoteAction {
     bool scheduleEnabled = false;
     uint8_t scheduleHour = 0;
     uint8_t scheduleMinute = 0;
+    RemoteScheduleEntry schedules[kMaximumSchedulesPerAction];
+    uint8_t scheduleCount = 0;
 };
 
 struct RemoteComputer {
@@ -240,6 +268,43 @@ struct PendingRemoteAction {
     bool slider = false;
     bool toggle = false;
     bool toggleOn = false;
+};
+
+struct RemoteNetworkRequest {
+    char url[kRemoteRequestUrlBytes] = {};
+    char body[kRemoteRequestBodyBytes] = {};
+    char token[80] = {};
+    char actionType[24] = {};
+    char controlId[40] = {};
+    char pageId[40] = {};
+    uint32_t sequence = 0;
+    uint32_t profileRevision = 0;
+    bool reportStatus = false;
+    bool slider = false;
+    bool toggle = false;
+    bool toggleOnBefore = false;
+    bool playPause = false;
+    bool textRequest = false;
+};
+
+struct RemoteNetworkResult {
+    char actionType[24] = {};
+    char controlId[40] = {};
+    uint32_t profileRevision = 0;
+    bool sent = false;
+    bool changed = true;
+    bool reportStatus = false;
+    bool slider = false;
+    bool toggle = false;
+    bool toggleOnBefore = false;
+    bool playPause = false;
+};
+
+struct RemoteTextNetworkResult {
+    char pageId[40] = {};
+    char responseBody[kRemoteResponseBodyBytes] = {};
+    uint32_t profileRevision = 0;
+    bool sent = false;
 };
 
 struct RemotePage {
@@ -310,6 +375,7 @@ struct ClimateAutomationStore {
 struct ScheduleRunState {
     uint64_t controlIdHash;
     uint32_t dayKey;
+    uint8_t runMask;
 };
 
 struct ScheduleRunStore {
@@ -334,12 +400,26 @@ bool sliderPositionStoreLoaded = false;
 ToggleStateStore toggleStateStore;
 PendingRemoteAction pendingRemoteActions[kPendingRemoteActionCapacity];
 size_t pendingRemoteActionCount = 0;
+QueueHandle_t remoteNetworkRequestQueue = nullptr;
+QueueHandle_t remoteSliderNetworkRequestQueue = nullptr;
+QueueHandle_t remoteNetworkResultQueue = nullptr;
+QueueHandle_t remoteTextNetworkResultQueue = nullptr;
+QueueSetHandle_t remoteNetworkQueueSet = nullptr;
+TaskHandle_t remoteNetworkTaskHandle = nullptr;
+RemoteTextNetworkResult* remoteTextWorkerResult = nullptr;
+RemoteTextNetworkResult* remoteTextUiResult = nullptr;
+bool remoteTextRequestPending = false;
+uint32_t remoteProfileRevision = 1;
+uint32_t remoteNetworkSequence = 0;
+volatile uint32_t remoteNetworkLatestAcceptedSequence = 0;
+volatile uint32_t remoteNetworkCompletedSequence = 0;
 PendingRemoteAction deferredThermostatSetpoint;
 bool deferredThermostatSetpointPending = false;
 uint32_t deferredThermostatSetpointDueAt = 0;
 PendingRemoteAction deferredFanSpeed;
 bool deferredFanSpeedPending = false;
 uint32_t deferredFanSpeedDueAt = 0;
+RemoteControl pendingActionControl;
 bool toggleStateStoreLoaded = false;
 File animationFile;
 AnimationHeader animationHeader;
@@ -362,6 +442,7 @@ bool finishRequested = false;
 volatile bool uploadScreenPending = false;
 LibraryItem libraryItems[kMaximumLibraryItems];
 size_t libraryItemCount = 0;
+bool libraryMetadataValid = false;
 size_t libraryPage = 0;
 size_t librarySelection = 0;
 volatile bool libraryRefreshRequested = false;
@@ -401,6 +482,7 @@ uint32_t bluetoothSuspendedAt = 0;
 uint32_t nextBluetoothAdvertisingCheckAt = 0;
 bool slideshowEnabled = false;
 bool slideshowDeepSleep = false;
+bool remoteSleepNever = false;
 bool deepSleepSuspended = false;
 uint8_t slideshowIntervalIndex = kDefaultSlideshowIntervalIndex;
 uint8_t screensaverDelayIndex = kUseProfileScreensaverDelay;
@@ -409,8 +491,13 @@ bool imagesOnlyOnBattery = false;
 bool batteryImagesOnly = false;
 bool batteryPolicySampled = false;
 uint32_t batteryPolicySampledAt = 0;
-bool batteryStillPrepared = false;
-char batterySavedAnimationPath[kMaximumPathBytes] = {};
+struct BatteryPlaybackState {
+    bool active = false;
+    char animationPath[kMaximumPathBytes] = {};
+    uint16_t nextFrame = 0;
+    uint32_t displayedFrames = 0;
+};
+BatteryPlaybackState batteryPlaybackState;
 size_t batteryStillIndex = 0;
 M5Canvas snakeCanvas(&M5.Display);
 geometric_snake::Scene* snakeScene = nullptr;
@@ -425,6 +512,7 @@ uint32_t nextSlideshowAt = 0;
 esp_sleep_wakeup_cause_t wakeupCause = ESP_SLEEP_WAKEUP_UNDEFINED;
 bool recoveredFromRenderCrash = false;
 bool remoteVisible = false;
+bool remoteQualityRefreshPending = false;
 bool screensaverActive = false;
 bool slideshowSleepPending = false;
 volatile bool touchInterruptPending = false;
@@ -477,7 +565,7 @@ void displayLibrary();
 void displaySettings();
 void displaySlideshowMenu();
 void displayWifiMode();
-void refreshLibrary();
+void refreshLibrary(bool force = false);
 void displayCurrentFrame();
 void selectLibraryItem(size_t index);
 void persistActiveSelection();
@@ -485,12 +573,44 @@ void showLibrary();
 void closeWifiMode();
 void prepareRemoteTextBoxes();
 void pollRemoteTextBoxes();
+void displayRemoteSliderValue(const RemotePage& page, size_t index, bool waitForCompletion);
+void refreshReferencedTextBoxes(
+    RemotePage& page,
+    const char* controlId,
+    bool redraw = true);
+bool isMacPlayPauseControl(const RemoteControl& control);
+bool isMacVolumeControl(const RemoteControl& control);
 bool isMacTextSource(const RemoteControl& control);
+bool readHttpLine(WiFiClient& client, String& line, uint32_t deadline) {
+    line = "";
+    while (static_cast<int32_t>(millis() - deadline) < 0) {
+        while (client.available()) {
+            const int byte = client.read();
+            if (byte < 0) {
+                break;
+            }
+            line += static_cast<char>(byte);
+            if (byte == '\n') {
+                return true;
+            }
+            if (line.length() > 1024) {
+                return false;
+            }
+        }
+        if (!client.connected() && !client.available()) {
+            return !line.isEmpty();
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    return false;
+}
+
 bool postJsonResponse(
     const String& url,
     const String& body,
     String& responseBody,
-    const char* token);
+    const char* token,
+    uint32_t responseTimeoutMs = 5000);
 void stopWifiMode();
 void startBluetooth();
 void ensureBluetoothAdvertising();
@@ -505,6 +625,10 @@ bool dispatchRemoteAction(
     RemoteControl& control,
     bool queueIfOffline = true,
     bool reportStatus = true);
+void startRemoteNetworkWorker();
+void pollRemoteNetworkResults();
+bool hasPendingRemoteNetworkWork();
+void applyMacTextBoxResponse(const RemoteTextNetworkResult& result);
 void resetClimateAutomationController(const RemoteControl& control);
 void dispatchCapturedWakeTouch();
 void enterM5PaperDeepSleep(uint64_t microseconds);
@@ -928,24 +1052,59 @@ uint64_t slideshowIntervalUs() {
     return static_cast<uint64_t>(slideshowIntervalSeconds()) * 1000000ULL;
 }
 
+bool replaceFileTransactionally(
+    const char* temporaryPath,
+    const char* destinationPath,
+    const char* backupPath) {
+    if (!SD.exists(temporaryPath)) {
+        return false;
+    }
+    SD.remove(backupPath);
+    const bool hadDestination = SD.exists(destinationPath);
+    if (hadDestination && !SD.rename(destinationPath, backupPath)) {
+        return false;
+    }
+    if (!SD.rename(temporaryPath, destinationPath)) {
+        if (hadDestination) {
+            SD.rename(backupPath, destinationPath);
+        }
+        return false;
+    }
+    if (hadDestination) {
+        SD.remove(backupPath);
+    }
+    return true;
+}
+
 void persistSettings() {
-    SD.remove(kSettingsPath);
-    File file = SD.open(kSettingsPath, FILE_WRITE);
-    if (file) {
-        file.write(slideshowEnabled ? 1 : 0);
-        file.write(slideshowDeepSleep ? 1 : 0);
-        file.write(slideshowIntervalIndex);
-        file.write(screensaverDelayIndex);
-        file.write(static_cast<uint8_t>(screensaverStyle));
-        file.write(imagesOnlyOnBattery ? 1 : 0);
-        file.close();
+    SD.remove(kSettingsTemporaryPath);
+    File file = SD.open(kSettingsTemporaryPath, FILE_WRITE);
+    if (!file) {
+        return;
+    }
+    const uint8_t settings[] = {
+        static_cast<uint8_t>(slideshowEnabled ? 1 : 0),
+        static_cast<uint8_t>(slideshowDeepSleep ? 1 : 0),
+        slideshowIntervalIndex,
+        screensaverDelayIndex,
+        static_cast<uint8_t>(screensaverStyle),
+        static_cast<uint8_t>(imagesOnlyOnBattery ? 1 : 0),
+        static_cast<uint8_t>(remoteSleepNever ? 1 : 0),
+    };
+    const bool written = file.write(settings, sizeof(settings)) == sizeof(settings);
+    file.flush();
+    file.close();
+    if (!written || !replaceFileTransactionally(
+            kSettingsTemporaryPath, kSettingsPath, kSettingsBackupPath)) {
+        SD.remove(kSettingsTemporaryPath);
+        Serial.println("Screen saver settings transaction failed");
     }
 }
 
-void restoreSettings() {
-    File file = SD.open(kSettingsPath, FILE_READ);
+bool restoreSettingsFrom(const char* path) {
+    File file = SD.open(path, FILE_READ);
     if (!file) {
-        return;
+        return false;
     }
     const int enabled = file.read();
     const int deepSleep = file.read();
@@ -953,7 +1112,11 @@ void restoreSettings() {
     const int delayIndex = file.read();
     const int style = file.read();
     const int batteryOnly = file.read();
+    const int sleepNever = file.read();
     file.close();
+    if (enabled < 0) {
+        return false;
+    }
     slideshowEnabled = enabled == 1;
     slideshowDeepSleep = deepSleep == 1;
     if (intervalIndex >= 0 && intervalIndex < kSlideshowIntervalCount) {
@@ -966,6 +1129,27 @@ void restoreSettings() {
     screensaverStyle = style == static_cast<int>(ScreensaverStyle::geometricSnake)
         ? ScreensaverStyle::geometricSnake : ScreensaverStyle::media;
     imagesOnlyOnBattery = batteryOnly == 1; // Missing sixth byte defaults off.
+    remoteSleepNever = sleepNever == 1; // Missing seventh byte defaults off.
+    return true;
+}
+
+void restoreSettings() {
+    if (restoreSettingsFrom(kSettingsPath)) {
+        SD.remove(kSettingsTemporaryPath);
+        SD.remove(kSettingsBackupPath);
+        return;
+    }
+    if (restoreSettingsFrom(kSettingsTemporaryPath) && replaceFileTransactionally(
+            kSettingsTemporaryPath, kSettingsPath, kSettingsBackupPath)) {
+        Serial.println("Recovered screen saver settings from temporary file");
+        return;
+    }
+    if (restoreSettingsFrom(kSettingsBackupPath)) {
+        SD.remove(kSettingsPath);
+        if (SD.rename(kSettingsBackupPath, kSettingsPath)) {
+            Serial.println("Recovered screen saver settings from backup");
+        }
+    }
 }
 
 void updateScreensaverBatteryPolicy() {
@@ -1158,6 +1342,35 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
             control.action.scheduleEnabled = actionJson["scheduleEnabled"] | false;
             control.action.scheduleHour = constrain(actionJson["scheduleHour"] | 0, 0, 23);
             control.action.scheduleMinute = constrain(actionJson["scheduleMinute"] | 0, 0, 59);
+            for (JsonObject scheduleJson : actionJson["schedules"].as<JsonArray>()) {
+                if (control.action.scheduleCount >= kMaximumSchedulesPerAction) {
+                    break;
+                }
+                RemoteScheduleEntry& schedule =
+                    control.action.schedules[control.action.scheduleCount++];
+                schedule.weekdaysMask = 0;
+                for (int weekday : scheduleJson["weekdays"].as<JsonArray>()) {
+                    if (weekday >= 1 && weekday <= 7) {
+                        schedule.weekdaysMask |= 1U << (weekday - 1);
+                    }
+                }
+                schedule.hour = constrain(scheduleJson["hour"] | 8, 0, 23);
+                schedule.minute = constrain(scheduleJson["minute"] | 0, 0, 59);
+                schedule.hasText = !scheduleJson["text"].isNull();
+                schedule.hasValue = !scheduleJson["value"].isNull();
+                schedule.hasValueTenths = !scheduleJson["valueTenths"].isNull();
+                if (schedule.hasText) {
+                    strlcpy(schedule.text, scheduleJson["text"] | "", sizeof(schedule.text));
+                }
+                schedule.value = scheduleJson["value"] | control.action.value;
+                schedule.valueTenths = scheduleJson["valueTenths"] | control.action.valueTenths;
+            }
+            if (control.action.scheduleEnabled && control.action.scheduleCount == 0) {
+                RemoteScheduleEntry& schedule = control.action.schedules[0];
+                schedule.hour = control.action.scheduleHour;
+                schedule.minute = control.action.scheduleMinute;
+                control.action.scheduleCount = 1;
+            }
             strlcpy(
                 control.action.computerId,
                 actionJson["computerID"] | "",
@@ -1191,9 +1404,27 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
 }
 
 bool loadRemoteProfile() {
-    if (remoteProfile == nullptr || pendingRemoteProfile == nullptr ||
-        !parseRemoteProfile(kRemoteProfilePath, *pendingRemoteProfile)) {
+    if (remoteProfile == nullptr || pendingRemoteProfile == nullptr) {
         return false;
+    }
+    if (!parseRemoteProfile(kRemoteProfilePath, *pendingRemoteProfile)) {
+        if (parseRemoteProfile(kRemoteProfileTemporaryPath, *pendingRemoteProfile) &&
+            replaceFileTransactionally(
+                kRemoteProfileTemporaryPath,
+                kRemoteProfilePath,
+                kRemoteProfileBackupPath)) {
+            Serial.println("Recovered remote profile from temporary file");
+        } else if (parseRemoteProfile(kRemoteProfileBackupPath, *pendingRemoteProfile)) {
+            SD.remove(kRemoteProfilePath);
+            if (SD.rename(kRemoteProfileBackupPath, kRemoteProfilePath)) {
+                Serial.println("Recovered remote profile from backup");
+            }
+        } else {
+            return false;
+        }
+    } else {
+        SD.remove(kRemoteProfileTemporaryPath);
+        SD.remove(kRemoteProfileBackupPath);
     }
     *remoteProfile = *pendingRemoteProfile;
     remotePageIndex = min(remotePageIndex, static_cast<uint8_t>(remoteProfile->pageCount - 1));
@@ -1281,8 +1512,10 @@ bool installTemporaryRemoteProfile() {
         SD.remove(kRemoteProfileTemporaryPath);
         return false;
     }
-    SD.remove(kRemoteProfilePath);
-    if (!SD.rename(kRemoteProfileTemporaryPath, kRemoteProfilePath)) {
+    if (!replaceFileTransactionally(
+            kRemoteProfileTemporaryPath,
+            kRemoteProfilePath,
+            kRemoteProfileBackupPath)) {
         SD.remove(kRemoteProfileTemporaryPath);
         return false;
     }
@@ -1297,6 +1530,7 @@ bool installTemporaryRemoteProfile() {
     RemoteProfile* previousProfile = remoteProfile;
     remoteProfile = pendingRemoteProfile;
     pendingRemoteProfile = previousProfile;
+    ++remoteProfileRevision;
     preserveRemoteTextBoxValues(*pendingRemoteProfile, *remoteProfile);
     persistRemoteSliderPositions(*remoteProfile);
     if (remoteProfile->hasDeviceClock) {
@@ -1573,7 +1807,7 @@ void notifyHomeWifiStatus() {
 }
 
 void notifyLibraryCount() {
-    refreshLibrary();
+    refreshLibrary(true);
     const uint8_t response[] = {kLibraryCount, static_cast<uint8_t>(libraryItemCount)};
     controlCharacteristic->setValue(response, sizeof(response));
     controlCharacteristic->notify();
@@ -1669,7 +1903,7 @@ bool sdHasSpaceFor(uint32_t bytes) {
     return totalBytes >= usedBytes && static_cast<uint64_t>(bytes) <= totalBytes - usedBytes;
 }
 
-bool parseAnimation(File& file, AnimationHeader& header, uint16_t*& durations) {
+bool parseAnimationHeader(File& file, AnimationHeader& header) {
     if (file.size() < kHeaderBytes || !file.seek(0)) {
         return false;
     }
@@ -1703,16 +1937,33 @@ bool parseAnimation(File& file, AnimationHeader& header, uint16_t*& durations) {
         return false;
     }
 
+    header.frameCount = frameCount;
+    header.scanRateHz = scanRateHz;
+    header.transitionScans = transitionScans;
+    header.adaptiveCleaning = adaptiveCleaning == 1;
+    header.cleanRefreshInterval = cleanRefreshInterval;
+    header.frameBytes = frameBytes;
+    header.framesOffset = kHeaderBytes + static_cast<uint32_t>(frameCount) * sizeof(uint16_t);
+    header.grayscale = version == 4;
+    return true;
+}
+
+bool parseAnimation(File& file, AnimationHeader& header, uint16_t*& durations) {
+    if (!parseAnimationHeader(file, header)) {
+        return false;
+    }
+
     durations = static_cast<uint16_t*>(heap_caps_malloc(
-        static_cast<size_t>(frameCount) * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        static_cast<size_t>(header.frameCount) * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (durations == nullptr) {
-        durations = static_cast<uint16_t*>(malloc(static_cast<size_t>(frameCount) * sizeof(uint16_t)));
+        durations = static_cast<uint16_t*>(malloc(
+            static_cast<size_t>(header.frameCount) * sizeof(uint16_t)));
     }
     if (durations == nullptr) {
         return false;
     }
 
-    for (uint16_t index = 0; index < frameCount; ++index) {
+    for (uint16_t index = 0; index < header.frameCount; ++index) {
         uint8_t durationBytes[2];
         if (!readExact(file, durationBytes, sizeof(durationBytes))) {
             free(durations);
@@ -1726,15 +1977,6 @@ bool parseAnimation(File& file, AnimationHeader& header, uint16_t*& durations) {
             return false;
         }
     }
-
-    header.frameCount = frameCount;
-    header.scanRateHz = scanRateHz;
-    header.transitionScans = transitionScans;
-    header.adaptiveCleaning = adaptiveCleaning == 1;
-    header.cleanRefreshInterval = cleanRefreshInterval;
-    header.frameBytes = frameBytes;
-    header.framesOffset = kHeaderBytes + static_cast<uint32_t>(frameCount) * sizeof(uint16_t);
-    header.grayscale = version == 4;
     return true;
 }
 
@@ -1798,10 +2040,8 @@ bool readLibraryItem(const char* path, LibraryItem& item) {
     }
 
     AnimationHeader header;
-    uint16_t* durations = nullptr;
-    const bool valid = parseAnimation(file, header, durations);
+    const bool valid = parseAnimationHeader(file, header);
     file.close();
-    free(durations);
     if (!valid) {
         return false;
     }
@@ -1826,7 +2066,10 @@ void libraryItemId(const LibraryItem& item, char* identifier, size_t capacity) {
     }
 }
 
-void refreshLibrary() {
+void refreshLibrary(bool force) {
+    if (libraryMetadataValid && !force) {
+        return;
+    }
     libraryItemCount = 0;
     if (SD.exists(kAnimationPath)) {
         LibraryItem item;
@@ -1837,6 +2080,7 @@ void refreshLibrary() {
 
     File directory = SD.open(kLibraryDirectory);
     if (!directory || !directory.isDirectory()) {
+        libraryMetadataValid = true;
         return;
     }
     File entry = directory.openNextFile();
@@ -1867,6 +2111,7 @@ void refreshLibrary() {
     if (libraryPage >= pageCount) {
         libraryPage = pageCount - 1;
     }
+    libraryMetadataValid = true;
 }
 
 bool deleteLibraryItem(uint8_t index) {
@@ -1892,6 +2137,7 @@ bool deleteLibraryItem(uint8_t index) {
         return false;
     }
     SD.remove(sidecarPath);
+    libraryMetadataValid = false;
     refreshLibrary();
 
     if (deletingActiveItem) {
@@ -1917,28 +2163,55 @@ bool deleteLibraryItem(uint8_t index) {
 }
 
 void persistActiveSelection() {
-    SD.remove(kActivePath);
-    File file = SD.open(kActivePath, FILE_WRITE);
-    if (file) {
-        file.print(activeAnimationPath);
-        file.close();
-    }
-}
-
-void restoreActiveSelection() {
-    if (!SD.exists(kActivePath)) {
-        return;
-    }
-    File file = SD.open(kActivePath, FILE_READ);
+    SD.remove(kActiveTemporaryPath);
+    File file = SD.open(kActiveTemporaryPath, FILE_WRITE);
     if (!file) {
         return;
     }
-    char path[kMaximumPathBytes] = {};
-    const size_t length = file.readBytes(path, sizeof(path) - 1);
-    path[length] = '\0';
+    const size_t length = strlen(activeAnimationPath);
+    const bool written = file.write(
+        reinterpret_cast<const uint8_t*>(activeAnimationPath), length) == length;
+    file.flush();
     file.close();
-    if (path[0] != '\0' && SD.exists(path)) {
-        strlcpy(activeAnimationPath, path, sizeof(activeAnimationPath));
+    if (!written || !replaceFileTransactionally(
+            kActiveTemporaryPath, kActivePath, kActiveBackupPath)) {
+        SD.remove(kActiveTemporaryPath);
+        Serial.println("Active selection transaction failed");
+    }
+}
+
+bool restoreActiveSelectionFrom(const char* sourcePath) {
+    File file = SD.open(sourcePath, FILE_READ);
+    if (!file) {
+        return false;
+    }
+    char selectedPath[kMaximumPathBytes] = {};
+    const size_t length = file.readBytes(selectedPath, sizeof(selectedPath) - 1);
+    selectedPath[length] = '\0';
+    file.close();
+    if (selectedPath[0] != '\0' && SD.exists(selectedPath)) {
+        strlcpy(activeAnimationPath, selectedPath, sizeof(activeAnimationPath));
+        return true;
+    }
+    return false;
+}
+
+void restoreActiveSelection() {
+    if (restoreActiveSelectionFrom(kActivePath)) {
+        SD.remove(kActiveTemporaryPath);
+        SD.remove(kActiveBackupPath);
+        return;
+    }
+    if (restoreActiveSelectionFrom(kActiveTemporaryPath) && replaceFileTransactionally(
+            kActiveTemporaryPath, kActivePath, kActiveBackupPath)) {
+        Serial.println("Recovered active selection from temporary file");
+        return;
+    }
+    if (restoreActiveSelectionFrom(kActiveBackupPath)) {
+        SD.remove(kActivePath);
+        if (SD.rename(kActiveBackupPath, kActivePath)) {
+            Serial.println("Recovered active selection from backup");
+        }
     }
 }
 
@@ -1983,6 +2256,7 @@ bool installTemporaryAnimation() {
     if (loadAnimation(destinationPath)) {
         persistActiveSelection();
         SD.remove(kBackupPath);
+        libraryMetadataValid = false;
         refreshLibrary();
         for (size_t index = 0; index < libraryItemCount; ++index) {
             if (strcmp(libraryItems[index].path, destinationPath) == 0) {
@@ -2245,6 +2519,42 @@ void configureWifiServer() {
                 RemotePage& page = remoteProfile->pages[pageIndex];
                 for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
                     RemoteControl& control = page.controls[controlIndex];
+                    if (isMacVolumeControl(control) && strcmp(control.id, identifier) == 0) {
+                        control.nextRefreshAt = now + 60000;
+                        if (available && item["value"].is<int>()) {
+                            const bool activelyDragging = remoteVisible &&
+                                pageIndex == remotePageIndex &&
+                                activeRemoteTouchPage == pageIndex &&
+                                activeRemoteControlIndex == static_cast<int8_t>(controlIndex);
+                            if (activelyDragging) {
+                                continue;
+                            }
+                            const int value = constrain(item["value"].as<int>(), 0, 255);
+                            const bool changed = control.action.value != value;
+                            control.action.value = value;
+                            if (changed && remoteVisible && pageIndex == remotePageIndex) {
+                                displayRemoteSliderValue(page, controlIndex, true);
+                                refreshReferencedTextBoxes(page, control.id);
+                            }
+                        }
+                        continue;
+                    }
+                    if (isMacPlayPauseControl(control) && strcmp(control.id, identifier) == 0) {
+                        control.nextRefreshAt = now + 60000;
+                        const bool stateAvailable = available && item["value"].is<int>();
+                        bool changed = control.hasResolvedValue != stateAvailable;
+                        control.hasResolvedValue = stateAvailable;
+                        if (stateAvailable) {
+                            const bool isPlaying = item["value"].as<int>() != 0;
+                            changed = changed || control.toggleOn != isPlaying;
+                            control.toggleOn = isPlaying;
+                        }
+                        if (changed && remoteVisible && pageIndex == remotePageIndex) {
+                            displayRemoteSliderValue(page, controlIndex, true);
+                            refreshReferencedTextBoxes(page, control.id);
+                        }
+                        continue;
+                    }
                     if (control.kind != 2 || strcmp(control.textSource, "nowPlaying") != 0 ||
                         strcmp(control.id, identifier) != 0) {
                         continue;
@@ -3170,10 +3480,24 @@ void formatSlideshowInterval(char* text, size_t capacity) {
 }
 
 void formatScreensaverDelay(char* text, size_t capacity) {
+    if (!slideshowEnabled && remoteSleepNever) {
+        strlcpy(text, "NEVER", capacity);
+        return;
+    }
     formatDuration(screensaverDelaySeconds(), text, capacity);
 }
 
 void adjustScreensaverDelay(int direction) {
+    if (!slideshowEnabled && remoteSleepNever) {
+        if (direction >= 0) {
+            return;
+        }
+        remoteSleepNever = false;
+        screensaverDelayIndex = kSlideshowIntervalCount - 1;
+        persistSettings();
+        displaySlideshowMenu();
+        return;
+    }
     const uint32_t currentSeconds = screensaverDelaySeconds();
     int nextIndex = -1;
     if (direction < 0) {
@@ -3192,6 +3516,11 @@ void adjustScreensaverDelay(int direction) {
         }
     }
     if (nextIndex < 0) {
+        if (!slideshowEnabled && direction > 0) {
+            remoteSleepNever = true;
+            persistSettings();
+            displaySlideshowMenu();
+        }
         return;
     }
     screensaverDelayIndex = static_cast<uint8_t>(nextIndex);
@@ -3883,7 +4212,16 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
         return;
     }
 
-    const bool active = control.toggle ? control.toggleOn : pressed;
+    const bool playbackControl = isMacPlayPauseControl(control);
+    const bool playbackStateAvailable = playbackControl && control.hasResolvedValue;
+    const bool active = control.toggle && !playbackControl
+        ? control.toggleOn : pressed;
+    const char* displayedTitle = playbackStateAvailable
+        ? (control.toggleOn ? "Pause" : "Play")
+        : control.title;
+    const char* displayedSymbol = playbackStateAvailable
+        ? (control.toggleOn ? "pause.fill" : "play.fill")
+        : control.symbol;
     const uint32_t foreground = active ? TFT_WHITE : TFT_BLACK;
     const uint32_t background = active ? TFT_BLACK : TFT_WHITE;
     constexpr int32_t radius = 10;
@@ -3894,21 +4232,21 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
     M5.Display.setTextColor(foreground, background);
     M5.Display.setFont(&fonts::FreeSansBold12pt7b);
     if (control.gridHeight == 1) {
-        drawRemoteControlIcon(control.symbol,
-            control.hasIconBitmap ? control.iconBitmap : nullptr,
-            control.iconDimension,
-            x + 28, y + height / 2, control.hasIconBitmap ? 32 : 18,
+        drawRemoteControlIcon(displayedSymbol,
+            playbackStateAvailable || !control.hasIconBitmap ? nullptr : control.iconBitmap,
+            playbackStateAvailable ? 0 : control.iconDimension,
+            x + 28, y + height / 2, !playbackStateAvailable && control.hasIconBitmap ? 32 : 18,
             foreground, background);
         M5.Display.setTextDatum(textdatum_t::middle_left);
-        M5.Display.drawString(control.title, x + 50, y + height / 2);
+        M5.Display.drawString(displayedTitle, x + 50, y + height / 2);
     } else {
         M5.Display.setTextDatum(textdatum_t::middle_center);
-        drawRemoteControlIcon(control.symbol,
-            control.hasIconBitmap ? control.iconBitmap : nullptr,
-            control.iconDimension,
-            x + width / 2, y + 52, control.hasIconBitmap ? 64 : 28,
+        drawRemoteControlIcon(displayedSymbol,
+            playbackStateAvailable || !control.hasIconBitmap ? nullptr : control.iconBitmap,
+            playbackStateAvailable ? 0 : control.iconDimension,
+            x + width / 2, y + 52, !playbackStateAvailable && control.hasIconBitmap ? 64 : 28,
             foreground, background);
-        M5.Display.drawCenterString(control.title, x + width / 2, y + 116);
+        M5.Display.drawCenterString(displayedTitle, x + width / 2, y + 116);
     }
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
 }
@@ -4070,6 +4408,7 @@ void displayRemoteSliderValue(
     const RemotePage& page,
     size_t index,
     bool waitForCompletion = false) {
+    M5.Display.waitDisplay();
     M5.Display.setEpdMode(epd_mode_t::epd_fastest);
     M5.Display.startWrite();
     drawRemoteControl(page, index);
@@ -4194,10 +4533,28 @@ void displayRemoteActionStatus(const char* message) {
         return;
     }
     strlcpy(remoteActionStatus, message, sizeof(remoteActionStatus));
-    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+    M5.Display.waitDisplay();
+    M5.Display.setEpdMode(epd_mode_t::epd_text);
     M5.Display.startWrite();
     drawRemoteStatusLine();
     M5.Display.endWrite();
+}
+
+void displayRemoteSleepStatus() {
+    if (!remoteVisible) {
+        return;
+    }
+    M5.Display.waitDisplay();
+    M5.Display.setEpdMode(epd_mode_t::epd_text);
+    M5.Display.startWrite();
+    M5.Display.fillRect(20, 108, 414, 34, TFT_WHITE);
+    M5.Display.drawRoundRect(24, 110, 112, 28, 6, TFT_BLACK);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setFont(&fonts::FreeSansBold9pt7b);
+    M5.Display.setTextDatum(textdatum_t::middle_center);
+    M5.Display.drawString("Sleeping", 80, 124);
+    M5.Display.endWrite();
+    M5.Display.waitDisplay();
 }
 
 void displayRemote() {
@@ -4280,16 +4637,12 @@ void connectHomeWifi() {
     Serial.printf("Connecting to home Wi-Fi: %s\n", remoteProfile->wifiSsid);
 }
 
-bool postJson(const String& url, const String& body, const char* token = nullptr) {
-    String ignored;
-    return postJsonResponse(url, body, ignored, token);
-}
-
 bool postJsonResponse(
     const String& url,
     const String& body,
     String& responseBody,
-    const char* token = nullptr) {
+    const char* token = nullptr,
+    uint32_t responseTimeoutMs) {
     if (WiFi.status() != WL_CONNECTED || !url.startsWith("http://")) {
         return false;
     }
@@ -4305,8 +4658,16 @@ bool postJsonResponse(
     }
 
     WiFiClient client;
-    client.setTimeout(3000);
-    if (!client.connect(authority.c_str(), port)) {
+    client.setTimeout(4000);
+    bool connected = false;
+    for (uint8_t attempt = 0; attempt < 2 && !connected; ++attempt) {
+        connected = client.connect(authority.c_str(), port, 3000);
+        if (!connected && attempt == 0) {
+            client.stop();
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    if (!connected) {
         return false;
     }
     client.printf("POST %s HTTP/1.1\r\n", path.c_str());
@@ -4317,16 +4678,27 @@ bool postJsonResponse(
     }
     client.printf("Content-Length: %u\r\n\r\n", body.length());
     client.print(body);
-    const String statusLine = client.readStringUntil('\n');
+    const uint32_t responseDeadline = millis() + responseTimeoutMs;
+    String statusLine;
+    if (!readHttpLine(client, statusLine, responseDeadline)) {
+        client.stop();
+        return false;
+    }
     const int firstSpace = statusLine.indexOf(' ');
     const int status = firstSpace >= 0 ? statusLine.substring(firstSpace + 1).toInt() : 0;
     int contentLength = -1;
     while (client.connected() || client.available()) {
-        const String line = client.readStringUntil('\n');
-        if (line == "\r" || line.length() == 0) {
+        String line;
+        if (!readHttpLine(client, line, responseDeadline)) {
+            client.stop();
+            return false;
+        }
+        if (line == "\r\n" || line == "\n" || line.length() == 0) {
             break;
         }
-        if (line.startsWith("Content-Length:")) {
+        String normalizedHeader = line;
+        normalizedHeader.toLowerCase();
+        if (normalizedHeader.startsWith("content-length:")) {
             contentLength = line.substring(15).toInt();
         }
     }
@@ -4340,21 +4712,295 @@ bool postJsonResponse(
         char buffer[256];
         int remaining = contentLength;
         while (remaining > 0) {
-            const size_t received = client.readBytes(
-                buffer,
-                min<int>(remaining, sizeof(buffer)));
-            if (received == 0) {
+            if (static_cast<int32_t>(millis() - responseDeadline) >= 0 ||
+                (!client.connected() && !client.available())) {
                 client.stop();
                 return false;
             }
-            responseBody.concat(buffer, received);
-            remaining -= received;
+            const int available = client.available();
+            if (available > 0) {
+                const size_t received = client.readBytes(
+                    buffer,
+                    min<int>(remaining, min<int>(available, sizeof(buffer))));
+                responseBody.concat(buffer, received);
+                remaining -= received;
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
         }
     } else {
-        responseBody = client.readString();
+        while (client.connected() || client.available()) {
+            while (client.available()) {
+                if (responseBody.length() >= 4096) {
+                    client.stop();
+                    return false;
+                }
+                responseBody += static_cast<char>(client.read());
+            }
+            if (static_cast<int32_t>(millis() - responseDeadline) >= 0) {
+                client.stop();
+                return false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
     client.stop();
     return status >= 200 && status < 300;
+}
+
+void remoteNetworkTask(void*) {
+    RemoteNetworkRequest request;
+    while (true) {
+        QueueSetMemberHandle_t readyQueue = xQueueSelectFromSet(
+            remoteNetworkQueueSet,
+            portMAX_DELAY);
+        if (readyQueue == nullptr ||
+            xQueueReceive(readyQueue, &request, 0) != pdTRUE) {
+            continue;
+        }
+        String responseBody;
+        const uint32_t responseTimeoutMs = request.textRequest
+            ? 15000
+            : strncmp(request.actionType, "netHome", 7) == 0 ? 35000 : 5000;
+        const bool sent = postJsonResponse(
+            request.url,
+            request.body,
+            responseBody,
+            request.token[0] == '\0' ? nullptr : request.token,
+            responseTimeoutMs);
+        if (request.textRequest) {
+            memset(remoteTextWorkerResult, 0, sizeof(*remoteTextWorkerResult));
+            strlcpy(
+                remoteTextWorkerResult->pageId,
+                request.pageId,
+                sizeof(remoteTextWorkerResult->pageId));
+            strlcpy(
+                remoteTextWorkerResult->responseBody,
+                responseBody.c_str(),
+                sizeof(remoteTextWorkerResult->responseBody));
+            remoteTextWorkerResult->profileRevision = request.profileRevision;
+            remoteTextWorkerResult->sent = sent;
+            xQueueOverwrite(remoteTextNetworkResultQueue, remoteTextWorkerResult);
+            if (request.sequence > remoteNetworkCompletedSequence) {
+                remoteNetworkCompletedSequence = request.sequence;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        RemoteNetworkResult result;
+        strlcpy(result.actionType, request.actionType, sizeof(result.actionType));
+        strlcpy(result.controlId, request.controlId, sizeof(result.controlId));
+        result.profileRevision = request.profileRevision;
+        result.reportStatus = request.reportStatus;
+        result.slider = request.slider;
+        result.toggle = request.toggle;
+        result.toggleOnBefore = request.toggleOnBefore;
+        result.playPause = request.playPause;
+        result.sent = sent;
+        if (result.sent && !responseBody.isEmpty()) {
+            JsonDocument response;
+            if (!deserializeJson(response, responseBody) && response["changed"].is<bool>()) {
+                result.changed = response["changed"].as<bool>();
+            }
+        }
+        if (xQueueSend(remoteNetworkResultQueue, &result, 0) != pdPASS) {
+            RemoteNetworkResult discarded;
+            xQueueReceive(remoteNetworkResultQueue, &discarded, 0);
+            xQueueSend(remoteNetworkResultQueue, &result, 0);
+        }
+        if (request.sequence > remoteNetworkCompletedSequence) {
+            remoteNetworkCompletedSequence = request.sequence;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void startRemoteNetworkWorker() {
+    if (remoteNetworkTaskHandle != nullptr) {
+        return;
+    }
+    remoteNetworkRequestQueue = xQueueCreate(
+        kRemoteNetworkQueueCapacity,
+        sizeof(RemoteNetworkRequest));
+    remoteSliderNetworkRequestQueue = xQueueCreate(1, sizeof(RemoteNetworkRequest));
+    remoteNetworkResultQueue = xQueueCreate(
+        kRemoteNetworkQueueCapacity,
+        sizeof(RemoteNetworkResult));
+    remoteTextNetworkResultQueue = xQueueCreate(1, sizeof(RemoteTextNetworkResult));
+    remoteNetworkQueueSet = xQueueCreateSet(kRemoteNetworkQueueCapacity + 1);
+    remoteTextWorkerResult = static_cast<RemoteTextNetworkResult*>(heap_caps_calloc(
+        1, sizeof(RemoteTextNetworkResult), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    remoteTextUiResult = static_cast<RemoteTextNetworkResult*>(heap_caps_calloc(
+        1, sizeof(RemoteTextNetworkResult), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (remoteNetworkRequestQueue == nullptr || remoteSliderNetworkRequestQueue == nullptr ||
+        remoteNetworkResultQueue == nullptr || remoteTextNetworkResultQueue == nullptr ||
+        remoteNetworkQueueSet == nullptr || remoteTextWorkerResult == nullptr ||
+        remoteTextUiResult == nullptr ||
+        xQueueAddToSet(remoteNetworkRequestQueue, remoteNetworkQueueSet) != pdPASS ||
+        xQueueAddToSet(remoteSliderNetworkRequestQueue, remoteNetworkQueueSet) != pdPASS ||
+        xTaskCreatePinnedToCore(
+            remoteNetworkTask,
+            "remote-network",
+            6144,
+            nullptr,
+            tskIDLE_PRIORITY + 1,
+            &remoteNetworkTaskHandle,
+            0) != pdPASS) {
+        if (remoteNetworkRequestQueue != nullptr) {
+            vQueueDelete(remoteNetworkRequestQueue);
+            remoteNetworkRequestQueue = nullptr;
+        }
+        if (remoteSliderNetworkRequestQueue != nullptr) {
+            vQueueDelete(remoteSliderNetworkRequestQueue);
+            remoteSliderNetworkRequestQueue = nullptr;
+        }
+        if (remoteNetworkResultQueue != nullptr) {
+            vQueueDelete(remoteNetworkResultQueue);
+            remoteNetworkResultQueue = nullptr;
+        }
+        if (remoteTextNetworkResultQueue != nullptr) {
+            vQueueDelete(remoteTextNetworkResultQueue);
+            remoteTextNetworkResultQueue = nullptr;
+        }
+        if (remoteNetworkQueueSet != nullptr) {
+            vQueueDelete(remoteNetworkQueueSet);
+            remoteNetworkQueueSet = nullptr;
+        }
+        free(remoteTextWorkerResult);
+        remoteTextWorkerResult = nullptr;
+        free(remoteTextUiResult);
+        remoteTextUiResult = nullptr;
+        remoteNetworkTaskHandle = nullptr;
+        Serial.println("Remote network worker unavailable");
+    }
+}
+
+bool queueRemoteNetworkRequest(
+    const String& url,
+    const String& body,
+    const char* token,
+    const RemoteControl& control,
+    bool reportStatus) {
+    if (remoteNetworkRequestQueue == nullptr || remoteSliderNetworkRequestQueue == nullptr ||
+        url.length() >= kRemoteRequestUrlBytes ||
+        body.length() >= kRemoteRequestBodyBytes) {
+        return false;
+    }
+    RemoteNetworkRequest request;
+    strlcpy(request.url, url.c_str(), sizeof(request.url));
+    strlcpy(request.body, body.c_str(), sizeof(request.body));
+    strlcpy(request.token, token == nullptr ? "" : token, sizeof(request.token));
+    strlcpy(request.actionType, control.action.type, sizeof(request.actionType));
+    strlcpy(request.controlId, control.id, sizeof(request.controlId));
+    request.reportStatus = reportStatus && !control.slider;
+    request.slider = control.slider;
+    request.toggle = control.toggle;
+    request.toggleOnBefore = control.toggleOn;
+    request.playPause = isMacPlayPauseControl(control);
+    request.sequence = ++remoteNetworkSequence;
+    request.profileRevision = remoteProfileRevision;
+    const uint32_t previousAcceptedSequence = remoteNetworkLatestAcceptedSequence;
+    remoteNetworkLatestAcceptedSequence = request.sequence;
+    const bool queued = control.slider
+        ? xQueueOverwrite(remoteSliderNetworkRequestQueue, &request) == pdPASS
+        : xQueueSend(remoteNetworkRequestQueue, &request, 0) == pdPASS;
+    if (!queued && remoteNetworkLatestAcceptedSequence == request.sequence) {
+        remoteNetworkLatestAcceptedSequence = previousAcceptedSequence;
+    }
+    return queued;
+}
+
+bool queueRemoteTextNetworkRequest(
+    const String& url,
+    const String& body,
+    const char* token,
+    const char* pageId) {
+    if (remoteTextRequestPending || remoteNetworkRequestQueue == nullptr ||
+        url.length() >= kRemoteRequestUrlBytes ||
+        body.length() >= kRemoteRequestBodyBytes) {
+        return false;
+    }
+    RemoteNetworkRequest request;
+    strlcpy(request.url, url.c_str(), sizeof(request.url));
+    strlcpy(request.body, body.c_str(), sizeof(request.body));
+    strlcpy(request.token, token == nullptr ? "" : token, sizeof(request.token));
+    strlcpy(request.pageId, pageId, sizeof(request.pageId));
+    request.textRequest = true;
+    request.sequence = ++remoteNetworkSequence;
+    request.profileRevision = remoteProfileRevision;
+    const uint32_t previousAcceptedSequence = remoteNetworkLatestAcceptedSequence;
+    remoteNetworkLatestAcceptedSequence = request.sequence;
+    if (xQueueSend(remoteNetworkRequestQueue, &request, 0) != pdPASS) {
+        remoteNetworkLatestAcceptedSequence = previousAcceptedSequence;
+        return false;
+    }
+    remoteTextRequestPending = true;
+    return true;
+}
+
+void pollRemoteNetworkResults() {
+    if (remoteNetworkResultQueue == nullptr) {
+        return;
+    }
+    RemoteNetworkResult result;
+    while (xQueueReceive(remoteNetworkResultQueue, &result, 0) == pdTRUE) {
+        Serial.printf("Remote action %s -> %s\n",
+            result.actionType, result.sent ? "ok" : "failed");
+        if (result.profileRevision != remoteProfileRevision) {
+            continue;
+        }
+        RemoteControl* matchedControl = nullptr;
+        uint8_t matchedPageIndex = 0;
+        if (remoteProfile != nullptr && result.controlId[0] != '\0') {
+            for (uint8_t pageIndex = 0;
+                 pageIndex < remoteProfile->pageCount && matchedControl == nullptr;
+                 ++pageIndex) {
+                RemotePage& page = remoteProfile->pages[pageIndex];
+                for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+                    if (strcmp(page.controls[controlIndex].id, result.controlId) == 0) {
+                        matchedControl = &page.controls[controlIndex];
+                        matchedPageIndex = pageIndex;
+                        break;
+                    }
+                }
+            }
+        }
+        if (result.sent && result.playPause && matchedControl != nullptr) {
+            matchedControl->nextRefreshAt = millis() + 250;
+        }
+        if (!result.sent && result.toggle && matchedControl != nullptr &&
+            matchedControl->toggleOn != result.toggleOnBefore) {
+            matchedControl->toggleOn = result.toggleOnBefore;
+            persistRemoteToggleStates(*remoteProfile);
+            if (remoteVisible && remotePageIndex == matchedPageIndex) {
+                displayRemote();
+            }
+        }
+        if (result.reportStatus) {
+            displayRemoteActionStatus(result.sent
+                ? (result.changed ? "Sent" : "Already set")
+                : (strncmp(result.actionType, "wled", 4) == 0
+                    ? "WLED unavailable" : "Computer unavailable"));
+        }
+    }
+    if (remoteTextNetworkResultQueue != nullptr && remoteTextUiResult != nullptr) {
+        if (xQueueReceive(remoteTextNetworkResultQueue, remoteTextUiResult, 0) == pdTRUE) {
+            applyMacTextBoxResponse(*remoteTextUiResult);
+        }
+    }
+}
+
+bool hasPendingRemoteNetworkWork() {
+    return remoteNetworkLatestAcceptedSequence != remoteNetworkCompletedSequence ||
+        (remoteNetworkRequestQueue != nullptr &&
+            uxQueueMessagesWaiting(remoteNetworkRequestQueue) > 0) ||
+        (remoteSliderNetworkRequestQueue != nullptr &&
+            uxQueueMessagesWaiting(remoteSliderNetworkRequestQueue) > 0) ||
+        (remoteNetworkResultQueue != nullptr &&
+            uxQueueMessagesWaiting(remoteNetworkResultQueue) > 0) ||
+        (remoteTextNetworkResultQueue != nullptr &&
+            uxQueueMessagesWaiting(remoteTextNetworkResultQueue) > 0) ||
+        remoteTextRequestPending;
 }
 
 RemoteComputer* textBoxComputer(RemoteControl& control) {
@@ -4367,7 +5013,17 @@ RemoteComputer* textBoxComputer(RemoteControl& control) {
             }
         }
     }
-    return remoteProfile->computerCount > 0 ? &remoteProfile->computers[0] : nullptr;
+    if (remoteProfile->computerCount > 0) {
+        return &remoteProfile->computers[0];
+    }
+    if (remoteProfile->macHost[0] == '\0' || remoteProfile->macToken[0] == '\0') {
+        return nullptr;
+    }
+    static RemoteComputer legacyComputer;
+    strlcpy(legacyComputer.host, remoteProfile->macHost, sizeof(legacyComputer.host));
+    legacyComputer.port = remoteProfile->macPort;
+    strlcpy(legacyComputer.token, remoteProfile->macToken, sizeof(legacyComputer.token));
+    return &legacyComputer;
 }
 
 void appendPaddedNumber(String& output, uint16_t value, uint8_t width, char padding = '0') {
@@ -4489,7 +5145,7 @@ void redrawRemoteTextBox(RemotePage& page, uint8_t index) {
     M5.Display.endWrite();
 }
 
-void refreshReferencedTextBoxes(RemotePage& page, const char* controlId) {
+void refreshReferencedTextBoxes(RemotePage& page, const char* controlId, bool redraw) {
     if (!remoteVisible || &page != &remoteProfile->pages[remotePageIndex]) {
         return;
     }
@@ -4497,7 +5153,9 @@ void refreshReferencedTextBoxes(RemotePage& page, const char* controlId) {
         RemoteControl& textBox = page.controls[index];
         if (textBox.kind == 2 && strcmp(textBox.textSource, "controlValue") == 0 &&
             strcmp(textBox.referencedControlId, controlId) == 0 && resolveLocalTextBox(textBox)) {
-            redrawRemoteTextBox(page, index);
+            if (redraw) {
+                redrawRemoteTextBox(page, index);
+            }
         }
     }
 }
@@ -4512,22 +5170,37 @@ uint32_t textBoxRefreshIntervalMs(const RemoteControl& control) {
     ? 60000 : control.refreshIntervalMs;
 }
 
+bool isMacVolumeControl(const RemoteControl& control) {
+    return control.slider && strcmp(control.action.type, "macMedia") == 0 &&
+        strcmp(control.action.text, "volume") == 0;
+}
+
+bool isMacPlayPauseControl(const RemoteControl& control) {
+    return control.kind == 0 && strcmp(control.action.type, "macMedia") == 0 &&
+        strcmp(control.action.text, "playPause") == 0;
+}
+
 void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now) {
     JsonDocument request;
     JsonArray items = request["items"].to<JsonArray>();
     for (uint8_t index = 0; index < page.controlCount; ++index) {
         RemoteControl& control = page.controls[index];
-        if (control.kind != 2 || !isMacTextSource(control) ||
+        const bool volumeControl = isMacVolumeControl(control);
+        const bool playbackControl = isMacPlayPauseControl(control);
+        if ((!volumeControl && !playbackControl &&
+            (control.kind != 2 || !isMacTextSource(control))) ||
             control.nextRefreshAt == 0 || static_cast<int32_t>(now - control.nextRefreshAt) < 0 ||
             textBoxComputer(control) != &computer) {
             continue;
         }
         JsonObject item = items.add<JsonObject>();
         item["id"] = control.id;
-        item["source"] = control.textSource;
-        item["sourceText"] = control.sourceText;
-        item["placeholder"] = control.placeholder;
-        const uint32_t refreshIntervalMs = textBoxRefreshIntervalMs(control);
+        item["source"] = volumeControl ? "outputVolume"
+            : playbackControl ? "playbackState" : control.textSource;
+        item["sourceText"] = volumeControl || playbackControl ? "" : control.sourceText;
+        item["placeholder"] = volumeControl || playbackControl ? "" : control.placeholder;
+        const uint32_t refreshIntervalMs = volumeControl || playbackControl
+            ? 60000 : textBoxRefreshIntervalMs(control);
         control.nextRefreshAt = now + (refreshIntervalMs > 0 ? refreshIntervalMs : 5000);
     }
     if (items.size() == 0 || WiFi.status() != WL_CONNECTED) {
@@ -4540,17 +5213,43 @@ void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now)
         static_cast<unsigned>(items.size()), computer.host, computer.port);
     String body;
     serializeJson(request, body);
-    String response;
     const String url = "http://" + String(computer.host) + ":" + computer.port + "/text-source";
-    if (!postJsonResponse(url, body, response, computer.token)) {
+    if (!queueRemoteTextNetworkRequest(url, body, computer.token, page.id)) {
+        Serial.println("Text refresh deferred: remote network queue is busy");
+    }
+}
+
+void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
+    remoteTextRequestPending = false;
+    if (result.profileRevision != remoteProfileRevision) {
+        return;
+    }
+    if (!result.sent) {
         Serial.println("Text refresh failed: companion request rejected or timed out");
         return;
     }
+    if (remoteProfile == nullptr) {
+        return;
+    }
+    RemotePage* matchingPage = nullptr;
+    for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
+        if (strcmp(remoteProfile->pages[pageIndex].id, result.pageId) == 0) {
+            matchingPage = &remoteProfile->pages[pageIndex];
+            break;
+        }
+    }
+    if (matchingPage == nullptr) {
+        return;
+    }
+    RemotePage& page = *matchingPage;
     JsonDocument document;
-    if (deserializeJson(document, response)) {
+    if (deserializeJson(document, result.responseBody)) {
         Serial.println("Text refresh failed: invalid companion response");
         return;
     }
+    const uint32_t now = millis();
+    const bool useQualityRefresh = remoteQualityRefreshPending;
+    bool batchChanged = false;
     for (JsonObject result : document["items"].as<JsonArray>()) {
         const char* identifier = result["id"] | "";
         for (uint8_t index = 0; index < page.controlCount; ++index) {
@@ -4559,6 +5258,53 @@ void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now)
                 continue;
             }
             const bool available = result["available"] | false;
+            if (isMacVolumeControl(control)) {
+                control.nextRefreshAt = now + 60000;
+                if (available && result["value"].is<int>()) {
+                    if (activeRemoteTouchPage == remotePageIndex &&
+                        activeRemoteControlIndex == static_cast<int8_t>(index)) {
+                        break;
+                    }
+                    const int value = constrain(result["value"].as<int>(), 0, 255);
+                    const bool changed = control.action.value != value;
+                    control.action.value = value;
+                    Serial.printf("Output volume %s: %d%s\n", control.id, value,
+                        changed ? ", changed" : ", unchanged");
+                    if (changed) {
+                        batchChanged = true;
+                        if (!useQualityRefresh) {
+                            displayRemoteSliderValue(page, index, true);
+                        }
+                        refreshReferencedTextBoxes(page, control.id, !useQualityRefresh);
+                    }
+                }
+                break;
+            }
+            if (isMacPlayPauseControl(control)) {
+                control.nextRefreshAt = now + 60000;
+                const bool stateAvailable = available && result["value"].is<int>();
+                bool changed = control.hasResolvedValue != stateAvailable;
+                control.hasResolvedValue = stateAvailable;
+                if (stateAvailable) {
+                    const bool isPlaying = result["value"].as<int>() != 0;
+                    changed = changed || control.toggleOn != isPlaying;
+                    control.toggleOn = isPlaying;
+                    Serial.printf("Playback state %s: %s%s\n", control.id,
+                        isPlaying ? "playing" : "paused",
+                        changed ? ", changed" : ", unchanged");
+                } else {
+                    Serial.printf("Playback state %s: unavailable%s\n", control.id,
+                        changed ? ", changed" : ", unchanged");
+                }
+                if (changed) {
+                    batchChanged = true;
+                    if (!useQualityRefresh) {
+                        displayRemoteSliderValue(page, index, true);
+                    }
+                    refreshReferencedTextBoxes(page, control.id, !useQualityRefresh);
+                }
+                break;
+            }
             const uint32_t refreshIntervalMs = textBoxRefreshIntervalMs(control);
             control.nextRefreshAt = refreshIntervalMs > 0
                 ? now + refreshIntervalMs : 0;
@@ -4573,9 +5319,18 @@ void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now)
                 available ? "available" : "unavailable",
                 changed ? ", changed" : ", unchanged");
             if (changed) {
-                redrawRemoteTextBox(page, index);
+                batchChanged = true;
+                if (!useQualityRefresh) {
+                    redrawRemoteTextBox(page, index);
+                }
             }
             break;
+        }
+    }
+    if (useQualityRefresh) {
+        remoteQualityRefreshPending = false;
+        if (batchChanged && remoteVisible && &page == &remoteProfile->pages[remotePageIndex]) {
+            displayRemote();
         }
     }
 }
@@ -4587,6 +5342,10 @@ void prepareRemoteTextBoxes() {
     RemotePage& page = remoteProfile->pages[remotePageIndex];
     for (uint8_t index = 0; index < page.controlCount; ++index) {
         RemoteControl& control = page.controls[index];
+        if (isMacVolumeControl(control) || isMacPlayPauseControl(control)) {
+            control.nextRefreshAt = millis();
+            continue;
+        }
         if (control.kind != 2) {
             continue;
         }
@@ -4606,11 +5365,14 @@ void pollRemoteTextBoxes() {
     RemoteComputer* dueComputer = nullptr;
     for (uint8_t index = 0; index < page.controlCount; ++index) {
         RemoteControl& control = page.controls[index];
-        if (control.kind != 2 || control.nextRefreshAt == 0 ||
+        const bool volumeControl = isMacVolumeControl(control);
+        const bool playbackControl = isMacPlayPauseControl(control);
+        if ((!volumeControl && !playbackControl && control.kind != 2) ||
+            control.nextRefreshAt == 0 ||
             static_cast<int32_t>(now - control.nextRefreshAt) < 0) {
             continue;
         }
-        if (isMacTextSource(control)) {
+        if (volumeControl || playbackControl || isMacTextSource(control)) {
             dueComputer = textBoxComputer(control);
             if (dueComputer != nullptr) {
                 break;
@@ -4625,59 +5387,64 @@ void pollRemoteTextBoxes() {
             return;
         }
     }
-    if (dueComputer != nullptr) {
+    if (dueComputer != nullptr && !remoteTextRequestPending) {
         fetchMacTextBoxes(page, *dueComputer, now);
     }
 }
 
-bool dispatchRemoteAction(RemoteControl& control, bool queueIfOffline, bool reportStatus) {
+__attribute__((noinline)) bool applyRemoteTemperatureStep(RemoteControl& control) {
+    RemoteAction& action = control.action;
+    for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
+        RemotePage& page = remoteProfile->pages[pageIndex];
+        for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+            RemoteControl& setpoint = page.controls[controlIndex];
+            if (strcmp(setpoint.action.type, "netHomeTemperature") != 0 ||
+                strcmp(setpoint.action.host, action.host) != 0 ||
+                strcmp(setpoint.action.computerId, action.computerId) != 0) {
+                continue;
+            }
+            const int currentTenths = constrain(setpoint.action.valueTenths, 160, 300);
+            if (remoteProfile->useFahrenheit) {
+                const int currentDisplay = static_cast<int>(roundf(
+                    currentTenths * 9.0f / 50.0f + 32.0f));
+                const int nextDisplay = constrain(currentDisplay + action.value, 61, 86);
+                const int halfCelsiusSteps = static_cast<int>(roundf(
+                    (nextDisplay - 32) * 10.0f / 9.0f));
+                setpoint.action.valueTenths = constrain(halfCelsiusSteps * 5, 160, 300);
+            } else {
+                setpoint.action.valueTenths = constrain(
+                    currentTenths + action.value * 10, 160, 300);
+            }
+            setpoint.action.value = static_cast<int>(roundf(setpoint.action.valueTenths / 10.0f));
+            if (resolveLocalTextBox(setpoint)) {
+                redrawRemoteTextBox(page, controlIndex);
+            }
+            persistRemoteSliderPositions(*remoteProfile);
+            deferredThermostatSetpoint.action = setpoint.action;
+            strlcpy(
+                deferredThermostatSetpoint.controlId,
+                setpoint.id,
+                sizeof(deferredThermostatSetpoint.controlId));
+            deferredThermostatSetpoint.pageIndex = pageIndex;
+            deferredThermostatSetpoint.slider = true;
+            deferredThermostatSetpoint.toggle = false;
+            deferredThermostatSetpoint.toggleOn = false;
+            deferredThermostatSetpointPending = true;
+            deferredThermostatSetpointDueAt = millis() + 500;
+            return true;
+        }
+    }
+    displayRemoteActionStatus("Setpoint unavailable");
+    return false;
+}
+
+__attribute__((noinline)) bool dispatchRemoteNetworkAction(
+    RemoteControl& control,
+    bool queueIfOffline,
+    bool reportStatus) {
     RemoteAction& action = control.action;
     const bool showActionStatus = reportStatus && !control.slider &&
         strcmp(action.type, "netHomeClimate") != 0;
-    if (strcmp(action.type, "netHomeTemperatureStep") == 0) {
-        for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
-            RemotePage& page = remoteProfile->pages[pageIndex];
-            for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
-                RemoteControl& setpoint = page.controls[controlIndex];
-                if (strcmp(setpoint.action.type, "netHomeTemperature") != 0 ||
-                    strcmp(setpoint.action.host, action.host) != 0 ||
-                    strcmp(setpoint.action.computerId, action.computerId) != 0) {
-                    continue;
-                }
-                const int currentTenths = constrain(setpoint.action.valueTenths, 160, 300);
-                if (remoteProfile->useFahrenheit) {
-                    const int currentDisplay = static_cast<int>(roundf(
-                        currentTenths * 9.0f / 50.0f + 32.0f));
-                    const int nextDisplay = constrain(currentDisplay + action.value, 61, 86);
-                    const int halfCelsiusSteps = static_cast<int>(roundf(
-                        (nextDisplay - 32) * 10.0f / 9.0f));
-                    setpoint.action.valueTenths = constrain(halfCelsiusSteps * 5, 160, 300);
-                } else {
-                    setpoint.action.valueTenths = constrain(
-                        currentTenths + action.value * 10, 160, 300);
-                }
-                setpoint.action.value = static_cast<int>(roundf(setpoint.action.valueTenths / 10.0f));
-                if (resolveLocalTextBox(setpoint)) {
-                    redrawRemoteTextBox(page, controlIndex);
-                }
-                persistRemoteSliderPositions(*remoteProfile);
-                deferredThermostatSetpoint.action = setpoint.action;
-                strlcpy(
-                    deferredThermostatSetpoint.controlId,
-                    setpoint.id,
-                    sizeof(deferredThermostatSetpoint.controlId));
-                deferredThermostatSetpoint.pageIndex = pageIndex;
-                deferredThermostatSetpoint.slider = true;
-                deferredThermostatSetpoint.toggle = false;
-                deferredThermostatSetpoint.toggleOn = false;
-                deferredThermostatSetpointPending = true;
-                deferredThermostatSetpointDueAt = millis() + 500;
-                return true;
-            }
-        }
-        displayRemoteActionStatus("Setpoint unavailable");
-        return false;
-    }
     if (strcmp(action.type, "netHomeAuto") == 0) {
         resetClimateAutomationController(control);
         if (reportStatus) {
@@ -4819,22 +5586,18 @@ bool dispatchRemoteAction(RemoteControl& control, bool queueIfOffline, bool repo
         }
         return false;
     }
-    String responseBody;
-    const bool sent = postJsonResponse(url, body, responseBody, token);
-    bool changed = true;
-    if (sent && !responseBody.isEmpty()) {
-        JsonDocument response;
-        if (!deserializeJson(response, responseBody) && response["changed"].is<bool>()) {
-            changed = response["changed"].as<bool>();
-        }
-    }
-    Serial.printf("Remote action %s -> %s\n", action.type, sent ? "ok" : "failed");
+    const bool queued = queueRemoteNetworkRequest(url, body, token, control, reportStatus);
     if (showActionStatus) {
-        displayRemoteActionStatus(sent
-            ? (changed ? "Sent" : "Already set")
-            : (strncmp(action.type, "wled", 4) == 0 ? "WLED unavailable" : "Computer unavailable"));
+        displayRemoteActionStatus(queued ? "Sending" : "Queue full");
     }
-    return sent;
+    return queued;
+}
+
+bool dispatchRemoteAction(RemoteControl& control, bool queueIfOffline, bool reportStatus) {
+    if (strcmp(control.action.type, "netHomeTemperatureStep") == 0) {
+        return applyRemoteTemperatureStep(control);
+    }
+    return dispatchRemoteNetworkAction(control, queueIfOffline, reportStatus);
 }
 
 uint8_t sht30Crc(const uint8_t* data) {
@@ -4888,7 +5651,7 @@ uint32_t rtcMinuteStamp() {
 
 bool isSchedulableRemoteAction(const RemoteControl& control) {
     const char* type = control.action.type;
-    return control.action.scheduleEnabled && type[0] != '\0' &&
+    return control.action.scheduleEnabled && control.action.scheduleCount > 0 && type[0] != '\0' &&
     strcmp(type, "page") != 0;
 }
 
@@ -4912,6 +5675,7 @@ ScheduleRunState& scheduleRunStateFor(const RemoteControl& control) {
         : scheduleRunStore.states[hash % kMaximumPersistedSliders];
     state.controlIdHash = hash;
     state.dayKey = 0;
+    state.runMask = 0;
     return state;
 }
 
@@ -4927,6 +5691,10 @@ void pollScheduledRemoteActions() {
     const uint16_t minuteOfDay = dateTime.time.hours * 60 + dateTime.time.minutes;
     const uint32_t dayKey = dateTime.date.year * 10000UL +
         dateTime.date.month * 100UL + dateTime.date.date;
+    tm calendar = dateTime.get_tm();
+    calendar.tm_isdst = -1;
+    mktime(&calendar);
+    const uint8_t weekday = static_cast<uint8_t>(calendar.tm_wday);
     const uint32_t minuteKey = dayKey * 1440UL + minuteOfDay;
     if (minuteKey == lastPolledMinute) {
         return;
@@ -4939,26 +5707,73 @@ void pollScheduledRemoteActions() {
             if (!isSchedulableRemoteAction(control)) {
                 continue;
             }
-            const uint16_t scheduledMinute =
-                control.action.scheduleHour * 60 + control.action.scheduleMinute;
             ScheduleRunState& runState = scheduleRunStateFor(control);
-            if (runState.dayKey == dayKey || minuteOfDay < scheduledMinute ||
-                minuteOfDay - scheduledMinute > kScheduleCatchUpMinutes) {
-                continue;
+            if (runState.dayKey != dayKey) {
+                runState.dayKey = dayKey;
+                runState.runMask = 0;
             }
-            Serial.printf(
-                "Running schedule %s at %02u:%02u\n",
-                control.id,
-                control.action.scheduleHour,
-                control.action.scheduleMinute);
-            if (!dispatchRemoteAction(control, true, false)) {
-                continue;
-            }
-            runState.dayKey = dayKey;
-            if (control.toggle) {
-                control.toggleOn = !control.toggleOn;
-                persistRemoteToggleStates(*remoteProfile);
-                if (remoteVisible && remotePageIndex == pageIndex) {
+            for (uint8_t scheduleIndex = 0;
+                 scheduleIndex < control.action.scheduleCount;
+                 ++scheduleIndex) {
+                const uint8_t scheduleBit = 1U << scheduleIndex;
+                const RemoteScheduleEntry& schedule = control.action.schedules[scheduleIndex];
+                const uint16_t scheduledMinute = schedule.hour * 60 + schedule.minute;
+                if ((runState.runMask & scheduleBit) != 0 ||
+                    !remote_schedule::isDue(
+                        schedule.weekdaysMask,
+                        scheduledMinute,
+                        weekday,
+                        minuteOfDay,
+                        kScheduleCatchUpMinutes)) {
+                    continue;
+                }
+                RemoteControl scheduledControl = control;
+                if (schedule.hasText) {
+                    strlcpy(
+                        scheduledControl.action.text,
+                        schedule.text,
+                        sizeof(scheduledControl.action.text));
+                }
+                if (schedule.hasValue) {
+                    scheduledControl.action.value = schedule.value;
+                }
+                if (schedule.hasValueTenths) {
+                    scheduledControl.action.valueTenths = schedule.valueTenths;
+                }
+                const bool hasExplicitPowerState = schedule.hasText &&
+                    (strcmp(schedule.text, "on") == 0 || strcmp(schedule.text, "off") == 0) &&
+                    (strcmp(control.action.type, "wledPower") == 0 ||
+                     strcmp(control.action.type, "netHomePower") == 0);
+                if (hasExplicitPowerState) {
+                    scheduledControl.toggle = false;
+                }
+                Serial.printf(
+                    "Running schedule %s #%u at %02u:%02u\n",
+                    control.id,
+                    scheduleIndex + 1,
+                    schedule.hour,
+                    schedule.minute);
+                if (!dispatchRemoteAction(scheduledControl, true, false)) {
+                    continue;
+                }
+                runState.runMask |= scheduleBit;
+                if (schedule.hasValue) {
+                    control.action.value = schedule.value;
+                }
+                if (schedule.hasValueTenths) {
+                    control.action.valueTenths = schedule.valueTenths;
+                }
+                if (control.toggle) {
+                    control.toggleOn = hasExplicitPowerState
+                        ? strcmp(schedule.text, "on") == 0
+                        : !control.toggleOn;
+                    persistRemoteToggleStates(*remoteProfile);
+                }
+                if (control.slider && (schedule.hasValue || schedule.hasValueTenths)) {
+                    persistRemoteSliderPositions(*remoteProfile);
+                }
+                if (remoteVisible && remotePageIndex == pageIndex &&
+                    (control.toggle || control.slider)) {
                     displayRemoteSliderValue(page, controlIndex, true);
                     refreshReferencedTextBoxes(page, control.id);
                 }
@@ -4977,6 +5792,10 @@ uint64_t backgroundWakeIntervalUs(uint64_t defaultIntervalUs) {
     }
     const uint32_t secondOfDay = dateTime.time.hours * 3600UL +
         dateTime.time.minutes * 60UL + dateTime.time.seconds;
+    tm calendar = dateTime.get_tm();
+    calendar.tm_isdst = -1;
+    mktime(&calendar);
+    const uint8_t weekday = static_cast<uint8_t>(calendar.tm_wday);
     uint32_t nextSeconds = UINT32_MAX;
     for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
         const RemotePage& page = remoteProfile->pages[pageIndex];
@@ -4985,12 +5804,19 @@ uint64_t backgroundWakeIntervalUs(uint64_t defaultIntervalUs) {
             if (!isSchedulableRemoteAction(control)) {
                 continue;
             }
-            const uint32_t scheduledSecond =
-                (control.action.scheduleHour * 60UL + control.action.scheduleMinute) * 60UL;
-            const uint32_t secondsUntil = scheduledSecond > secondOfDay
-                ? scheduledSecond - secondOfDay
-                : 86400UL - secondOfDay + scheduledSecond;
-            nextSeconds = min(nextSeconds, max<uint32_t>(secondsUntil, 1));
+            for (uint8_t scheduleIndex = 0;
+                 scheduleIndex < control.action.scheduleCount;
+                 ++scheduleIndex) {
+                const RemoteScheduleEntry& schedule = control.action.schedules[scheduleIndex];
+                const uint32_t scheduledSecond =
+                    (schedule.hour * 60UL + schedule.minute) * 60UL;
+                const uint32_t secondsUntil = remote_schedule::secondsUntilNext(
+                    schedule.weekdaysMask,
+                    scheduledSecond,
+                    weekday,
+                    secondOfDay);
+                nextSeconds = min(nextSeconds, secondsUntil);
+            }
         }
     }
     if (nextSeconds == UINT32_MAX) {
@@ -5164,7 +5990,8 @@ void pollClimateAutomation() {
     climateReadingAvailable = true;
     Serial.printf("Climate: %.2f C, %.1f%% humidity\n", temperatureC, humidityPercent);
     if (remoteVisible) {
-        M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+        M5.Display.waitDisplay();
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.startWrite();
         drawRemoteStatusLine();
         M5.Display.endWrite();
@@ -5266,14 +6093,13 @@ void sendNextPendingRemoteAction() {
     if (pendingRemoteActionCount == 0 || WiFi.status() != WL_CONNECTED) {
         return;
     }
-    const PendingRemoteAction pending = pendingRemoteActions[0];
-    RemoteControl control;
-    control.action = pending.action;
-    strlcpy(control.id, pending.controlId, sizeof(control.id));
-    control.slider = pending.slider;
-    control.toggle = pending.toggle;
-    control.toggleOn = pending.toggleOn;
-    const bool sent = dispatchRemoteAction(control, false);
+    const PendingRemoteAction& pending = pendingRemoteActions[0];
+    pendingActionControl.action = pending.action;
+    strlcpy(pendingActionControl.id, pending.controlId, sizeof(pendingActionControl.id));
+    pendingActionControl.slider = pending.slider;
+    pendingActionControl.toggle = pending.toggle;
+    pendingActionControl.toggleOn = pending.toggleOn;
+    const bool sent = dispatchRemoteAction(pendingActionControl, false);
     if (!sent && WiFi.status() != WL_CONNECTED) {
         return;
     }
@@ -5290,13 +6116,16 @@ void sendDeferredThermostatSetpoint() {
         static_cast<int32_t>(millis() - deferredThermostatSetpointDueAt) < 0) {
         return;
     }
-    const PendingRemoteAction pending = deferredThermostatSetpoint;
     deferredThermostatSetpointPending = false;
-    RemoteControl control;
-    control.action = pending.action;
-    strlcpy(control.id, pending.controlId, sizeof(control.id));
-    control.slider = true;
-    dispatchRemoteAction(control);
+    pendingActionControl.action = deferredThermostatSetpoint.action;
+    strlcpy(
+        pendingActionControl.id,
+        deferredThermostatSetpoint.controlId,
+        sizeof(pendingActionControl.id));
+    pendingActionControl.slider = true;
+    pendingActionControl.toggle = false;
+    pendingActionControl.toggleOn = false;
+    dispatchRemoteAction(pendingActionControl);
 }
 
 void scheduleDeferredFanSpeed(const RemoteControl& control) {
@@ -5315,13 +6144,16 @@ void sendDeferredFanSpeed() {
         static_cast<int32_t>(millis() - deferredFanSpeedDueAt) < 0) {
         return;
     }
-    const PendingRemoteAction pending = deferredFanSpeed;
     deferredFanSpeedPending = false;
-    RemoteControl control;
-    control.action = pending.action;
-    strlcpy(control.id, pending.controlId, sizeof(control.id));
-    control.slider = true;
-    dispatchRemoteAction(control);
+    pendingActionControl.action = deferredFanSpeed.action;
+    strlcpy(
+        pendingActionControl.id,
+        deferredFanSpeed.controlId,
+        sizeof(pendingActionControl.id));
+    pendingActionControl.slider = true;
+    pendingActionControl.toggle = false;
+    pendingActionControl.toggleOn = false;
+    dispatchRemoteAction(pendingActionControl);
 }
 
 void disableMatchingClimateAuto(RemotePage& page, const RemoteControl& fan) {
@@ -5370,6 +6202,9 @@ void dispatchCapturedWakeTouch() {
             }
             const bool changed = nextValue != control.action.value;
             control.action.value = nextValue;
+            if (strcmp(control.action.type, "netHomeTemperature") == 0) {
+                control.action.valueTenths = nextValue * 10;
+            }
             displayRemoteSliderValue(page, index, true);
             if (strcmp(control.action.type, "netHomeFan") == 0) {
                 if (changed) {
@@ -5384,7 +6219,7 @@ void dispatchCapturedWakeTouch() {
             }
         } else if (control.kind == 0 || (control.kind == 2 && control.tapBehavior == 2)) {
             const bool accepted = dispatchRemoteAction(control);
-            if (accepted && control.toggle && remoteVisible &&
+            if (accepted && control.toggle && !isMacPlayPauseControl(control) && remoteVisible &&
                 remotePageIndex == wakePageIndex) {
                 control.toggleOn = !control.toggleOn;
                 displayRemoteSliderValue(page, index, true);
@@ -5416,8 +6251,7 @@ void selectLibraryItem(size_t index) {
         return;
     }
     // An explicit media choice supersedes any temporary battery fallback.
-    batteryStillPrepared = false;
-    batterySavedAnimationPath[0] = '\0';
+    batteryPlaybackState = BatteryPlaybackState{};
     char path[kMaximumPathBytes];
     strlcpy(path, libraryItems[index].path, sizeof(path));
     libraryVisible = false;
@@ -5460,34 +6294,31 @@ void prepareNextSlideshowItem() {
 void displayBatteryStill(bool first) {
     refreshLibrary();
     const size_t start = first ? activeLibraryIndex() : batteryStillIndex + 1;
-    for (size_t offset = 0; offset < libraryItemCount; ++offset) {
-        const size_t index = (start + offset) % libraryItemCount;
-        if (libraryItems[index].frameCount != 1) continue;
-        if (!first && index == batteryStillIndex && stillFrameDisplayed) break;
-        if (loadAnimation(libraryItems[index].path)) {
+    uint16_t frameCounts[kMaximumLibraryItems];
+    for (size_t index = 0; index < libraryItemCount; ++index) {
+        frameCounts[index] = libraryItems[index].frameCount;
+    }
+    const size_t index = screensaver_battery::nextImageIndex(
+        frameCounts, libraryItemCount, start);
+    if (index != screensaver_battery::noImageIndex) {
+        const bool continueFallbackAnimation =
+            libraryItems[index].frameCount > 1 &&
+            index == batteryStillIndex &&
+            strcmp(activeAnimationPath, libraryItems[index].path) == 0;
+        if ((continueFallbackAnimation || loadAnimation(libraryItems[index].path)) && animationReady) {
             batteryStillIndex = index;
             displayCurrentFrame();
+            stillFrameDisplayed = true;
             nextSlideshowAt = millis() + slideshowIntervalMs();
             return;
         }
     }
-    if (first) {
-        if (animationReady) {
-            // No still available: render exactly one GIF frame, never animate.
-            currentFrame = 0;
-            displayedFrames = 0;
-            previousFrameValid = false;
-            displayCurrentFrame();
-            stillFrameDisplayed = true;
-        } else {
-            M5.Display.setEpdMode(epd_mode_t::epd_quality);
-            M5.Display.fillScreen(TFT_WHITE);
-            M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-            M5.Display.setFont(&fonts::FreeSans12pt7b);
-            M5.Display.setTextDatum(textdatum_t::top_left);
-            M5.Display.drawCenterString("Add a still image to the library", kDisplayWidth / 2, 450);
-        }
-    }
+    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    M5.Display.fillScreen(TFT_WHITE);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setFont(&fonts::FreeSans12pt7b);
+    M5.Display.setTextDatum(textdatum_t::top_left);
+    M5.Display.drawCenterString("Add media to the library", kDisplayWidth / 2, 450);
     nextSlideshowAt = millis() + slideshowIntervalMs();
 }
 
@@ -5715,6 +6546,9 @@ void handleTouch() {
                     }
                     const bool changed = nextValue != control.action.value;
                     control.action.value = nextValue;
+                    if (strcmp(control.action.type, "netHomeTemperature") == 0) {
+                        control.action.valueTenths = nextValue * 10;
+                    }
                     displayRemoteSliderValue(page, hitControl);
                     activeRemoteSliderRenderedAt = millis();
                     if (strcmp(control.action.type, "netHomeFan") == 0) {
@@ -5760,6 +6594,9 @@ void handleTouch() {
                     }
                     if (nextValue != control.action.value) {
                         control.action.value = nextValue;
+                        if (strcmp(control.action.type, "netHomeTemperature") == 0) {
+                            control.action.valueTenths = nextValue * 10;
+                        }
                         const uint32_t now = millis();
                         if (now - activeRemoteSliderRenderedAt >= 80) {
                             displayRemoteSliderValue(page, activeRemoteControlIndex);
@@ -5817,6 +6654,9 @@ void handleTouch() {
                     } else if (control.action.value != activeRemoteSliderSentValue) {
                         dispatchRemoteAction(control);
                     }
+                    if (isMacVolumeControl(control)) {
+                        control.nextRefreshAt = millis() + 250;
+                    }
                     persistRemoteSliderPositions(*remoteProfile);
                     refreshReferencedTextBoxes(page, control.id);
                 }
@@ -5832,7 +6672,7 @@ void handleTouch() {
                     Serial.printf("Remote control released: page=%u index=%d\n",
                         remotePageIndex, releasedControlIndex);
                     const bool succeeded = dispatchRemoteAction(control);
-                    if (succeeded && control.toggle && remoteVisible &&
+                    if (succeeded && control.toggle && !isMacPlayPauseControl(control) && remoteVisible &&
                         remotePageIndex == activeRemoteTouchPage) {
                         control.toggleOn = !control.toggleOn;
                         displayRemoteSliderValue(page, releasedControlIndex, true);
@@ -6041,7 +6881,14 @@ void enterM5PaperDeepSleep(uint64_t microseconds) {
         lastRemoteActivityAt = millis();
         return;
     }
+    displayRemoteSleepStatus();
+    gpio_set_direction(kMainPowerPin, GPIO_MODE_OUTPUT);
+    gpio_set_level(kMainPowerPin, 1);
+    gpio_hold_en(kMainPowerPin);
+    gpio_deep_sleep_hold_en();
     M5.Power.deepSleep(microseconds, true);
+    gpio_hold_dis(kMainPowerPin);
+    gpio_deep_sleep_hold_dis();
     lastRemoteActivityAt = millis();
 }
 
@@ -6242,7 +7089,7 @@ void displayCurrentFrame() {
 
     if (slideshowEnabled && screensaverStyle == ScreensaverStyle::media &&
         slideshowDeepSleep && !deepSleepSuspended &&
-        animationHeader.frameCount == 1) {
+        animationHeader.frameCount == 1 && !hasPendingRemoteNetworkWork()) {
         if (deviceConnected) {
             slideshowSleepPending = true;
             return;
@@ -6339,6 +7186,7 @@ void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 
 void setup() {
     Serial.begin(115200);
+    remoteQualityRefreshPending = esp_reset_reason() == ESP_RST_DEEPSLEEP;
     homeWifiSessionToken = static_cast<uint64_t>(esp_random()) << 32 | esp_random();
     if (homeWifiSessionToken == 0) {
         homeWifiSessionToken = 1;
@@ -6359,6 +7207,7 @@ void setup() {
     config.output_power = false;
     config.clear_display = false;
     M5.begin(config);
+    startRemoteNetworkWorker();
     gpio_hold_dis(kMainPowerPin);
     gpio_deep_sleep_hold_dis();
     climateReadingAvailable = readSht30(climateTemperatureC, climateHumidityPercent);
@@ -6523,6 +7372,7 @@ void loop() {
     sendDeferredThermostatSetpoint();
     sendDeferredFanSpeed();
     sendNextPendingRemoteAction();
+    pollRemoteNetworkResults();
     if (homeWifiStatusChanged) {
         homeWifiStatusChanged = false;
         if (homeWifiState == 2) {
@@ -6542,7 +7392,8 @@ void loop() {
         static_cast<int32_t>(millis() - remoteActionStatusClearAt) >= 0) {
         remoteActionStatus[0] = '\0';
         remoteActionStatusClearAt = 0;
-        M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+        M5.Display.waitDisplay();
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.startWrite();
         drawRemoteStatusLine();
         M5.Display.endWrite();
@@ -6605,9 +7456,11 @@ void loop() {
 
     if (!upload.active && !remoteProfileUpload.active && remoteVisible &&
         remoteProfile != nullptr && !slideshowEnabled &&
+        !remoteSleepNever &&
         !deviceConnected &&
         pendingRemoteActionCount == 0 && !deferredThermostatSetpointPending &&
         !deferredFanSpeedPending &&
+        !hasPendingRemoteNetworkWork() &&
         !homeWifiConnecting &&
         millis() - lastRemoteActivityAt >= screensaverDelayMs()) {
         Serial.println("Sleeping with remote visible");
@@ -6622,6 +7475,7 @@ void loop() {
         !remoteProfileUpload.active && slideshowEnabled && slideshowDeepSleep &&
         screensaverStyle == ScreensaverStyle::media &&
         !deepSleepSuspended && animationReady && stillFrameDisplayed &&
+        !hasPendingRemoteNetworkWork() &&
         !remoteVisible && !settingsVisible && !libraryVisible &&
         !slideshowMenuVisible && !wifiModeVisible) {
         slideshowSleepPending = false;
@@ -6650,13 +7504,17 @@ void loop() {
     const bool batteryStillActive = screensaverActive && batteryImagesOnly &&
         !upload.active && !remoteProfileUpload.active && !remoteVisible &&
         !settingsVisible && !libraryVisible && !slideshowMenuVisible && !wifiModeVisible;
-    if (!batteryStillActive && batteryStillPrepared) {
+    if (!batteryStillActive && batteryPlaybackState.active) {
         // Restore the user's media selection after the temporary battery fallback.
-        if (!upload.active && !remoteProfileUpload.active && batterySavedAnimationPath[0] != '\0') {
-            loadAnimation(batterySavedAnimationPath);
+        if (!upload.active && !remoteProfileUpload.active &&
+            batteryPlaybackState.animationPath[0] != '\0' &&
+            loadAnimation(batteryPlaybackState.animationPath)) {
+            currentFrame = batteryPlaybackState.nextFrame % animationHeader.frameCount;
+            displayedFrames = batteryPlaybackState.displayedFrames;
+            stillFrameDisplayed = false;
+            nextFrameAt = millis();
         }
-        batterySavedAnimationPath[0] = '\0';
-        batteryStillPrepared = false;
+        batteryPlaybackState = BatteryPlaybackState{};
         previousFrameValid = false;
     }
     const bool snakePlaybackActive = screensaverActive && !batteryImagesOnly &&
@@ -6674,9 +7532,14 @@ void loop() {
     }
 
     if (batteryStillActive) {
-        if (!batteryStillPrepared) {
-            strlcpy(batterySavedAnimationPath, activeAnimationPath, sizeof(batterySavedAnimationPath));
-            batteryStillPrepared = true;
+        if (!batteryPlaybackState.active) {
+            strlcpy(
+                batteryPlaybackState.animationPath,
+                activeAnimationPath,
+                sizeof(batteryPlaybackState.animationPath));
+            batteryPlaybackState.nextFrame = currentFrame;
+            batteryPlaybackState.displayedFrames = displayedFrames;
+            batteryPlaybackState.active = true;
             previousFrameValid = false;
             slideshowSleepPending = false;
             displayBatteryStill(true);

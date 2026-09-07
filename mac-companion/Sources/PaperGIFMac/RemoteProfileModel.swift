@@ -155,6 +155,17 @@ struct RemoteAction: Codable, Equatable, Sendable {
     var scheduleEnabled: Bool?
     var scheduleHour: Int?
     var scheduleMinute: Int?
+    var schedules: [RemoteScheduleEntry]?
+}
+
+struct RemoteScheduleEntry: Codable, Equatable, Identifiable, Sendable {
+    var id = UUID()
+    var weekdays = Array(1...7)
+    var hour = 8
+    var minute = 0
+    var text: String?
+    var value: Int?
+    var valueTenths: Int?
 }
 
 struct RemoteComputer: Codable, Equatable, Identifiable, Sendable {

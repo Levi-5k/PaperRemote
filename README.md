@@ -97,10 +97,11 @@ saver is running. Charging below 100% still uses images; an unavailable battery
 reading also uses images. The chosen style is preserved.
 
 Below 100%, still images use the existing image interval. If no still is available,
-one frame of the loaded GIF is held without animation; with no media, a static
-“Add a still image” message is displayed. The temporary fallback does not overwrite
-the saved media selection. Existing sleep-between-images behavior remains available
-for single-frame media in Library Media mode.
+the screen saver rotates through a static frame from each library item at that
+interval; a library containing one GIF advances it by one frame per interval. With
+no media, a static “Add media” message is displayed. The temporary fallback does
+not overwrite the saved media selection. Existing sleep-between-images behavior
+remains available for single-frame media in Library Media mode.
 
 Host-side geometry and rendering checks (no device required):
 

@@ -64,6 +64,8 @@ private enum NetHomeKeychain {
 final class NetHomeService: @unchecked Sendable {
     private static let packageVersion = "0.10.7"
     private let operationLock = NSLock()
+    private let aliasLock = NSLock()
+    private var unitNameAliases: [String: String] = [:]
 
     var isSignedIn: Bool { NetHomeKeychain.load() != nil }
     var account: String? { NetHomeKeychain.load()?.account }
@@ -95,6 +97,12 @@ final class NetHomeService: @unchecked Sendable {
         NetHomeKeychain.delete()
     }
 
+    func registerUnitNameAliases(_ aliases: [String: String]) {
+        aliasLock.lock()
+        unitNameAliases = aliases
+        aliasLock.unlock()
+    }
+
     func perform(
         type: String,
         unit: String,
@@ -103,21 +111,24 @@ final class NetHomeService: @unchecked Sendable {
         valueTenths: Int? = nil
     ) -> (succeeded: Bool, changed: Bool) {
         guard let credentials = NetHomeKeychain.load(), !unit.isEmpty else { return (false, false) }
+        aliasLock.lock()
+        let resolvedUnit = unitNameAliases[unit.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] ?? unit
+        aliasLock.unlock()
         let arguments: [String]
         switch type {
         case "netHomePower":
-            arguments = ["set", unit, "power", text]
+            arguments = ["set", resolvedUnit, "power", text]
         case "netHomeTemperature":
             let temperature = min(max(Double(valueTenths ?? value * 10) / 10, 16), 30)
-            arguments = ["set", unit, "temperature", String(format: "%.1f", temperature)]
+            arguments = ["set", resolvedUnit, "temperature", String(format: "%.1f", temperature)]
         case "netHomeMode":
-            arguments = ["set", unit, "mode", text]
+            arguments = ["set", resolvedUnit, "mode", text]
         case "netHomeFan":
-            arguments = ["set", unit, "fan", String(min(max(value, 20), 100))]
+            arguments = ["set", resolvedUnit, "fan", String(min(max(value, 20), 100))]
         case "netHomeClimate":
             let temperature = min(max(Double(valueTenths ?? 220) / 10, 16), 30)
             arguments = [
-                "set", unit, "climate", text,
+                "set", resolvedUnit, "climate", text,
                 String(format: "%.1f", temperature),
                 String(min(max(value, 20), 100)),
             ]

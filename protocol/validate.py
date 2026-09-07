@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+
+import json
+from pathlib import Path
+
+from jsonschema import Draft202012Validator, FormatChecker
+
+
+def main() -> None:
+    protocol_directory = Path(__file__).resolve().parent
+    schema_path = protocol_directory / "remote-profile-v6.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+    fixture_paths = sorted((protocol_directory / "fixtures").glob("remote-profile-v6-*.json"))
+    if not fixture_paths:
+        raise RuntimeError("No v6 remote-profile fixtures were found.")
+
+    for fixture_path in fixture_paths:
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        errors = sorted(validator.iter_errors(fixture), key=lambda error: list(error.path))
+        if errors:
+            details = "\n".join(
+                f"{fixture_path.name}:{'/'.join(map(str, error.path))}: {error.message}"
+                for error in errors
+            )
+            raise RuntimeError(details)
+        print(f"validated {fixture_path.name}")
+
+
+if __name__ == "__main__":
+    main()

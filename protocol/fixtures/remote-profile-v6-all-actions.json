@@ -1,0 +1,278 @@
+{
+  "version": 6,
+  "wifiSSID": "Example WiFi",
+  "wifiPassword": "fixture-password",
+  "macHost": "mac.example.local",
+  "macPort": 43821,
+  "macToken": "fixture-token",
+  "computers": [
+    {
+      "id": "00000000-0000-0000-0000-000000000101",
+      "name": "Example Mac",
+      "host": "mac.example.local",
+      "port": 43821,
+      "token": "fixture-token"
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000102",
+      "name": "Example Windows PC",
+      "host": "windows.example.local",
+      "port": 43821,
+      "token": "fixture-windows-token"
+    }
+  ],
+  "screensaverDelaySeconds": 30,
+  "temperatureUnit": "celsius",
+  "timeZoneOffsetMinutes": -240,
+  "pages": [
+    {
+      "id": "00000000-0000-0000-0000-000000000201",
+      "name": "Desktop",
+      "controls": [
+        {
+          "id": "00000000-0000-0000-0000-000000000301",
+          "title": "Play",
+          "symbol": "playpause.fill",
+          "tintHex": "202020",
+          "kind": "button",
+          "isToggle": true,
+          "buttonHeight": 2,
+          "action": {
+            "type": "macMedia",
+            "host": "",
+            "text": "playPause",
+            "value": 0,
+            "modifiers": [],
+            "computerID": "00000000-0000-0000-0000-000000000101"
+          },
+          "layoutSlot": 0
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000302",
+          "title": "Copy",
+          "symbol": "keyboard",
+          "tintHex": "202020",
+          "kind": "button",
+          "buttonHeight": 1,
+          "action": {
+            "type": "macKey",
+            "host": "",
+            "text": "c",
+            "value": 0,
+            "modifiers": ["command"],
+            "computerID": "00000000-0000-0000-0000-000000000101"
+          },
+          "layoutSlot": 4
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000303",
+          "title": "Browser",
+          "symbol": "display",
+          "tintHex": "202020",
+          "kind": "button",
+          "action": {
+            "type": "macOpen",
+            "host": "",
+            "text": "https://example.com",
+            "value": 0,
+            "modifiers": [],
+            "computerID": "00000000-0000-0000-0000-000000000102"
+          },
+          "layoutSlot": 5
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000304",
+          "title": "Shortcut",
+          "symbol": "bolt.fill",
+          "tintHex": "202020",
+          "kind": "button",
+          "action": {
+            "type": "macShortcut",
+            "host": "",
+            "text": "Example Shortcut",
+            "value": 0,
+            "modifiers": [],
+            "computerID": "00000000-0000-0000-0000-000000000101"
+          },
+          "layoutSlot": 6
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000305",
+          "title": "Script",
+          "symbol": "gearshape.fill",
+          "tintHex": "202020",
+          "kind": "button",
+          "action": {
+            "type": "macScript",
+            "host": "",
+            "text": "example-script",
+            "value": 0,
+            "modifiers": [],
+            "computerID": "00000000-0000-0000-0000-000000000102"
+          },
+          "layoutSlot": 7
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000306",
+          "title": "Status",
+          "symbol": "music.note",
+          "iconBitmap": "AA==",
+          "tintHex": "197278",
+          "kind": "textBox",
+          "action": {
+            "type": "page",
+            "host": "",
+            "text": "00000000-0000-0000-0000-000000000202",
+            "value": 0,
+            "modifiers": []
+          },
+          "layoutSlot": 8,
+          "textBox": {
+            "source": "nowPlaying",
+            "sourceText": "",
+            "referencedControlID": "00000000-0000-0000-0000-000000000301",
+            "computerID": "00000000-0000-0000-0000-000000000101",
+            "dateFormat": "%b %e, %H:%M",
+            "placeholder": "Nothing playing",
+            "gridWidth": 2,
+            "gridHeight": 2,
+            "textSize": "autoFit",
+            "horizontalAlignment": "center",
+            "verticalAlignment": "center",
+            "tapBehavior": "action",
+            "tapAction": {
+              "type": "macMedia",
+              "host": "",
+              "text": "playPause",
+              "value": 0,
+              "modifiers": [],
+              "computerID": "00000000-0000-0000-0000-000000000101"
+            },
+            "refreshIntervalSeconds": 5
+          }
+        }
+      ]
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000202",
+      "name": "Devices",
+      "controls": [
+        {
+          "id": "00000000-0000-0000-0000-000000000307",
+          "title": "Lights",
+          "symbol": "power",
+          "tintHex": "F2C14E",
+          "kind": "button",
+          "action": { "type": "wledPower", "host": "lights.local", "text": "toggle", "value": 0, "modifiers": [] },
+          "layoutSlot": 0
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000308",
+          "title": "Scene",
+          "symbol": "sparkles",
+          "tintHex": "F2C14E",
+          "kind": "button",
+          "action": { "type": "wledPreset", "host": "lights.local", "text": "Movie", "value": 12, "modifiers": [] },
+          "layoutSlot": 2
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000309",
+          "title": "Brightness",
+          "symbol": "sun.max.fill",
+          "tintHex": "F2C14E",
+          "kind": "slider",
+          "action": { "type": "wledBrightness", "host": "lights.local", "text": "", "value": 180, "modifiers": [] },
+          "layoutSlot": 4
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000310",
+          "title": "AC Power",
+          "symbol": "power",
+          "tintHex": "197278",
+          "kind": "button",
+          "isToggle": true,
+          "action": { "type": "netHomePower", "host": "Room", "text": "toggle", "value": 0, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000101" },
+          "layoutSlot": 5
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000311",
+          "title": "Setpoint",
+          "symbol": "thermometer.medium",
+          "tintHex": "197278",
+          "kind": "slider",
+          "action": {
+            "type": "netHomeTemperature",
+            "host": "Room",
+            "text": "",
+            "value": 22,
+            "valueTenths": 225,
+            "modifiers": [],
+            "computerID": "00000000-0000-0000-0000-000000000101",
+            "scheduleEnabled": true,
+            "scheduleHour": 7,
+            "scheduleMinute": 30,
+            "schedules": [
+              {
+                "id": "00000000-0000-0000-0000-000000000401",
+                "weekdays": [2, 3, 4, 5, 6],
+                "hour": 7,
+                "minute": 30,
+                "value": 22,
+                "valueTenths": 225
+              }
+            ]
+          },
+          "layoutSlot": 6
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000312",
+          "title": "Warmer",
+          "symbol": "plus",
+          "tintHex": "197278",
+          "kind": "button",
+          "buttonHeight": 1,
+          "action": { "type": "netHomeTemperatureStep", "host": "Room", "text": "", "value": 1, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000101" },
+          "layoutSlot": 7
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000313",
+          "title": "Mode",
+          "symbol": "snowflake",
+          "tintHex": "197278",
+          "kind": "button",
+          "action": { "type": "netHomeMode", "host": "Room", "text": "cool", "value": 0, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000101" },
+          "layoutSlot": 8
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000314",
+          "title": "Fan",
+          "symbol": "fan.fill",
+          "tintHex": "197278",
+          "kind": "slider",
+          "action": { "type": "netHomeFan", "host": "Room", "text": "", "value": 40, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000101" },
+          "layoutSlot": 9
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000315",
+          "title": "Automatic",
+          "symbol": "humidity.fill",
+          "tintHex": "D1495B",
+          "kind": "button",
+          "isToggle": true,
+          "action": {
+            "type": "netHomeAuto",
+            "host": "Room",
+            "text": "cool",
+            "value": 22,
+            "modifiers": [],
+            "computerID": "00000000-0000-0000-0000-000000000101",
+            "deadbandTenths": 15,
+            "humidityThreshold": 60,
+            "minimumCycleMinutes": 10
+          },
+          "layoutSlot": 10
+        }
+      ]
+    }
+  ]
+}

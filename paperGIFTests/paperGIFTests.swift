@@ -12,6 +12,30 @@ import Testing
 
 struct paperGIFTests {
 
+    @Test func canonicalV6FixtureCoversEveryActionType() throws {
+        let profile = try JSONDecoder().decode(
+            PaperGIFRemoteProfile.self,
+            from: Data(contentsOf: protocolFixture("remote-profile-v6-all-actions.json"))
+        )
+        let actionTypes = Set(profile.pages.flatMap(\.controls).map(\.action.type))
+
+        #expect(actionTypes == Set(PaperGIFRemoteActionType.allCases))
+        #expect(profile.computers.count == 2)
+        #expect(profile.pages.count == 2)
+        #expect(profile.pages[0].controls[5].textBox?.source == .nowPlaying)
+        #expect(profile.pages[1].controls[4].action.schedules?.first?.valueTenths == 225)
+    }
+
+    @Test func canonicalV6FixtureCoversEveryTextSource() throws {
+        let profile = try JSONDecoder().decode(
+            PaperGIFRemoteProfile.self,
+            from: Data(contentsOf: protocolFixture("remote-profile-v6-text-sources.json"))
+        )
+        let sources = Set(profile.pages.flatMap(\.controls).compactMap(\.textBox?.source))
+
+        #expect(sources == Set(PaperGIFRemoteTextSource.allCases))
+    }
+
     @Test func remoteToggleRemainsBackwardCompatible() throws {
         let legacyData = Data(#"{"version":1,"pages":[{"id":"00000000-0000-0000-0000-000000000001","name":"Main","controls":[{"id":"00000000-0000-0000-0000-000000000002","title":"Power","symbol":"power","tintHex":"202020","kind":"button","action":{"type":"wledPower","host":"lights.local","text":"toggle","value":0,"modifiers":[]}}]}]}"#.utf8)
         var profile = try JSONDecoder().decode(PaperGIFRemoteProfile.self, from: legacyData)
@@ -442,4 +466,12 @@ struct paperGIFTests {
         #expect(PaperGIFBluetoothManager.isDeviceWiFiReachable(device: "paperGIF", ready: false))
     }
 
+}
+
+private func protocolFixture(_ name: String) -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("protocol/fixtures")
+        .appendingPathComponent(name)
 }

@@ -1,0 +1,125 @@
+{
+  "$schema": "../protocol/module-manifest-v1.schema.json",
+  "schemaVersion": 1,
+  "id": "media-controls",
+  "name": "Media Controls",
+  "summary": "Playback and volume controls for your computer.",
+  "version": "1.0.0",
+  "author": "paperGIF",
+  "controls": [
+    {
+      "id": "previous",
+      "category": "Media Controls",
+      "detail": "Previous track",
+      "control": {
+        "id": "6f23d704-17fc-4b60-a625-f00550829731",
+        "title": "Previous",
+        "symbol": "backward.fill",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": {
+          "type": "macMedia",
+          "host": "",
+          "text": "previous",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "play-pause",
+      "category": "Media Controls",
+      "detail": "Toggle playback",
+      "control": {
+        "id": "f63056bb-9434-43c8-804f-a577f9d6c34d",
+        "title": "Play / Pause",
+        "symbol": "playpause.fill",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": {
+          "type": "macMedia",
+          "host": "",
+          "text": "playPause",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "next",
+      "category": "Media Controls",
+      "detail": "Next track",
+      "control": {
+        "id": "57889385-090a-4ca7-baa2-0c079a950bfa",
+        "title": "Next",
+        "symbol": "forward.fill",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": {
+          "type": "macMedia",
+          "host": "",
+          "text": "next",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "volume-down",
+      "category": "Media Controls",
+      "detail": "Lower computer volume",
+      "control": {
+        "id": "3eb2d781-c581-4424-bf9e-570dff8ca5d7",
+        "title": "Volume Down",
+        "symbol": "speaker.fill",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": {
+          "type": "macMedia",
+          "host": "",
+          "text": "volumeDown",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "volume",
+      "category": "Media Controls",
+      "detail": "Set computer volume",
+      "control": {
+        "id": "c8bf6ae4-d38c-43d4-921c-f79d74cdb98d",
+        "title": "Volume",
+        "symbol": "speaker.wave.2.fill",
+        "tintHex": "197248",
+        "kind": "slider",
+        "action": {
+          "type": "macMedia",
+          "host": "",
+          "text": "volume",
+          "value": 128,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "volume-up",
+      "category": "Media Controls",
+      "detail": "Raise computer volume",
+      "control": {
+        "id": "b1ea9e2c-4f22-4567-be83-475ce8916706",
+        "title": "Volume Up",
+        "symbol": "speaker.wave.2.fill",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": {
+          "type": "macMedia",
+          "host": "",
+          "text": "volumeUp",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "modules": [
+    {
+      "id": "media-controls",
+      "name": "Media Controls",
+      "summary": "Playback and volume controls for your computer.",
+      "version": "1.0.0",
+      "author": "paperGIF",
+      "manifest": "media-controls.json"
+    }
+  ]
+}

@@ -113,6 +113,12 @@ struct PaperGIFRemoteView: View {
                 if bluetoothManager.remoteSyncStatus == "Remote synced" {
                     liveSyncStatus = "Live on M5Paper"
                 }
+                if bluetoothManager.remoteSyncStatus == "Loaded remote from M5Paper" {
+                    liveSyncTask?.cancel()
+                    selectedComputerID = nil
+                    prepareComputerDraft()
+                    liveSyncStatus = "Loaded from M5Paper"
+                }
             }
             .onChange(of: bluetoothManager.connectionState) {
                 if bluetoothManager.connectionState == .connected,
@@ -844,7 +850,13 @@ struct PaperGIFRemoteView: View {
     }
 
     private func selectDiscoveredComputer(_ computer: PaperGIFComputerDiscovery.Computer) {
-        if let paired = pairedComputer(for: computer) {
+        if var paired = pairedComputer(for: computer) {
+            if paired.host != computer.host,
+               let index = profile.computers.firstIndex(where: { $0.id == paired.id }) {
+                paired.host = computer.host
+                profile.computers[index] = paired
+                save()
+            }
             selectPairedComputer(paired)
             return
         }
@@ -860,7 +872,9 @@ struct PaperGIFRemoteView: View {
         for discovered: PaperGIFComputerDiscovery.Computer
     ) -> PaperGIFRemoteComputer? {
         profile.computers.first {
-            $0.host == discovered.host && $0.port == discovered.port
+            $0.port == discovered.port &&
+                ($0.host.caseInsensitiveCompare(discovered.host) == .orderedSame ||
+                 $0.name.caseInsensitiveCompare(discovered.name) == .orderedSame)
         }
     }
 
@@ -1506,6 +1520,10 @@ private struct PaperGIFRemoteControlEditor: View {
         }
         .navigationTitle(control.title)
         .onChange(of: control.action.type) {
+            control.action.scheduleEnabled = nil
+            control.action.scheduleHour = nil
+            control.action.scheduleMinute = nil
+            control.action.schedules = nil
             applyActionDefaults()
             if control.action.type != .macOpen {
                 control.iconBitmap = nil
@@ -1528,6 +1546,7 @@ private struct PaperGIFRemoteControlEditor: View {
             selectOnlyWLEDDeviceIfNeeded()
             refreshSelectedWLEDAddress()
             loadSelectedWLEDPresetsIfNeeded()
+            prepareSchedules()
         }
     }
 
@@ -1644,7 +1663,7 @@ private struct PaperGIFRemoteControlEditor: View {
 
         switch control.action.type {
         case .macMedia:
-            Picker("Command", selection: $control.action.text) {
+            Picker("Command", selection: mediaCommandBinding) {
                 ForEach(mediaCommands, id: \.self) { Text(mediaTitle($0)).tag($0) }
             }
             if control.action.text == "volume" {
@@ -1779,13 +1798,9 @@ private struct PaperGIFRemoteControlEditor: View {
         }
 
         if supportsSchedule {
-            Toggle("Run on a daily schedule", isOn: scheduleEnabledBinding)
+            Toggle("Run on a schedule", isOn: scheduleEnabledBinding)
             if control.action.scheduleEnabled == true {
-                DatePicker(
-                    "Time",
-                    selection: scheduleTimeBinding,
-                    displayedComponents: .hourAndMinute
-                )
+                scheduleFields
             }
         }
     }
@@ -1944,28 +1959,235 @@ private struct PaperGIFRemoteControlEditor: View {
             get: { control.action.scheduleEnabled == true },
             set: { enabled in
                 control.action.scheduleEnabled = enabled
-                if enabled && control.action.scheduleHour == nil {
-                    control.action.scheduleHour = 8
-                    control.action.scheduleMinute = 0
+                if enabled {
+                    prepareSchedules()
                 }
             }
         )
     }
 
-    private var scheduleTimeBinding: Binding<Date> {
+    @ViewBuilder private var scheduleFields: some View {
+        ForEach(Array((control.action.schedules ?? []).enumerated()), id: \.element.id) { index, entry in
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Schedule \(index + 1)").font(.headline)
+                    Spacer()
+                    Button(role: .destructive) { removeSchedule(entry.id) } label: {
+                        Image(systemName: "trash")
+                    }
+                    .accessibilityLabel("Delete schedule")
+                }
+                DatePicker("Time", selection: scheduleTimeBinding(entry.id), displayedComponents: .hourAndMinute)
+                Text("Days").font(.caption).foregroundStyle(.secondary)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 4) {
+                    ForEach(Array(Calendar.current.veryShortWeekdaySymbols.enumerated()), id: \.offset) { dayIndex, symbol in
+                        let weekday = dayIndex + 1
+                        Button { toggleWeekday(weekday, in: entry.id) } label: {
+                            Text(symbol).frame(maxWidth: .infinity, minHeight: 28)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(entry.weekdays.contains(weekday) ? .accentColor : .secondary)
+                        .accessibilityLabel(Calendar.current.weekdaySymbols[dayIndex])
+                        .accessibilityValue(entry.weekdays.contains(weekday) ? "Selected" : "Not selected")
+                    }
+                }
+                scheduleFunctionFields(entry)
+            }
+            .padding(.vertical, 4)
+        }
+        Button { addSchedule() } label: {
+            Label("Add Time", systemImage: "plus")
+        }
+        .disabled((control.action.schedules?.count ?? 0) >= 8)
+    }
+
+    @ViewBuilder private func scheduleFunctionFields(_ entry: PaperGIFRemoteScheduleEntry) -> some View {
+        switch control.action.type {
+        case .macMedia:
+            Picker("Command", selection: scheduleTextBinding(entry.id)) {
+                ForEach(mediaCommands, id: \.self) { Text(mediaTitle($0)).tag($0) }
+            }
+            if (entry.text ?? control.action.text) == "volume" {
+                Stepper("Volume: \(scheduleVolume(entry))%", value: scheduleVolumeBinding(entry.id), in: 0...100)
+            }
+        case .wledPower, .netHomePower:
+            Picker("Power", selection: scheduleTextBinding(entry.id)) {
+                Text("Toggle").tag("toggle")
+                Text("On").tag("on")
+                Text("Off").tag("off")
+            }
+        case .wledPreset:
+            Stepper("Preset: \(entry.value ?? control.action.value)", value: scheduleValueBinding(entry.id), in: 1...250)
+        case .wledBrightness:
+            Stepper("Brightness: \(entry.value ?? control.action.value)", value: scheduleValueBinding(entry.id), in: 0...255)
+        case .netHomeTemperature:
+            Stepper(
+                "Setpoint: \(scheduleTemperature(entry)) \(temperatureUnit.symbol)",
+                value: scheduleTemperatureBinding(entry.id),
+                in: temperatureDisplayRange
+            )
+        case .netHomeTemperatureStep:
+            Picker("Adjustment", selection: scheduleValueBinding(entry.id)) {
+                Text("Decrease").tag(-1)
+                Text("Increase").tag(1)
+            }
+        case .netHomeMode:
+            Picker("Mode", selection: scheduleTextBinding(entry.id)) {
+                Text("Auto").tag("auto")
+                Text("Cool").tag("cool")
+                Text("Heat").tag("heat")
+                Text("Dry").tag("dry")
+                Text("Fan").tag("fan")
+            }
+        case .netHomeFan:
+            Stepper("Fan: \(entry.value ?? control.action.value)%", value: scheduleValueBinding(entry.id), in: 20...100, step: 20)
+        case .netHomeAuto:
+            Picker("Control", selection: scheduleTextBinding(entry.id)) {
+                Text("Cooling").tag("cool")
+                Text("Heating").tag("heat")
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    private func prepareSchedules() {
+        guard control.action.scheduleEnabled == true,
+              control.action.schedules?.isEmpty != false else { return }
+        control.action.schedules = [makeScheduleEntry(
+            hour: control.action.scheduleHour ?? 8,
+            minute: control.action.scheduleMinute ?? 0
+        )]
+        syncLegacySchedule()
+    }
+
+    private func makeScheduleEntry(hour: Int = 8, minute: Int = 0) -> PaperGIFRemoteScheduleEntry {
+        PaperGIFRemoteScheduleEntry(
+            hour: hour,
+            minute: minute,
+            text: scheduleUsesText ? control.action.text : nil,
+            value: scheduleUsesValue ? control.action.value : nil,
+            valueTenths: control.action.type == .netHomeTemperature
+                ? (control.action.valueTenths ?? control.action.value * 10) : nil
+        )
+    }
+
+    private var scheduleUsesText: Bool {
+        [.macMedia, .wledPower, .netHomePower, .netHomeMode, .netHomeAuto].contains(control.action.type)
+    }
+
+    private var scheduleUsesValue: Bool {
+        [.macMedia, .wledPreset, .wledBrightness, .netHomeTemperature,
+         .netHomeTemperatureStep, .netHomeFan].contains(control.action.type)
+    }
+
+    private func addSchedule() {
+        prepareSchedules()
+        guard var schedules = control.action.schedules, schedules.count < 8 else { return }
+        let previous = schedules.last
+        schedules.append(makeScheduleEntry(hour: previous?.hour ?? 8, minute: previous?.minute ?? 0))
+        control.action.schedules = schedules
+    }
+
+    private func removeSchedule(_ id: UUID) {
+        control.action.schedules?.removeAll { $0.id == id }
+        if control.action.schedules?.isEmpty != false {
+            control.action.scheduleEnabled = false
+        }
+        syncLegacySchedule()
+    }
+
+    private func updateSchedule(_ id: UUID, _ update: (inout PaperGIFRemoteScheduleEntry) -> Void) {
+        guard let index = control.action.schedules?.firstIndex(where: { $0.id == id }) else { return }
+        update(&control.action.schedules![index])
+        syncLegacySchedule()
+    }
+
+    private func syncLegacySchedule() {
+        control.action.scheduleHour = control.action.schedules?.first?.hour
+        control.action.scheduleMinute = control.action.schedules?.first?.minute
+    }
+
+    private func toggleWeekday(_ weekday: Int, in id: UUID) {
+        updateSchedule(id) { entry in
+            if let index = entry.weekdays.firstIndex(of: weekday) {
+                entry.weekdays.remove(at: index)
+            } else {
+                entry.weekdays.append(weekday)
+                entry.weekdays.sort()
+            }
+        }
+    }
+
+    private func scheduleTimeBinding(_ id: UUID) -> Binding<Date> {
         Binding(
             get: {
-                Calendar.current.date(
-                    bySettingHour: control.action.scheduleHour ?? 8,
-                    minute: control.action.scheduleMinute ?? 0,
+                let entry = control.action.schedules?.first(where: { $0.id == id })
+                return Calendar.current.date(
+                    bySettingHour: entry?.hour ?? 8,
+                    minute: entry?.minute ?? 0,
                     second: 0,
                     of: Date()
                 ) ?? Date()
             },
             set: { date in
                 let components = Calendar.current.dateComponents([.hour, .minute], from: date)
-                control.action.scheduleHour = components.hour ?? 8
-                control.action.scheduleMinute = components.minute ?? 0
+                updateSchedule(id) {
+                    $0.hour = components.hour ?? 8
+                    $0.minute = components.minute ?? 0
+                }
+            }
+        )
+    }
+
+    private func scheduleTextBinding(_ id: UUID) -> Binding<String> {
+        Binding(
+            get: { control.action.schedules?.first(where: { $0.id == id })?.text ?? control.action.text },
+            set: { value in updateSchedule(id) { $0.text = value } }
+        )
+    }
+
+    private func scheduleValueBinding(_ id: UUID) -> Binding<Int> {
+        Binding(
+            get: { control.action.schedules?.first(where: { $0.id == id })?.value ?? control.action.value },
+            set: { value in updateSchedule(id) { $0.value = value } }
+        )
+    }
+
+    private func scheduleVolume(_ entry: PaperGIFRemoteScheduleEntry) -> Int {
+        min(max(Int((Double(entry.value ?? control.action.value) / 255 * 100).rounded()), 0), 100)
+    }
+
+    private func scheduleVolumeBinding(_ id: UUID) -> Binding<Int> {
+        Binding(
+            get: {
+                let value = control.action.schedules?.first(where: { $0.id == id })?.value ?? control.action.value
+                return min(max(Int((Double(value) / 255 * 100).rounded()), 0), 100)
+            },
+            set: { percentage in
+                updateSchedule(id) { $0.value = Int((Double(percentage) / 100 * 255).rounded()) }
+            }
+        )
+    }
+
+    private func scheduleTemperature(_ entry: PaperGIFRemoteScheduleEntry) -> Int {
+        temperatureUnit.displayValue(celsiusTenths: entry.valueTenths ?? control.action.valueTenths ?? control.action.value * 10)
+    }
+
+    private func scheduleTemperatureBinding(_ id: UUID) -> Binding<Int> {
+        Binding(
+            get: {
+                let entry = control.action.schedules?.first(where: { $0.id == id })
+                return temperatureUnit.displayValue(
+                    celsiusTenths: entry?.valueTenths ?? control.action.valueTenths ?? control.action.value * 10
+                )
+            },
+            set: { displayValue in
+                let tenths = min(max(temperatureUnit.celsiusTenthsValue(displayValue: displayValue), 160), 300)
+                updateSchedule(id) {
+                    $0.valueTenths = tenths
+                    $0.value = Int((Double(tenths) / 10).rounded())
+                }
             }
         )
     }
@@ -2179,6 +2401,12 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private func applyActionDefaults() {
         switch control.action.type {
+        case .macMedia:
+            control.action.text = "playPause"
+            control.title = "Play/Pause"
+            control.symbol = "playpause.fill"
+            control.iconBitmap = nil
+            control.isToggle = nil
         case .netHomePower:
             control.action.text = "toggle"
         case .netHomeTemperature:
@@ -2200,6 +2428,20 @@ private struct PaperGIFRemoteControlEditor: View {
         default:
             break
         }
+    }
+
+    private var mediaCommandBinding: Binding<String> {
+        Binding(
+            get: { control.action.text },
+            set: { command in
+                control.action.text = command
+                guard command == "playPause" else { return }
+                control.title = "Play/Pause"
+                control.symbol = "playpause.fill"
+                control.iconBitmap = nil
+                control.isToggle = nil
+            }
+        )
     }
 
     private var isWLEDAction: Bool {

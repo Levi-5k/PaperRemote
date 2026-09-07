@@ -3,6 +3,76 @@ import XCTest
 @testable import PaperGIFMac
 
 final class RemoteProfileModelTests: XCTestCase {
+    func testCanonicalV6FixtureCoversEveryActionType() throws {
+        let profile = try JSONDecoder().decode(
+            RemoteProfile.self,
+            from: Data(contentsOf: protocolFixture("remote-profile-v6-all-actions.json"))
+        )
+        let actionTypes = Set(profile.pages.flatMap(\.controls).map(\.action.type))
+
+        XCTAssertEqual(actionTypes, Set(RemoteActionType.allCases))
+        XCTAssertEqual(profile.computers.count, 2)
+        XCTAssertEqual(profile.pages.count, 2)
+        XCTAssertEqual(profile.pages[0].controls[5].textBox?.source, .nowPlaying)
+        XCTAssertEqual(profile.pages[1].controls[4].action.schedules?.first?.valueTenths, 225)
+    }
+
+    func testCanonicalV6FixtureCoversEveryTextSource() throws {
+        let profile = try JSONDecoder().decode(
+            RemoteProfile.self,
+            from: Data(contentsOf: protocolFixture("remote-profile-v6-text-sources.json"))
+        )
+        let sources = Set(profile.pages.flatMap(\.controls).compactMap(\.textBox?.source))
+
+        XCTAssertEqual(sources, Set(RemoteTextSource.allCases))
+    }
+
+    @MainActor
+    func testNetHomeRenameReconciliationUsesStableUnitID() {
+        let localComputer = RemoteComputer(name: "This Mac", host: "mac.local", token: "token")
+        let otherComputer = RemoteComputer(name: "Other Mac", host: "other.local", token: "token")
+        var profile = RemoteProfile(pages: [
+            .netHomeThermostat(unit: "Bedroom", computerID: localComputer.id.uuidString),
+            .netHomeThermostat(unit: "Office", computerID: otherComputer.id.uuidString),
+        ])
+        profile.computers = [localComputer, otherComputer]
+
+        let result = RemoteEditorStore.reconcileNetHomeProfile(
+            profile,
+            previousUnits: [.init(id: "101", name: "Bedroom")],
+            currentUnits: [.init(id: "101", name: "Primary Bedroom")],
+            localComputerID: localComputer.id.uuidString
+        )
+
+        XCTAssertEqual(result.profile.pages[0].name, "Primary Bedroom")
+        XCTAssertTrue(result.profile.pages[0].controls.allSatisfy {
+            $0.action.host == "Primary Bedroom"
+        })
+        XCTAssertEqual(result.profile.pages[1], profile.pages[1])
+        XCTAssertEqual(result.aliases["bedroom"], "Primary Bedroom")
+    }
+
+    @MainActor
+    func testNetHomeRenameReconciliationInfersSingleLegacyRename() {
+        let computer = RemoteComputer(name: "This Mac", host: "mac.local", token: "token")
+        var profile = RemoteProfile(pages: [
+            .netHomeThermostat(unit: "Old Name", computerID: computer.id.uuidString),
+        ])
+        profile.computers = [computer]
+
+        let result = RemoteEditorStore.reconcileNetHomeProfile(
+            profile,
+            previousUnits: [],
+            currentUnits: [.init(id: "101", name: "New Name")],
+            localComputerID: computer.id.uuidString
+        )
+
+        XCTAssertEqual(result.profile.pages[0].name, "New Name")
+        XCTAssertTrue(result.profile.pages[0].controls.allSatisfy {
+            $0.action.host == "New Name"
+        })
+    }
+
     func testLegacyProfileMigratesToCurrentVersion() throws {
         let data = Data(#"{"version":1,"pages":[{"id":"00000000-0000-0000-0000-000000000001","name":"Main","controls":[]}]}"#.utf8)
 
@@ -126,7 +196,23 @@ final class RemoteProfileModelTests: XCTestCase {
             valueTenths: 220,
             scheduleEnabled: true,
             scheduleHour: 7,
-            scheduleMinute: 30
+            scheduleMinute: 30,
+            schedules: [
+                RemoteScheduleEntry(
+                    weekdays: [2, 3, 4, 5, 6],
+                    hour: 7,
+                    minute: 30,
+                    value: 22,
+                    valueTenths: 220
+                ),
+                RemoteScheduleEntry(
+                    weekdays: [1, 7],
+                    hour: 9,
+                    minute: 15,
+                    value: 20,
+                    valueTenths: 200
+                ),
+            ]
         )
         let decoded = try JSONDecoder().decode(
             RemoteAction.self,
@@ -141,6 +227,7 @@ final class RemoteProfileModelTests: XCTestCase {
         XCTAssertNil(legacy.scheduleEnabled)
         XCTAssertNil(legacy.scheduleHour)
         XCTAssertNil(legacy.scheduleMinute)
+        XCTAssertNil(legacy.schedules)
     }
 
     func testFahrenheitPreferenceRoundTripsWithoutChangingStoredCelsius() throws {
@@ -185,4 +272,14 @@ final class RemoteProfileModelTests: XCTestCase {
         XCTAssertEqual(setpoint?.action.value, 23)
     }
 
+}
+
+private func protocolFixture(_ name: String) -> URL {
+    URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("protocol/fixtures")
+        .appendingPathComponent(name)
 }

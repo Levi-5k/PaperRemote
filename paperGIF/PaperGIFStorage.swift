@@ -52,12 +52,15 @@ enum PaperGIFStorage {
     struct SavedMedia: Identifiable, Sendable {
         let id: UUID
         let name: String
-        let data: Data
         let savedAt: Date
+        let byteCount: Int
+        let isEditable: Bool
+    }
+
+    struct LoadedMedia: Sendable {
+        let data: Data
         let sourceData: Data?
         let recipe: PaperGIFConversionRecipe?
-
-        var isEditable: Bool { sourceData != nil && recipe != nil }
     }
 
     nonisolated private static let packageExtension = "pgif"
@@ -106,10 +109,9 @@ enum PaperGIFStorage {
         return SavedMedia(
             id: id,
             name: name,
-            data: data,
             savedAt: savedAt,
-            sourceData: sourceData,
-            recipe: recipe
+            byteCount: data.count,
+            isEditable: sourceData != nil && recipe != nil
         )
     }
 
@@ -117,7 +119,7 @@ enum PaperGIFStorage {
         let directory = try storageDirectory()
         let urls = try FileManager.default.contentsOfDirectory(
             at: directory,
-            includingPropertiesForKeys: [.contentModificationDateKey],
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
         )
 
@@ -126,22 +128,37 @@ enum PaperGIFStorage {
                   let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else {
                 return nil
             }
-            let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
+            let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             let name = (try? Data(contentsOf: nameURL(for: id, in: directory)))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "Saved Media"
-            let sourceData = try? Data(contentsOf: sourceURL(for: id, in: directory))
-            let recipe = (try? Data(contentsOf: recipeURL(for: id, in: directory)))
-                .flatMap(decodeRecipe)
             return SavedMedia(
                 id: id,
                 name: name,
-                data: try Data(contentsOf: url),
                 savedAt: values.contentModificationDate ?? .distantPast,
-                sourceData: sourceData,
-                recipe: recipe
+                byteCount: values.fileSize ?? 0,
+                isEditable: FileManager.default.fileExists(atPath: sourceURL(for: id, in: directory).path) &&
+                    FileManager.default.fileExists(atPath: recipeURL(for: id, in: directory).path)
             )
         }
         .sorted { $0.savedAt > $1.savedAt }
+    }
+
+    nonisolated static func load(_ savedMedia: SavedMedia) throws -> LoadedMedia {
+        let directory = try storageDirectory()
+        let recipe = savedMedia.isEditable
+            ? decodeRecipe(try Data(contentsOf: recipeURL(for: savedMedia.id, in: directory)))
+            : nil
+        return LoadedMedia(
+            data: try Data(contentsOf: packageURL(for: savedMedia.id, in: directory)),
+            sourceData: savedMedia.isEditable
+                ? try Data(contentsOf: sourceURL(for: savedMedia.id, in: directory))
+                : nil,
+            recipe: recipe
+        )
+    }
+
+    nonisolated static func loadData(_ savedMedia: SavedMedia) throws -> Data {
+        try Data(contentsOf: packageURL(for: savedMedia.id, in: storageDirectory()))
     }
 
     nonisolated static func delete(_ savedMedia: SavedMedia) throws {

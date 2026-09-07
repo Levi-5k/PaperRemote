@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papergif.local/protocol/remote-profile-v6.schema.json",
+  "title": "paperGIF Remote Profile v6",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "pages"],
+  "properties": {
+    "version": { "const": 6 },
+    "wifiSSID": { "type": "string", "maxLength": 32 },
+    "wifiPassword": { "type": "string", "maxLength": 64 },
+    "macHost": { "type": "string", "maxLength": 63 },
+    "macPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "macToken": { "type": "string", "maxLength": 79 },
+    "computers": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/computer" }
+    },
+    "screensaverDelaySeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967
+    },
+    "temperatureUnit": {
+      "enum": ["celsius", "fahrenheit"]
+    },
+    "timeZoneOffsetMinutes": {
+      "type": "integer",
+      "minimum": -32768,
+      "maximum": 32767
+    },
+    "deviceClock": { "$ref": "#/$defs/deviceClock" },
+    "pages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/page" }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "computer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "host", "port", "token"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 31 },
+        "host": { "type": "string", "minLength": 1, "maxLength": 63 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "token": { "type": "string", "maxLength": 79 }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "controls"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 31 },
+        "controls": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/control" }
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "symbol", "tintHex", "kind", "action"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "title": { "type": "string", "maxLength": 31 },
+        "symbol": { "type": "string", "maxLength": 31 },
+        "iconBitmap": {
+          "type": ["string", "null"],
+          "contentEncoding": "base64",
+          "maxLength": 684
+        },
+        "tintHex": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{6}$"
+        },
+        "kind": { "enum": ["button", "slider", "textBox"] },
+        "isToggle": { "type": ["boolean", "null"] },
+        "toggleOn": { "type": ["boolean", "null"] },
+        "buttonHeight": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 2
+        },
+        "action": { "$ref": "#/$defs/action" },
+        "layoutSlot": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 15
+        },
+        "textBox": {
+          "oneOf": [
+            { "$ref": "#/$defs/textBox" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "host", "text", "value", "modifiers"],
+      "properties": {
+        "type": {
+          "enum": [
+            "macMedia",
+            "macKey",
+            "macOpen",
+            "macShortcut",
+            "macScript",
+            "wledPower",
+            "wledPreset",
+            "wledBrightness",
+            "netHomePower",
+            "netHomeTemperature",
+            "netHomeTemperatureStep",
+            "netHomeMode",
+            "netHomeFan",
+            "netHomeAuto",
+            "page"
+          ]
+        },
+        "host": { "type": "string", "maxLength": 63 },
+        "text": { "type": "string", "maxLength": 191 },
+        "value": { "type": "integer" },
+        "valueTenths": {
+          "type": ["integer", "null"],
+          "minimum": -32768,
+          "maximum": 32767
+        },
+        "modifiers": {
+          "type": "array",
+          "maxItems": 4,
+          "items": { "type": "string", "maxLength": 11 }
+        },
+        "computerID": {
+          "oneOf": [
+            { "$ref": "#/$defs/uuid" },
+            { "type": "null" }
+          ]
+        },
+        "deadbandTenths": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "humidityThreshold": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "minimumCycleMinutes": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "scheduleEnabled": { "type": ["boolean", "null"] },
+        "scheduleHour": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 23
+        },
+        "scheduleMinute": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 59
+        },
+        "schedules": {
+          "type": ["array", "null"],
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/schedule" }
+        }
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "weekdays", "hour", "minute"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "weekdays": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 7
+          }
+        },
+        "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+        "minute": { "type": "integer", "minimum": 0, "maximum": 59 },
+        "text": { "type": ["string", "null"], "maxLength": 23 },
+        "value": { "type": ["integer", "null"] },
+        "valueTenths": {
+          "type": ["integer", "null"],
+          "minimum": -32768,
+          "maximum": 32767
+        }
+      }
+    },
+    "textBox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": [
+            "staticText",
+            "dateTime",
+            "macScript",
+            "macShortcut",
+            "controlValue",
+            "nowPlaying"
+          ]
+        },
+        "sourceText": { "type": "string", "maxLength": 192 },
+        "referencedControlID": {
+          "oneOf": [
+            { "$ref": "#/$defs/uuid" },
+            { "type": "null" }
+          ]
+        },
+        "computerID": {
+          "oneOf": [
+            { "$ref": "#/$defs/uuid" },
+            { "type": "null" }
+          ]
+        },
+        "dateFormat": { "type": "string", "maxLength": 39 },
+        "placeholder": { "type": "string", "maxLength": 64 },
+        "gridWidth": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "gridHeight": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "textSize": {
+          "enum": ["small", "medium", "large", "extraLarge", "autoFit"]
+        },
+        "horizontalAlignment": {
+          "enum": ["leading", "center", "trailing"]
+        },
+        "verticalAlignment": { "enum": ["top", "center", "bottom"] },
+        "tapBehavior": { "enum": ["displayOnly", "refresh", "action"] },
+        "tapAction": {
+          "oneOf": [
+            { "$ref": "#/$defs/action" },
+            { "type": "null" }
+          ]
+        },
+        "refreshIntervalSeconds": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 4294967
+        }
+      }
+    },
+    "deviceClock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["year", "month", "day", "weekday", "hour", "minute", "second"],
+      "properties": {
+        "year": { "type": "integer", "minimum": 2000, "maximum": 2099 },
+        "month": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "day": { "type": "integer", "minimum": 1, "maximum": 31 },
+        "weekday": { "type": "integer", "minimum": 0, "maximum": 6 },
+        "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+        "minute": { "type": "integer", "minimum": 0, "maximum": 59 },
+        "second": { "type": "integer", "minimum": 0, "maximum": 59 }
+      }
+    }
+  }
+}

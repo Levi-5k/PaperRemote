@@ -122,12 +122,12 @@ struct PaperGIFMediaCard: View {
             Button("Cancel", role: .cancel) {}
         }
         .task(id: savedMedia.savedAt) {
-            let data = savedMedia.data
-            let sourceData = savedMedia.sourceData
             guard let result = try? await Task.detached(priority: .utility, operation: {
+                let loaded = try PaperGIFStorage.load(savedMedia)
+                let data = loaded.data
                 let animation = try PaperGIFAnimation(encoded: data)
                 let image: CGImage
-                if let sourceData {
+                if let sourceData = loaded.sourceData {
                     image = try PaperGIFEncoder.previewImage(from: sourceData)
                 } else {
                     guard let firstFrame = animation.frames.first else {
@@ -144,12 +144,17 @@ struct PaperGIFMediaCard: View {
 
     private func detail(for animation: PaperGIFAnimation) -> String {
         let kind = animation.frames.count == 1 ? "IMAGE" : "GIF"
-        let size = ByteCountFormatter.string(fromByteCount: Int64(savedMedia.data.count), countStyle: .file)
+        let size = ByteCountFormatter.string(fromByteCount: Int64(savedMedia.byteCount), countStyle: .file)
         return "\(kind)  •  \(animation.frames.count) frame\(animation.frames.count == 1 ? "" : "s")  •  \(size)"
     }
 
     private func sendToDevice() {
-        bluetoothManager.send(savedMedia.data, name: savedMedia.name, mediaID: savedMedia.id)
+        Task {
+            guard let data = try? await Task.detached(priority: .userInitiated, operation: {
+                try PaperGIFStorage.loadData(savedMedia)
+            }).value else { return }
+            bluetoothManager.send(data, name: savedMedia.name, mediaID: savedMedia.id)
+        }
     }
 
     private var sendButtonTitle: String {

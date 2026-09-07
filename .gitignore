@@ -15,6 +15,12 @@ xcuserdata/
 .build/
 .swiftpm/
 
+# .NET
+**/bin/
+**/obj/
+.vs/
+*.user
+
 # PlatformIO
 .pio/
 .pio-venv/

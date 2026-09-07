@@ -5,6 +5,10 @@ private struct SendableNetService: @unchecked Sendable {
     let value: NetService
 }
 
+private struct SendableNetServiceBrowser: @unchecked Sendable {
+    let value: NetServiceBrowser
+}
+
 @MainActor
 final class ComputerDiscovery: NSObject, ObservableObject {
     struct Computer: Identifiable, Equatable, Sendable {
@@ -70,9 +74,10 @@ extension ComputerDiscovery: NetServiceBrowserDelegate {
         didFind service: NetService,
         moreComing: Bool
     ) {
+        let sendableBrowser = SendableNetServiceBrowser(value: browser)
         let sendable = SendableNetService(value: service)
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.browser === sendableBrowser.value else { return }
             let service = sendable.value
             services[key(for: service)] = service
             service.delegate = self
@@ -85,9 +90,10 @@ extension ComputerDiscovery: NetServiceBrowserDelegate {
         didRemove service: NetService,
         moreComing: Bool
     ) {
+        let sendableBrowser = SendableNetServiceBrowser(value: browser)
         let sendable = SendableNetService(value: service)
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.browser === sendableBrowser.value else { return }
             let service = sendable.value
             services.removeValue(forKey: key(for: service))
             computers.removeAll { $0.name == service.name }
@@ -98,8 +104,10 @@ extension ComputerDiscovery: NetServiceBrowserDelegate {
         _ browser: NetServiceBrowser,
         didNotSearch errorDict: [String: NSNumber]
     ) {
+        let sendableBrowser = SendableNetServiceBrowser(value: browser)
         Task { @MainActor [weak self] in
-            self?.state = .failed("Computer search failed. Check Local Network access.")
+            guard let self, self.browser === sendableBrowser.value else { return }
+            self.state = .failed("Computer search failed. Check Local Network access.")
         }
     }
 }
@@ -110,9 +118,13 @@ extension ComputerDiscovery: NetServiceDelegate {
         Task { @MainActor [weak self] in
             let sender = sendable.value
             guard let self,
+                services[key(for: sender)] === sender,
                   let host = sender.hostName?.trimmingCharacters(in: CharacterSet(charactersIn: ".")),
                   !host.isEmpty,
                   sender.port > 0 else { return }
+            services.removeValue(forKey: key(for: sender))
+            sender.stop()
+            sender.delegate = nil
             let computer = Computer(name: sender.name, host: host, port: sender.port)
             computers.removeAll { $0.id == computer.id || $0.name == computer.name }
             computers.append(computer)
@@ -131,7 +143,10 @@ extension ComputerDiscovery: NetServiceDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let sender = sendable.value
+            guard services[key(for: sender)] === sender else { return }
             services.removeValue(forKey: key(for: sender))
+            sender.stop()
+            sender.delegate = nil
             if services.isEmpty && computers.isEmpty {
                 state = .failed("Found \(sender.name), but could not resolve its address.")
             }

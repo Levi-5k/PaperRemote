@@ -1,0 +1,80 @@
+{
+  "version": 6,
+  "computers": [
+    {
+      "id": "00000000-0000-0000-0000-000000000101",
+      "name": "Example Computer",
+      "host": "desktop.example.local",
+      "port": 43821,
+      "token": "fixture-token"
+    }
+  ],
+  "pages": [
+    {
+      "id": "00000000-0000-0000-0000-000000000501",
+      "name": "Text Sources",
+      "controls": [
+        {
+          "id": "00000000-0000-0000-0000-000000000601",
+          "title": "Static",
+          "symbol": "text.alignleft",
+          "tintHex": "202020",
+          "kind": "textBox",
+          "action": { "type": "macMedia", "host": "", "text": "playPause", "value": 0, "modifiers": [] },
+          "layoutSlot": 0,
+          "textBox": { "source": "staticText", "sourceText": "Hello", "gridWidth": 2, "gridHeight": 1 }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000602",
+          "title": "Clock",
+          "symbol": "clock",
+          "tintHex": "202020",
+          "kind": "textBox",
+          "action": { "type": "macMedia", "host": "", "text": "playPause", "value": 0, "modifiers": [] },
+          "layoutSlot": 2,
+          "textBox": { "source": "dateTime", "sourceText": "", "dateFormat": "%H:%M", "gridWidth": 2, "gridHeight": 1 }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000603",
+          "title": "Script",
+          "symbol": "gearshape.fill",
+          "tintHex": "202020",
+          "kind": "textBox",
+          "action": { "type": "macScript", "host": "", "text": "example-script", "value": 0, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000101" },
+          "layoutSlot": 4,
+          "textBox": { "source": "macScript", "sourceText": "example-script", "computerID": "00000000-0000-0000-0000-000000000101", "gridWidth": 2, "gridHeight": 1 }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000604",
+          "title": "Shortcut",
+          "symbol": "bolt.fill",
+          "tintHex": "202020",
+          "kind": "textBox",
+          "action": { "type": "macShortcut", "host": "", "text": "Example Shortcut", "value": 0, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000101" },
+          "layoutSlot": 6,
+          "textBox": { "source": "macShortcut", "sourceText": "Example Shortcut", "computerID": "00000000-0000-0000-0000-000000000101", "gridWidth": 2, "gridHeight": 1 }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000605",
+          "title": "Value",
+          "symbol": "slider.horizontal.3",
+          "tintHex": "202020",
+          "kind": "textBox",
+          "action": { "type": "macMedia", "host": "", "text": "volume", "value": 128, "modifiers": [] },
+          "layoutSlot": 8,
+          "textBox": { "source": "controlValue", "sourceText": "", "referencedControlID": "00000000-0000-0000-0000-000000000601", "gridWidth": 2, "gridHeight": 1 }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000606",
+          "title": "Now Playing",
+          "symbol": "music.note",
+          "tintHex": "202020",
+          "kind": "textBox",
+          "action": { "type": "macMedia", "host": "", "text": "playPause", "value": 0, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000101" },
+          "layoutSlot": 10,
+          "textBox": { "source": "nowPlaying", "sourceText": "", "computerID": "00000000-0000-0000-0000-000000000101", "placeholder": "Nothing playing", "gridWidth": 2, "gridHeight": 1 }
+        }
+      ]
+    }
+  ]
+}

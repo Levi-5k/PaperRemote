@@ -9,9 +9,15 @@ struct RemoteControlTemplate: Identifiable, Sendable {
     let kind: RemoteControlKind
     let action: RemoteAction
     let textBox: RemoteTextBox?
+    private let configuredControl: RemoteControl?
 
     var control: RemoteControl {
-        RemoteControl(title: title, symbol: symbol, kind: kind, action: action, textBox: textBox)
+        if var configuredControl {
+            configuredControl.id = UUID()
+            configuredControl.layoutSlot = nil
+            return configuredControl
+        }
+        return RemoteControl(title: title, symbol: symbol, kind: kind, action: action, textBox: textBox)
     }
 
     func matches(_ query: String) -> Bool {
@@ -84,6 +90,20 @@ struct RemoteControlTemplate: Identifiable, Sendable {
         }
     }
 
+    static func module(_ module: PaperModuleManifest, control definition: PaperModuleControl) -> Self {
+        Self(
+            id: "\(module.id):\(definition.id)",
+            category: definition.category,
+            title: definition.control.title,
+            detail: definition.detail,
+            symbol: definition.control.symbol,
+            kind: definition.control.kind,
+            action: definition.control.action,
+            textBox: definition.control.textBox,
+            configuredControl: definition.control
+        )
+    }
+
     private static func media(
         _ id: String, _ category: String, _ title: String, _ detail: String,
         _ symbol: String, _ command: String
@@ -103,6 +123,16 @@ struct RemoteControlTemplate: Identifiable, Sendable {
         _ symbol: String, _ kind: RemoteControlKind, _ action: RemoteAction,
         textBox: RemoteTextBox? = nil
     ) -> Self {
-        Self(id: id, category: category, title: title, detail: detail, symbol: symbol, kind: kind, action: action, textBox: textBox)
+        Self(
+            id: id,
+            category: category,
+            title: title,
+            detail: detail,
+            symbol: symbol,
+            kind: kind,
+            action: action,
+            textBox: textBox,
+            configuredControl: nil
+        )
     }
 }

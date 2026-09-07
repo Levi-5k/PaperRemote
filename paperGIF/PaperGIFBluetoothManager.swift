@@ -173,6 +173,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     @Published private(set) var isScanningWiFiNetworks = false
     @Published private(set) var wifiScanError: String?
     @Published private(set) var remoteSyncStatus: String?
+    @Published private(set) var remoteProfileFromDevice: PaperGIFRemoteProfile?
     @Published private(set) var isTransferring = false {
         didSet {
             UIApplication.shared.isIdleTimerDisabled = isTransferring
@@ -213,6 +214,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private var failedWiFiProbes = 0
     private var homeWiFiDeviceURL: URL?
     private var homeWiFiAuthorization: String?
+    private var remoteProfilePullTask: Task<Void, Never>?
+    private var isAwaitingRemoteProfilePull = false
     private var isBluetoothSuspendedForWiFiTransfer = false
 
     override init() {
@@ -541,6 +544,11 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             remoteSyncStatus = "Connect to the M5Paper over Bluetooth"
             return
         }
+        guard !isAwaitingRemoteProfilePull else {
+            pendingRemoteProfile = profile
+            remoteSyncStatus = "Waiting for remote from M5Paper"
+            return
+        }
         guard let data = profile.devicePayload else {
             remoteSyncStatus = "Could not encode the remote profile"
             return
@@ -719,6 +727,48 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
                 frameCount: $0.frameCount,
                 isActive: $0.active
             )
+        }
+    }
+
+    private func pullRemoteProfile(
+        from deviceURL: URL,
+        authorization: String
+    ) {
+        remoteProfilePullTask?.cancel()
+        remoteSyncStatus = "Loading remote from M5Paper"
+        remoteProfilePullTask = Task { [weak self] in
+            guard let self else { return }
+            var request = URLRequest(url: deviceURL.appending(path: "remote"))
+            request.timeoutInterval = 8
+            request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.allowsCellularAccess = false
+            configuration.waitsForConnectivity = false
+            configuration.timeoutIntervalForRequest = 8
+            configuration.timeoutIntervalForResource = 10
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard !Task.isCancelled,
+                      let response = response as? HTTPURLResponse,
+                      response.statusCode == 200 else {
+                    throw URLError(.badServerResponse)
+                }
+                let profile = try JSONDecoder().decode(PaperGIFRemoteProfile.self, from: data)
+                guard !Task.isCancelled else { return }
+                pendingRemoteProfile = nil
+                remoteProfileFromDevice = profile
+                isAwaitingRemoteProfilePull = false
+                remoteSyncStatus = "Loaded remote from M5Paper"
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled else { return }
+                pendingRemoteProfile = nil
+                isAwaitingRemoteProfilePull = false
+                remoteSyncStatus = "Could not load remote from M5Paper"
+            }
         }
     }
 
@@ -1069,19 +1119,31 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         switch data[1] {
         case 0:
             homeWiFiState = .notConfigured
+            isAwaitingRemoteProfilePull = false
+            syncPendingRemoteProfile()
         case 1:
             homeWiFiState = .connecting
+            isAwaitingRemoteProfilePull = true
         case 2:
             homeWiFiState = .connected
-            guard data.count == 16 else { return }
+            guard data.count == 16 else {
+                isAwaitingRemoteProfilePull = false
+                syncPendingRemoteProfile()
+                return
+            }
             let address = data[4..<8].map(String.init).joined(separator: ".")
             let authorization = data[8..<16]
                 .map { String(format: "%02X", $0) }
                 .joined()
             guard address != "0.0.0.0",
-                  let deviceURL = URL(string: "http://\(address)") else { return }
+                let deviceURL = URL(string: "http://\(address)") else {
+                isAwaitingRemoteProfilePull = false
+                                syncPendingRemoteProfile()
+                return
+            }
             homeWiFiDeviceURL = deviceURL
             homeWiFiAuthorization = authorization
+            pullRemoteProfile(from: deviceURL, authorization: authorization)
         case 3:
             let message: String
             switch reason {
@@ -1095,6 +1157,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
                 message = "Wi-Fi failed (reason \(reason))"
             }
             homeWiFiState = .failed(message)
+            isAwaitingRemoteProfilePull = false
+            syncPendingRemoteProfile()
         default:
             break
         }
@@ -1221,13 +1285,20 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         deviceLibraryTimeout?.cancel()
         let frameCount = UInt16(data[3]) | UInt16(data[4]) << 8
         let name = String(bytes: data.dropFirst(5), encoding: .utf8) ?? "Untitled"
-        pendingDeviceMedia.append(DeviceMedia(
+        let media = DeviceMedia(
             index: data[1],
             packageID: nil,
             name: name.isEmpty ? "Untitled" : name,
             frameCount: frameCount,
             isActive: data[2] == 1
-        ))
+        )
+        pendingDeviceMedia.append(media)
+        if let existingIndex = deviceMedia.firstIndex(where: { $0.index == media.index }) {
+            deviceMedia[existingIndex] = media
+        } else {
+            deviceMedia.append(media)
+            deviceMedia.sort { $0.index < $1.index }
+        }
         if pendingDeviceMedia.count < expectedDeviceMediaCount {
             requestDeviceLibraryItem(at: UInt8(pendingDeviceMedia.count))
         } else {
@@ -1304,6 +1375,9 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         dataCharacteristic = nil
         uploadData = nil
         pendingRemoteProfile = nil
+        remoteProfilePullTask?.cancel()
+        remoteProfilePullTask = nil
+        isAwaitingRemoteProfilePull = false
         bluetoothTransferKind = nil
         uploadOffset = 0
         acknowledgedUploadOffset = 0
@@ -1450,6 +1524,8 @@ extension PaperGIFBluetoothManager: CBPeripheralDelegate {
             }
             connectionTimeout?.cancel()
             connectionState = .connected
+            remoteProfileFromDevice = nil
+            isAwaitingRemoteProfilePull = true
             wifiEnabled = false
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
             peripheral.writeValue(Data([0x37]), for: characteristic, type: .withResponse)

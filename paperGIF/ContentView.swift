@@ -39,6 +39,7 @@ struct ContentView: View {
     @State private var conversionProgress = 0.0
     @State private var conversionStatus = "Converting frames…"
     @State private var errorMessage: String?
+    @State private var remoteProfileSaveError: String?
     @State private var remoteProfile = PaperGIFStorage.loadRemoteProfile()
 
     var body: some View {
@@ -94,6 +95,16 @@ struct ContentView: View {
             guard let selectedPhoto else { return }
             importPhoto(selectedPhoto)
         }
+        .onChange(of: bluetoothManager.remoteProfileFromDevice) {
+            guard let deviceProfile = bluetoothManager.remoteProfileFromDevice,
+                  deviceProfile != remoteProfile else { return }
+            do {
+                try PaperGIFStorage.saveRemoteProfile(deviceProfile)
+                remoteProfile = deviceProfile
+            } catch {
+                remoteProfileSaveError = error.localizedDescription
+            }
+        }
         .task {
             restoreLibrary()
         }
@@ -129,6 +140,14 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(errorMessage ?? "Unknown error")
+        }
+        .alert("Couldn’t Save Remote", isPresented: Binding(
+            get: { remoteProfileSaveError != nil },
+            set: { if !$0 { remoteProfileSaveError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(remoteProfileSaveError ?? "Unknown error")
         }
     }
 
@@ -498,7 +517,7 @@ struct ContentView: View {
                 let storedItems = try await Task.detached(priority: .utility) {
                     try PaperGIFStorage.loadAll()
                 }.value
-                savedMedia = storedItems.filter { (try? PaperGIFAnimation(encoded: $0.data)) != nil }
+                savedMedia = storedItems
                 if let latest = savedMedia.first {
                     select(latest)
                 }
@@ -509,14 +528,21 @@ struct ContentView: View {
     }
 
     private func select(_ saved: PaperGIFStorage.SavedMedia) {
-        do {
-            let restoredAnimation = try PaperGIFAnimation(encoded: saved.data)
-            sourceName = saved.name
-            animation = restoredAnimation
-            exportDocument = PaperGIFDocument(data: saved.data)
-            selectedSavedMediaID = saved.id
-        } catch {
-            errorMessage = error.localizedDescription
+        Task {
+            do {
+                let data = try await Task.detached(priority: .userInitiated) {
+                    try PaperGIFStorage.loadData(saved)
+                }.value
+                let restoredAnimation = try await Task.detached(priority: .userInitiated) {
+                    try PaperGIFAnimation(encoded: data)
+                }.value
+                sourceName = saved.name
+                animation = restoredAnimation
+                exportDocument = PaperGIFDocument(data: data)
+                selectedSavedMediaID = saved.id
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -570,25 +596,43 @@ struct ContentView: View {
     }
 
     private func edit(_ saved: PaperGIFStorage.SavedMedia, startsAtAdjustment: Bool) {
-        guard let sourceData = saved.sourceData, let recipe = saved.recipe else { return }
-        do {
-            pendingMedia = PendingMedia(
-                savedMediaID: saved.id,
-                name: saved.name,
-                data: sourceData,
-                preview: try PaperGIFEncoder.previewImage(from: sourceData),
-                isAnimated: isAnimated(sourceData),
-                recipe: recipe,
-                startsAtAdjustment: startsAtAdjustment
-            )
-        } catch {
-            errorMessage = error.localizedDescription
+        guard saved.isEditable else { return }
+        Task {
+            do {
+                let loaded = try await Task.detached(priority: .userInitiated) {
+                    try PaperGIFStorage.load(saved)
+                }.value
+                guard let sourceData = loaded.sourceData, let recipe = loaded.recipe else { return }
+                let preview = try await Task.detached(priority: .userInitiated) {
+                    try PaperGIFEncoder.previewImage(from: sourceData)
+                }.value
+                pendingMedia = PendingMedia(
+                    savedMediaID: saved.id,
+                    name: saved.name,
+                    data: sourceData,
+                    preview: preview,
+                    isAnimated: isAnimated(sourceData),
+                    recipe: recipe,
+                    startsAtAdjustment: startsAtAdjustment
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
     private func export(_ saved: PaperGIFStorage.SavedMedia) {
-        select(saved)
-        isExporting = true
+        Task {
+            do {
+                let data = try await Task.detached(priority: .userInitiated) {
+                    try PaperGIFStorage.loadData(saved)
+                }.value
+                exportDocument = PaperGIFDocument(data: data)
+                isExporting = true
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func isAnimated(_ data: Data) -> Bool {

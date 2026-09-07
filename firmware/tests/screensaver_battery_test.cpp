@@ -4,6 +4,8 @@
 
 int main() {
     using screensaver_battery::imagesOnly;
+    using screensaver_battery::nextImageIndex;
+    using screensaver_battery::noImageIndex;
     for (int percent = -1; percent <= 100; ++percent) {
         assert(!imagesOnly(false, percent));
         assert(imagesOnly(true, percent) == (percent != 100));
@@ -16,5 +18,18 @@ int main() {
         assert(imagesOnly(true, levels[i]) == expected[i]);
     }
     assert(imagesOnly(true, 101));
-    std::cout << "PASS: battery policy disabled, 0-99%, 100%, unknown and transitions.\n";
+
+    const uint16_t mixedFrames[] = {12, 1, 8, 1};
+    assert(nextImageIndex(mixedFrames, 4, 0) == 1);
+    assert(nextImageIndex(mixedFrames, 4, 2) == 3);
+    assert(nextImageIndex(mixedFrames, 4, 4) == 1);
+
+    const uint16_t animatedFrames[] = {12, 8, 20};
+    assert(nextImageIndex(animatedFrames, 3, 0) == 0);
+    assert(nextImageIndex(animatedFrames, 3, 1) == 1);
+    assert(nextImageIndex(animatedFrames, 3, 2) == 2);
+    assert(nextImageIndex(animatedFrames, 3, 3) == 0);
+    assert(nextImageIndex(animatedFrames, 0, 0) == noImageIndex);
+
+    std::cout << "PASS: battery policy and still-first fallback rotation.\n";
 }

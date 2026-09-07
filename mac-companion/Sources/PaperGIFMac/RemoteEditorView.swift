@@ -31,11 +31,13 @@ private struct RemoteEditorView: View {
     @StateObject private var discovery = WLEDDiscovery()
     @StateObject private var computerDiscovery = ComputerDiscovery()
     @StateObject private var deviceDiscovery = DeviceDiscovery()
+    @StateObject private var moduleCatalog = ModuleCatalog()
     @State private var inspectorTab = InspectorTab.catalog
 
     private enum InspectorTab: String, CaseIterable, Identifiable {
         case catalog = "Add Controls"
         case control = "Control"
+        case modules = "Modules"
         case connections = "Connections"
 
         var id: Self { self }
@@ -270,6 +272,8 @@ private struct RemoteEditorView: View {
             Divider()
             if inspectorTab == .connections {
                 ConnectionsPanel(store: store, computers: computerDiscovery, wled: discovery)
+            } else if inspectorTab == .modules {
+                ModulesPanel(store: store, catalog: moduleCatalog)
             } else if inspectorTab == .control, let binding = selectedControlBinding {
                 ControlInspector(
                     control: binding,
@@ -289,7 +293,7 @@ private struct RemoteEditorView: View {
                     onDelete: store.deleteSelectedControl
                 )
             } else {
-                ControlCatalogPanel(store: store)
+                ControlCatalogPanel(store: store, moduleTemplates: moduleCatalog.installedTemplates)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
@@ -319,9 +323,14 @@ private struct RemoteEditorView: View {
 
 private struct ControlCatalogPanel: View {
     @ObservedObject var store: RemoteEditorStore
+    let moduleTemplates: [RemoteControlTemplate]
     @State private var search = ""
 
     var body: some View {
+        let templates = RemoteControlTemplate.all + moduleTemplates
+        let categories = templates.reduce(into: [String]()) { result, template in
+            if !result.contains(template.category) { result.append(template.category) }
+        }
         VStack(spacing: 0) {
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -340,8 +349,8 @@ private struct ControlCatalogPanel: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(RemoteControlTemplate.categories, id: \.self) { category in
-                        let templates = RemoteControlTemplate.all.filter {
+                    ForEach(categories, id: \.self) { category in
+                        let templates = templates.filter {
                             $0.category == category && $0.matches(search)
                         }
                         if !templates.isEmpty {
@@ -381,6 +390,138 @@ private struct ControlCatalogPanel: View {
                 }
                 .padding(.vertical, 4)
             }
+        }
+    }
+}
+
+private struct ModulesPanel: View {
+    @ObservedObject var store: RemoteEditorStore
+    @ObservedObject var catalog: ModuleCatalog
+    @State private var status = "Browse controls published in the paperGIF GitHub catalog."
+    @State private var installingID: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("GitHub modules")
+                        .font(.headline)
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button {
+                    Task { await refresh() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh module catalog")
+                .disabled(catalog.isLoading)
+            }
+            .padding(12)
+
+            Divider()
+
+            if catalog.isLoading && catalog.availableModules.isEmpty {
+                Spacer()
+                ProgressView("Loading modules...")
+                    .controlSize(.small)
+                Spacer()
+            } else if catalog.availableModules.isEmpty {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "shippingbox")
+                        .font(.title)
+                        .foregroundStyle(.secondary)
+                    Text("No Modules Available")
+                        .font(.headline)
+                    Text("Refresh when you are connected to GitHub.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(catalog.availableModules) { module in
+                            moduleCard(module)
+                        }
+                    }
+                    .padding(12)
+                }
+            }
+        }
+        .task {
+            if catalog.availableModules.isEmpty {
+                await refresh()
+            }
+        }
+    }
+
+    private func moduleCard(_ module: PaperModuleListing) -> some View {
+        let installed = catalog.isInstalled(module)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(module.name).font(.headline)
+                    Text("v\(module.version) · \(module.author)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if installed {
+                    Label("Installed", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
+            }
+            Text(module.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button {
+                Task { await install(module) }
+            } label: {
+                if installingID == module.id {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label(
+                        installed ? "Installed" : "Install",
+                        systemImage: installed ? "checkmark.circle" : "arrow.down.circle"
+                    )
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(installingID != nil || installed)
+        }
+        .padding(12)
+        .background(Color(nsColor: .textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+
+    private func refresh() async {
+        status = "Loading the module catalog..."
+        do {
+            try await catalog.refresh()
+            status = "\(catalog.availableModules.count) module(s) available"
+        } catch {
+            status = "Catalog unavailable: \(error.localizedDescription)"
+        }
+    }
+
+    private func install(_ listing: PaperModuleListing) async {
+        installingID = listing.id
+        defer { installingID = nil }
+        do {
+            let module = try await catalog.install(listing)
+            status = "Installed \(module.name). Its controls are now in Add Controls."
+        } catch {
+            status = "Install failed: \(error.localizedDescription)"
         }
     }
 }
@@ -485,7 +626,10 @@ private struct ControlInspector: View {
             }
             .padding(14)
         }
-        .onAppear { prepareWLEDSelection() }
+        .onAppear {
+            prepareWLEDSelection()
+            prepareSchedules()
+        }
         .onChange(of: discovery.devices) { _ in prepareWLEDSelection() }
     }
 
@@ -627,7 +771,7 @@ private struct ControlInspector: View {
         switch control.action.type {
         case .macMedia:
             LabeledContent("Command") {
-                Picker("", selection: $control.action.text) {
+                Picker("", selection: mediaCommandBinding) {
                     ForEach(mediaCommands, id: \.0) { command in Text(command.1).tag(command.0) }
                 }
                 .labelsHidden()
@@ -764,13 +908,9 @@ private struct ControlInspector: View {
         }
 
         if supportsSchedule {
-            Toggle("Run on a daily schedule", isOn: scheduleEnabledBinding)
+            Toggle("Run on a schedule", isOn: scheduleEnabledBinding)
             if control.action.scheduleEnabled == true {
-                DatePicker(
-                    "Time",
-                    selection: scheduleTimeBinding,
-                    displayedComponents: .hourAndMinute
-                )
+                scheduleFields
             }
         }
     }
@@ -843,28 +983,242 @@ private struct ControlInspector: View {
             get: { control.action.scheduleEnabled == true },
             set: { enabled in
                 control.action.scheduleEnabled = enabled
-                if enabled && control.action.scheduleHour == nil {
-                    control.action.scheduleHour = 8
-                    control.action.scheduleMinute = 0
+                if enabled {
+                    prepareSchedules()
                 }
             }
         )
     }
 
-    private var scheduleTimeBinding: Binding<Date> {
+    @ViewBuilder private var scheduleFields: some View {
+        ForEach(Array((control.action.schedules ?? []).enumerated()), id: \.element.id) { index, entry in
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Schedule \(index + 1)").font(.headline)
+                    Spacer()
+                    Button(role: .destructive) { removeSchedule(entry.id) } label: {
+                        Image(systemName: "trash")
+                    }
+                    .help("Delete schedule")
+                }
+                DatePicker("Time", selection: scheduleTimeBinding(entry.id), displayedComponents: .hourAndMinute)
+                Text("Days").font(.caption).foregroundStyle(.secondary)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 4) {
+                    ForEach(Array(Calendar.current.veryShortWeekdaySymbols.enumerated()), id: \.offset) { dayIndex, symbol in
+                        let weekday = dayIndex + 1
+                        Button { toggleWeekday(weekday, in: entry.id) } label: {
+                            Text(symbol).frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(entry.weekdays.contains(weekday) ? .accentColor : .secondary)
+                        .accessibilityLabel(Calendar.current.weekdaySymbols[dayIndex])
+                        .accessibilityValue(entry.weekdays.contains(weekday) ? "Selected" : "Not selected")
+                    }
+                }
+                scheduleFunctionFields(entry)
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+        }
+        Button { addSchedule() } label: {
+            Label("Add Time", systemImage: "plus")
+        }
+        .disabled((control.action.schedules?.count ?? 0) >= 8)
+    }
+
+    @ViewBuilder private func scheduleFunctionFields(_ entry: RemoteScheduleEntry) -> some View {
+        switch control.action.type {
+        case .macMedia:
+            LabeledContent("Command") {
+                Picker("", selection: scheduleTextBinding(entry.id)) {
+                    ForEach(mediaCommands, id: \.0) { command in Text(command.1).tag(command.0) }
+                }
+                .labelsHidden()
+            }
+            if (entry.text ?? control.action.text) == "volume" {
+                Stepper("Volume: \(scheduleVolume(entry))%", value: scheduleVolumeBinding(entry.id), in: 0...100)
+            }
+        case .wledPower, .netHomePower:
+            LabeledContent("Power") {
+                Picker("", selection: scheduleTextBinding(entry.id)) {
+                    Text("Toggle").tag("toggle")
+                    Text("On").tag("on")
+                    Text("Off").tag("off")
+                }
+                .labelsHidden()
+            }
+        case .wledPreset:
+            Stepper("Preset: \(entry.value ?? control.action.value)", value: scheduleValueBinding(entry.id), in: 1...250)
+        case .wledBrightness:
+            Stepper("Brightness: \(entry.value ?? control.action.value)", value: scheduleValueBinding(entry.id), in: 0...255)
+        case .netHomeTemperature:
+            Stepper(
+                "Setpoint: \(scheduleTemperature(entry)) \(temperatureUnit.symbol)",
+                value: scheduleTemperatureBinding(entry.id),
+                in: temperatureDisplayRange
+            )
+        case .netHomeTemperatureStep:
+            Picker("Adjustment", selection: scheduleValueBinding(entry.id)) {
+                Text("Decrease").tag(-1)
+                Text("Increase").tag(1)
+            }
+        case .netHomeMode:
+            Picker("Mode", selection: scheduleTextBinding(entry.id)) {
+                Text("Auto").tag("auto")
+                Text("Cool").tag("cool")
+                Text("Heat").tag("heat")
+                Text("Dry").tag("dry")
+                Text("Fan").tag("fan")
+            }
+        case .netHomeFan:
+            Stepper("Fan: \(entry.value ?? control.action.value)%", value: scheduleValueBinding(entry.id), in: 20...100, step: 20)
+        case .netHomeAuto:
+            Picker("Control", selection: scheduleTextBinding(entry.id)) {
+                Text("Cooling").tag("cool")
+                Text("Heating").tag("heat")
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    private func prepareSchedules() {
+        guard control.action.scheduleEnabled == true,
+              control.action.schedules?.isEmpty != false else { return }
+        control.action.schedules = [makeScheduleEntry(
+            hour: control.action.scheduleHour ?? 8,
+            minute: control.action.scheduleMinute ?? 0
+        )]
+        syncLegacySchedule()
+    }
+
+    private func makeScheduleEntry(hour: Int = 8, minute: Int = 0) -> RemoteScheduleEntry {
+        RemoteScheduleEntry(
+            hour: hour,
+            minute: minute,
+            text: scheduleUsesText ? control.action.text : nil,
+            value: scheduleUsesValue ? control.action.value : nil,
+            valueTenths: control.action.type == .netHomeTemperature
+                ? (control.action.valueTenths ?? control.action.value * 10) : nil
+        )
+    }
+
+    private var scheduleUsesText: Bool {
+        [.macMedia, .wledPower, .netHomePower, .netHomeMode, .netHomeAuto].contains(control.action.type)
+    }
+
+    private var scheduleUsesValue: Bool {
+        [.macMedia, .wledPreset, .wledBrightness, .netHomeTemperature,
+         .netHomeTemperatureStep, .netHomeFan].contains(control.action.type)
+    }
+
+    private func addSchedule() {
+        prepareSchedules()
+        guard var schedules = control.action.schedules, schedules.count < 8 else { return }
+        let previous = schedules.last
+        schedules.append(makeScheduleEntry(hour: previous?.hour ?? 8, minute: previous?.minute ?? 0))
+        control.action.schedules = schedules
+    }
+
+    private func removeSchedule(_ id: UUID) {
+        control.action.schedules?.removeAll { $0.id == id }
+        if control.action.schedules?.isEmpty != false {
+            control.action.scheduleEnabled = false
+        }
+        syncLegacySchedule()
+    }
+
+    private func updateSchedule(_ id: UUID, _ update: (inout RemoteScheduleEntry) -> Void) {
+        guard let index = control.action.schedules?.firstIndex(where: { $0.id == id }) else { return }
+        update(&control.action.schedules![index])
+        syncLegacySchedule()
+    }
+
+    private func syncLegacySchedule() {
+        control.action.scheduleHour = control.action.schedules?.first?.hour
+        control.action.scheduleMinute = control.action.schedules?.first?.minute
+    }
+
+    private func toggleWeekday(_ weekday: Int, in id: UUID) {
+        updateSchedule(id) { entry in
+            if let index = entry.weekdays.firstIndex(of: weekday) {
+                entry.weekdays.remove(at: index)
+            } else {
+                entry.weekdays.append(weekday)
+                entry.weekdays.sort()
+            }
+        }
+    }
+
+    private func scheduleTimeBinding(_ id: UUID) -> Binding<Date> {
         Binding(
             get: {
-                Calendar.current.date(
-                    bySettingHour: control.action.scheduleHour ?? 8,
-                    minute: control.action.scheduleMinute ?? 0,
+                let entry = control.action.schedules?.first(where: { $0.id == id })
+                return Calendar.current.date(
+                    bySettingHour: entry?.hour ?? 8,
+                    minute: entry?.minute ?? 0,
                     second: 0,
                     of: Date()
                 ) ?? Date()
             },
             set: { date in
                 let components = Calendar.current.dateComponents([.hour, .minute], from: date)
-                control.action.scheduleHour = components.hour ?? 8
-                control.action.scheduleMinute = components.minute ?? 0
+                updateSchedule(id) {
+                    $0.hour = components.hour ?? 8
+                    $0.minute = components.minute ?? 0
+                }
+            }
+        )
+    }
+
+    private func scheduleTextBinding(_ id: UUID) -> Binding<String> {
+        Binding(
+            get: { control.action.schedules?.first(where: { $0.id == id })?.text ?? control.action.text },
+            set: { value in updateSchedule(id) { $0.text = value } }
+        )
+    }
+
+    private func scheduleValueBinding(_ id: UUID) -> Binding<Int> {
+        Binding(
+            get: { control.action.schedules?.first(where: { $0.id == id })?.value ?? control.action.value },
+            set: { value in updateSchedule(id) { $0.value = value } }
+        )
+    }
+
+    private func scheduleVolume(_ entry: RemoteScheduleEntry) -> Int {
+        Int((Double(entry.value ?? control.action.value) / 255 * 100).rounded()).clamped(to: 0...100)
+    }
+
+    private func scheduleVolumeBinding(_ id: UUID) -> Binding<Int> {
+        Binding(
+            get: {
+                let value = control.action.schedules?.first(where: { $0.id == id })?.value ?? control.action.value
+                return Int((Double(value) / 255 * 100).rounded()).clamped(to: 0...100)
+            },
+            set: { percentage in
+                updateSchedule(id) { $0.value = Int((Double(percentage) / 100 * 255).rounded()) }
+            }
+        )
+    }
+
+    private func scheduleTemperature(_ entry: RemoteScheduleEntry) -> Int {
+        temperatureUnit.displayValue(celsiusTenths: entry.valueTenths ?? control.action.valueTenths ?? control.action.value * 10)
+    }
+
+    private func scheduleTemperatureBinding(_ id: UUID) -> Binding<Int> {
+        Binding(
+            get: {
+                let entry = control.action.schedules?.first(where: { $0.id == id })
+                return temperatureUnit.displayValue(
+                    celsiusTenths: entry?.valueTenths ?? control.action.valueTenths ?? control.action.value * 10
+                )
+            },
+            set: { displayValue in
+                let tenths = min(max(temperatureUnit.celsiusTenthsValue(displayValue: displayValue), 160), 300)
+                updateSchedule(id) {
+                    $0.valueTenths = tenths
+                    $0.value = Int((Double(tenths) / 10).rounded())
+                }
             }
         )
     }
@@ -997,6 +1351,20 @@ private struct ControlInspector: View {
         )
     }
 
+    private var mediaCommandBinding: Binding<String> {
+        Binding(
+            get: { control.action.text },
+            set: { command in
+                control.action.text = command
+                guard command == "playPause" else { return }
+                control.title = "Play / Pause"
+                control.symbol = "playpause.fill"
+                control.iconBitmap = nil
+                control.isToggle = nil
+            }
+        )
+    }
+
     private var openTargetBinding: Binding<String> {
         Binding(
             get: { control.action.text },
@@ -1083,6 +1451,9 @@ private struct ControlInspector: View {
                 switch type {
                 case .macMedia:
                     control.action = RemoteAction(type: type, text: "playPause", computerID: computerID)
+                    control.title = "Play / Pause"
+                    control.symbol = "playpause.fill"
+                    control.isToggle = nil
                 case .macKey:
                     control.action = RemoteAction(type: type, text: "space", computerID: computerID)
                 case .macOpen:
