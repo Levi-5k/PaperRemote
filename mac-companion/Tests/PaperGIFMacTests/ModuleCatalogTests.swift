@@ -30,7 +30,7 @@ final class ModuleCatalogTests: XCTestCase {
         )
 
         XCTAssertEqual(module.id, "openbuilds-control")
-        XCTAssertEqual(module.controls.count, 12)
+        XCTAssertEqual(module.controls.count, 16)
         XCTAssertTrue(module.controls.allSatisfy { $0.control.action.type == .openBuilds })
     }
 }

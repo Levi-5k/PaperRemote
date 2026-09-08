@@ -6,6 +6,7 @@ struct OpenBuildsEmission: Equatable {
         case boolean(Bool)
         case integer(Int)
         case string(String)
+        case jogXY(x: Int, y: Int, feed: Int)
         case stop(stop: Bool, jog: Bool, abort: Bool)
     }
 
@@ -22,6 +23,10 @@ enum OpenBuildsCommandMapper {
         case "jogYPositive": jog(axis: "Y", direction: 1, distance: value, feed: 1_000)
         case "jogZNegative": jog(axis: "Z", direction: -1, distance: value, feed: 500)
         case "jogZPositive": jog(axis: "Z", direction: 1, distance: value, feed: 500)
+        case "jogXNegativeYNegative": jogXY(xDirection: -1, yDirection: -1, distance: value)
+        case "jogXNegativeYPositive": jogXY(xDirection: -1, yDirection: 1, distance: value)
+        case "jogXPositiveYNegative": jogXY(xDirection: 1, yDirection: -1, distance: value)
+        case "jogXPositiveYPositive": jogXY(xDirection: 1, yDirection: 1, distance: value)
         case "pause": OpenBuildsEmission(event: "pause", payload: .boolean(true))
         case "resume": OpenBuildsEmission(event: "resume", payload: .boolean(true))
         case "stop": OpenBuildsEmission(event: "stop", payload: .stop(stop: true, jog: false, abort: false))
@@ -37,6 +42,14 @@ enum OpenBuildsCommandMapper {
         return OpenBuildsEmission(
             event: "jog",
             payload: .string("\(axis),\(direction * distance),\(feed)")
+        )
+    }
+
+    private static func jogXY(xDirection: Int, yDirection: Int, distance: Int) -> OpenBuildsEmission? {
+        guard (1...100).contains(distance) else { return nil }
+        return OpenBuildsEmission(
+            event: "jogXY",
+            payload: .jogXY(x: xDirection * distance, y: yDirection * distance, feed: 1_000)
         )
     }
 }
@@ -136,6 +149,8 @@ final class OpenBuildsControlService {
             case let .boolean(value): socket.emit(emission.event, value, completion: completion)
             case let .integer(value): socket.emit(emission.event, value, completion: completion)
             case let .string(value): socket.emit(emission.event, value, completion: completion)
+            case let .jogXY(x, y, feed):
+                socket.emit(emission.event, ["x": x, "y": y, "feed": feed], completion: completion)
             case let .stop(stop, jog, abort):
                 socket.emit(
                     emission.event,

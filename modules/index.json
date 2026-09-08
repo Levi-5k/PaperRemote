@@ -13,7 +13,7 @@
       "id": "openbuilds-control",
       "name": "OpenBuilds CONTROL",
       "summary": "Local CNC jogging and run-state controls for OpenBuilds CONTROL.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "paperGIF",
       "manifest": "openbuilds-control.json"
     }

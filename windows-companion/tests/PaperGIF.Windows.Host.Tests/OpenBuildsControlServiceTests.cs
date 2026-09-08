@@ -18,6 +18,10 @@ public sealed class OpenBuildsControlServiceTests
         Assert.Equal(
             new OpenBuildsEmission("runCommand", OpenBuildsPayloadKind.String, StringValue: "$H\n"),
             OpenBuildsCommandMapper.Create("home", 0));
+        Assert.Equal(
+            new OpenBuildsEmission("jogXY", OpenBuildsPayloadKind.JogXY,
+                JogXYValue: new OpenBuildsJogXYPayload(-2, 2, 1_000)),
+            OpenBuildsCommandMapper.Create("jogXNegativeYPositive", 2));
     }
 
     [Fact]
@@ -26,6 +30,7 @@ public sealed class OpenBuildsControlServiceTests
         Assert.Null(OpenBuildsCommandMapper.Create("runCommand", 1));
         Assert.Null(OpenBuildsCommandMapper.Create("jogXPositive", 0));
         Assert.Null(OpenBuildsCommandMapper.Create("jogXPositive", 101));
+        Assert.Null(OpenBuildsCommandMapper.Create("jogXPositiveYPositive", 101));
     }
 
     [Fact]

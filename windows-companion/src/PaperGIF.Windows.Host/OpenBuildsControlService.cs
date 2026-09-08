@@ -12,6 +12,7 @@ internal enum OpenBuildsPayloadKind
     Boolean,
     Integer,
     String,
+    JogXY,
     Stop,
 }
 
@@ -20,12 +21,18 @@ internal sealed record OpenBuildsStopPayload(
     [property: JsonPropertyName("jog")] bool Jog,
     [property: JsonPropertyName("abort")] bool Abort);
 
+internal sealed record OpenBuildsJogXYPayload(
+    [property: JsonPropertyName("x")] int X,
+    [property: JsonPropertyName("y")] int Y,
+    [property: JsonPropertyName("feed")] int Feed);
+
 internal sealed record OpenBuildsEmission(
     string Event,
     OpenBuildsPayloadKind Kind,
     bool BooleanValue = false,
     int IntegerValue = 0,
     string? StringValue = null,
+    OpenBuildsJogXYPayload? JogXYValue = null,
     OpenBuildsStopPayload? StopValue = null);
 
 internal static class OpenBuildsCommandMapper
@@ -38,6 +45,10 @@ internal static class OpenBuildsCommandMapper
         "jogYPositive" => Jog("Y", 1, value, 1_000),
         "jogZNegative" => Jog("Z", -1, value, 500),
         "jogZPositive" => Jog("Z", 1, value, 500),
+        "jogXNegativeYNegative" => JogXY(-1, -1, value),
+        "jogXNegativeYPositive" => JogXY(-1, 1, value),
+        "jogXPositiveYNegative" => JogXY(1, -1, value),
+        "jogXPositiveYPositive" => JogXY(1, 1, value),
         "pause" => new("pause", OpenBuildsPayloadKind.Boolean, BooleanValue: true),
         "resume" => new("resume", OpenBuildsPayloadKind.Boolean, BooleanValue: true),
         "stop" => new("stop", OpenBuildsPayloadKind.Stop,
@@ -53,6 +64,15 @@ internal static class OpenBuildsCommandMapper
         distance is >= 1 and <= 100
             ? new("jog", OpenBuildsPayloadKind.String,
                 StringValue: $"{axis},{direction * distance},{feed}")
+            : null;
+
+    private static OpenBuildsEmission? JogXY(int xDirection, int yDirection, int distance) =>
+        distance is >= 1 and <= 100
+            ? new("jogXY", OpenBuildsPayloadKind.JogXY,
+                JogXYValue: new OpenBuildsJogXYPayload(
+                    xDirection * distance,
+                    yDirection * distance,
+                    1_000))
             : null;
 }
 
@@ -164,6 +184,9 @@ internal sealed class OpenBuildsControlService
                     break;
                 case OpenBuildsPayloadKind.String:
                     await client.EmitAsync(emission.Event, emission.StringValue!);
+                    break;
+                case OpenBuildsPayloadKind.JogXY:
+                    await client.EmitAsync(emission.Event, emission.JogXYValue!);
                     break;
                 case OpenBuildsPayloadKind.Stop:
                     await client.EmitAsync(emission.Event, emission.StopValue!);

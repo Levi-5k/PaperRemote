@@ -4,7 +4,7 @@
   "id": "openbuilds-control",
   "name": "OpenBuilds CONTROL",
   "summary": "Local CNC jogging and run-state controls for OpenBuilds CONTROL.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "paperGIF",
   "controls": [
     {
@@ -83,6 +83,58 @@
         "tintHex": "197278",
         "kind": "button",
         "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogZPositive", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-x-negative-y-negative",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog X and Y by -1 mm",
+      "control": {
+        "id": "fbce913c-8575-40bd-9dbc-52618727d39a",
+        "title": "X-/Y-",
+        "symbol": "arrow.down.left",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegativeYNegative", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-x-negative-y-positive",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog X by -1 mm and Y by +1 mm",
+      "control": {
+        "id": "8ecce93a-e282-4b36-a5a0-7a70bb9a0afa",
+        "title": "X-/Y+",
+        "symbol": "arrow.up.left",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegativeYPositive", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-x-positive-y-negative",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog X by +1 mm and Y by -1 mm",
+      "control": {
+        "id": "3442defb-e637-403d-87fd-0db2d50ceebd",
+        "title": "X+/Y-",
+        "symbol": "arrow.down.right",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositiveYNegative", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "jog-x-positive-y-positive",
+      "category": "OpenBuilds Jog",
+      "detail": "Jog X and Y by +1 mm",
+      "control": {
+        "id": "5ce19f5f-75c3-44b5-bd6c-ef2622565189",
+        "title": "X+/Y+",
+        "symbol": "arrow.up.right",
+        "tintHex": "197278",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositiveYPositive", "value": 1, "modifiers": [] }
       }
     },
     {

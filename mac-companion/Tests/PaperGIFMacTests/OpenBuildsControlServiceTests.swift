@@ -15,12 +15,17 @@ final class OpenBuildsControlServiceTests: XCTestCase {
             OpenBuildsCommandMapper.emission(command: "home", value: 0),
             OpenBuildsEmission(event: "runCommand", payload: .string("$H\n"))
         )
+        XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(command: "jogXNegativeYPositive", value: 2),
+            OpenBuildsEmission(event: "jogXY", payload: .jogXY(x: -2, y: 2, feed: 1_000))
+        )
     }
 
     func testRejectsUnknownCommandsAndUnsafeJogDistances() {
         XCTAssertNil(OpenBuildsCommandMapper.emission(command: "runCommand", value: 1))
         XCTAssertNil(OpenBuildsCommandMapper.emission(command: "jogXPositive", value: 0))
         XCTAssertNil(OpenBuildsCommandMapper.emission(command: "jogXPositive", value: 101))
+        XCTAssertNil(OpenBuildsCommandMapper.emission(command: "jogXPositiveYPositive", value: 101))
     }
 
     func testBuildsOnlyLocalNetworkTargets() {

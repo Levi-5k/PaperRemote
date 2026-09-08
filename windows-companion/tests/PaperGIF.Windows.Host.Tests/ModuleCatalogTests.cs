@@ -35,7 +35,7 @@ public sealed class ModuleCatalogTests
 
         Assert.NotNull(module);
         Assert.Equal("openbuilds-control", module.Id);
-        Assert.Equal(12, module.Controls.Count);
+        Assert.Equal(16, module.Controls.Count);
         Assert.All(module.Controls, definition =>
             Assert.Equal(PaperGIF.Windows.Core.Models.RemoteActionType.OpenBuilds, definition.Control.Action.Type));
     }

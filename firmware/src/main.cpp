@@ -3919,7 +3919,26 @@ void drawRemoteControlIcon(
                 foreground);
         }
     } else if (strncmp(symbol, "arrow.", 6) == 0) {
-        if (strcmp(symbol, "arrow.up") == 0 || strcmp(symbol, "arrow.down") == 0) {
+        const bool diagonal = strcmp(symbol, "arrow.up.left") == 0 ||
+            strcmp(symbol, "arrow.up.right") == 0 ||
+            strcmp(symbol, "arrow.down.left") == 0 ||
+            strcmp(symbol, "arrow.down.right") == 0;
+        if (diagonal) {
+            const int32_t directionX = strstr(symbol, ".left") != nullptr ? -1 : 1;
+            const int32_t directionY = strstr(symbol, ".up.") != nullptr ? -1 : 1;
+            const int32_t tipX = centerX + directionX * half;
+            const int32_t tipY = centerY + directionY * half;
+            const int32_t baseX = tipX - directionX * quarter;
+            const int32_t baseY = tipY - directionY * quarter;
+            M5.Display.drawLine(
+                centerX - directionX * half,
+                centerY - directionY * half,
+                tipX,
+                tipY,
+                foreground);
+            M5.Display.drawLine(tipX, tipY, baseX - directionY * quarter, baseY + directionX * quarter, foreground);
+            M5.Display.drawLine(tipX, tipY, baseX + directionY * quarter, baseY - directionX * quarter, foreground);
+        } else if (strcmp(symbol, "arrow.up") == 0 || strcmp(symbol, "arrow.down") == 0) {
             const int32_t direction = strcmp(symbol, "arrow.up") == 0 ? -1 : 1;
             const int32_t tipY = centerY + direction * half;
             M5.Display.drawFastVLine(centerX, centerY - half, size + 1, foreground);

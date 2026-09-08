@@ -76,8 +76,10 @@ actions. Capability metadata will determine which actions each host presents.
 `openBuilds` is a desktop-hosted integration with OpenBuilds CONTROL. `host`
 contains a loopback or private-LAN address with an optional port, `text` is one
 of `jogXNegative`, `jogXPositive`, `jogYNegative`, `jogYPositive`,
-`jogZNegative`, `jogZPositive`, `pause`, `resume`, `stop`, `abort`, `unlock`, or
-`home`, and `value` is a 1-100 mm distance for jog commands. Companions probe
+`jogZNegative`, `jogZPositive`, `jogXNegativeYNegative`,
+`jogXNegativeYPositive`, `jogXPositiveYNegative`, `jogXPositiveYPositive`,
+`pause`, `resume`, `stop`, `abort`, `unlock`, or `home`, and `value` is a 1-100
+mm per-axis distance for jog commands. Companions probe
 CONTROL's `/api/version` endpoint before emitting an allowlisted Socket.IO
 event; arbitrary G-code is not accepted.
 
