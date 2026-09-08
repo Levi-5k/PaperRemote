@@ -64,24 +64,24 @@ internal sealed class RemoteEditorStore : IDisposable
         Commit();
     }
 
-    public string? ValidationMessage
+    public string? ValidationMessage => ValidateProfile(Profile);
+
+    internal static string? ValidateProfile(RemoteProfile profile)
     {
-        get
+        if (profile.Pages.Count is < 1 or > 8)
         {
-            if (Profile.Pages.Count is < 1 or > 8)
-            {
-                return "A remote needs between 1 and 8 pages.";
-            }
-            if (Profile.Pages.Any(page => page.Controls.Count > 16 || LayoutUnits(page) > 16))
-            {
-                return "A page has more controls than fit on the display.";
-            }
-            if (Profile.Pages.Any(page => string.IsNullOrWhiteSpace(page.Name)))
-            {
-                return "Every page needs a name.";
-            }
-            return null;
+            return "A remote needs between 1 and 8 pages.";
         }
+        if (profile.Pages.Any(page =>
+            page.Controls.Count > 16 || LayoutUnits(page) > page.GridColumns * page.GridRows))
+        {
+            return "A page has more controls than fit on the display.";
+        }
+        if (profile.Pages.Any(page => string.IsNullOrWhiteSpace(page.Name)))
+        {
+            return "Every page needs a name.";
+        }
+        return null;
     }
 
     public void AddPage()
