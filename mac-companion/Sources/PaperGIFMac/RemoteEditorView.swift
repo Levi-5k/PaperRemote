@@ -227,6 +227,12 @@ private struct RemoteEditorView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if let gridColumnsBinding, let gridRowsBinding {
+                    Stepper("\(gridColumnsBinding.wrappedValue) cols", value: gridColumnsBinding, in: 1...12)
+                        .fixedSize()
+                    Stepper("\(gridRowsBinding.wrappedValue) rows", value: gridRowsBinding, in: 1...16)
+                        .fixedSize()
+                }
                 if let count = selectedPage?.controls.count {
                     Text("\(count) / 16")
                         .font(.caption.monospacedDigit())
@@ -283,6 +289,8 @@ private struct RemoteEditorView: View {
                     discovery: discovery,
                     canUseButtonLayout: store.canChangeSelectedControl(to: .button),
                     canUseTextBoxLayout: store.canChangeSelectedControl(to: .textBox),
+                    gridColumns: selectedPage?.gridColumns ?? 2,
+                    gridRows: selectedPage?.gridRows ?? 8,
                     canMoveEarlier: (store.selectedControlLocation?.control ?? 0) > 0,
                     canMoveLater: store.selectedControlLocation.map {
                         $0.control < store.profile.pages[$0.page].controls.count - 1
@@ -317,6 +325,22 @@ private struct RemoteEditorView: View {
         return Binding(
             get: { store.profile.pages[index].name },
             set: { store.profile.pages[index].name = $0 }
+        )
+    }
+
+    private var gridColumnsBinding: Binding<Int>? {
+        guard let index = store.selectedPageIndex else { return nil }
+        return Binding(
+            get: { store.profile.pages[index].gridColumns },
+            set: { store.profile.pages[index].gridColumns = $0 }
+        )
+    }
+
+    private var gridRowsBinding: Binding<Int>? {
+        guard let index = store.selectedPageIndex else { return nil }
+        return Binding(
+            get: { store.profile.pages[index].gridRows },
+            set: { store.profile.pages[index].gridRows = $0 }
         )
     }
 }
@@ -549,6 +573,8 @@ private struct ControlInspector: View {
     @ObservedObject var discovery: WLEDDiscovery
     let canUseButtonLayout: Bool
     let canUseTextBoxLayout: Bool
+    let gridColumns: Int
+    let gridRows: Int
     let canMoveEarlier: Bool
     let canMoveLater: Bool
     let onMoveEarlier: () -> Void
@@ -595,15 +621,11 @@ private struct ControlInspector: View {
                         }
                         .labelsHidden()
                     }
-                    if control.kind == .button {
-                        LabeledContent("Height") {
-                            Picker("", selection: buttonHeightBinding) {
-                                Text("1 Row").tag(1)
-                                Text("2 Rows").tag(2)
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                        }
+                    Stepper(value: controlGridWidthBinding, in: 1...gridColumns) {
+                        Text("Width: \(control.gridSpan(columns: gridColumns, rows: gridRows).width) column(s)")
+                    }
+                    Stepper(value: controlGridHeightBinding, in: 1...gridRows) {
+                        Text("Height: \(control.gridSpan(columns: gridColumns, rows: gridRows).height) row(s)")
                     }
                     Toggle("Toggle button", isOn: toggleButtonBinding)
                         .disabled(control.kind != .button)
@@ -709,12 +731,6 @@ private struct ControlInspector: View {
         }
 
         section("TEXT LAYOUT") {
-            Stepper(value: textBoxBinding(\.gridWidth), in: 1...2) {
-                Text("Width: \(control.textBox?.gridWidth ?? 2) column(s)")
-            }
-            Stepper(value: textBoxBinding(\.gridHeight), in: 1...8) {
-                Text("Height: \(control.textBox?.gridHeight ?? 1) row(s)")
-            }
             LabeledContent("Text size") {
                 Picker("", selection: textBoxBinding(\.textSize)) {
                     Text("Small").tag(RemoteTextSize.small)
@@ -1594,6 +1610,20 @@ private struct ControlInspector: View {
         )
     }
 
+    private var controlGridWidthBinding: Binding<Int> {
+        Binding(
+            get: { control.gridSpan(columns: gridColumns, rows: gridRows).width },
+            set: { control.gridWidth = $0 }
+        )
+    }
+
+    private var controlGridHeightBinding: Binding<Int> {
+        Binding(
+            get: { control.gridSpan(columns: gridColumns, rows: gridRows).height },
+            set: { control.gridHeight = $0 }
+        )
+    }
+
     private var toggleButtonBinding: Binding<Bool> {
         Binding(
             get: { control.isToggle == true },
@@ -1718,7 +1748,7 @@ private struct DevicePreview: View {
                                     x: frame.midX + drag.translation.width / scale,
                                     y: frame.midY + drag.translation.height / scale
                                 )
-                                guard let slot = RemoteLayout.slot(at: point) else { return }
+                                guard let slot = RemoteLayout.slot(at: point, page: page) else { return }
                                 onMove(control.id, slot)
                             })
                     }
@@ -1994,66 +2024,51 @@ private func remoteBitmapMaskImage(_ hex: String?) -> CGImage? {
 
 private enum RemoteLayout {
     static func frames(for page: RemotePage) -> [CGRect] {
-        if page.layout == .openBuildsController {
-            return page.controls.prefix(16).map { control in
-                if control.kind == .textBox,
-                   let axis = control.textBox?.sourceText.split(separator: "|").last?.lowercased(),
-                   let column = ["x", "y", "z"].firstIndex(of: axis) {
-                    return CGRect(x: 24 + column * 168, y: 142, width: 156, height: 70)
-                }
-                let command = control.action.text
-                    .replacingOccurrences(of: "continuousJog", with: "")
-                    .replacingOccurrences(of: "jog", with: "")
-                let positions: [String: (Int, Int)] = [
-                    "XNegativeYPositive": (0, 0), "YPositive": (0, 1),
-                    "XPositiveYPositive": (0, 2), "XNegative": (1, 0),
-                    "XPositive": (1, 2), "XNegativeYNegative": (2, 0),
-                    "YNegative": (2, 1), "XPositiveYNegative": (2, 2),
-                ]
-                guard let (row, column) = positions[command] else { return .zero }
-                return CGRect(x: 24 + column * 108, y: 246 + row * 108, width: 96, height: 96)
-            }
-        }
         let controls = Array(page.controls.prefix(16))
         var occupied: Set<Int> = []
         var frames = Array(repeating: CGRect.zero, count: controls.count)
         var placed = Array(repeating: false, count: controls.count)
 
         func place(_ index: Int, slot: Int) -> Bool {
-            guard let placement = RemoteGrid.placement(for: controls[index], at: slot) else { return false }
-            let cells = RemoteGrid.cells(for: placement)
+            guard let placement = RemoteGrid.placement(
+                for: controls[index], at: slot,
+                columns: page.gridColumns, rows: page.gridRows
+            ) else { return false }
+            let cells = RemoteGrid.cells(for: placement, columns: page.gridColumns)
             guard occupied.isDisjoint(with: cells) else { return false }
             occupied.formUnion(cells)
-            let row = placement.slot / 2
-            let column = placement.slot % 2
+            let row = placement.slot / page.gridColumns
+            let column = placement.slot % page.gridColumns
             frames[index] = CGRect(
-                x: 24 + CGFloat(column) * 252,
-                y: 142 + CGFloat(row) * 89,
-                width: CGFloat(240 * placement.span.width + 12 * (placement.span.width - 1)),
-                height: CGFloat(77 * placement.span.height + 12 * (placement.span.height - 1))
+                x: 24 + CGFloat(column) * 504 / CGFloat(page.gridColumns),
+                y: 142 + CGFloat(row) * 712 / CGFloat(page.gridRows),
+                width: CGFloat(placement.span.width) * 504 / CGFloat(page.gridColumns) - 12,
+                height: CGFloat(placement.span.height) * 712 / CGFloat(page.gridRows) - 12
             )
             placed[index] = true
             return true
         }
 
         for index in controls.indices {
-            if let slot = controls[index].layoutSlot, (0..<16).contains(slot) {
+                if let slot = controls[index].layoutSlot,
+                    (0..<(page.gridColumns * page.gridRows)).contains(slot) {
                 _ = place(index, slot: slot)
             }
         }
         for index in controls.indices where !placed[index] {
-            for slot in 0..<16 where !placed[index] {
+            for slot in 0..<(page.gridColumns * page.gridRows) where !placed[index] {
                 _ = place(index, slot: slot)
             }
         }
         return frames
     }
 
-    static func slot(at point: CGPoint) -> Int? {
-        let column = Int((point.x - 24) / 252)
-        let row = Int((point.y - 142) / 89)
-        guard (0..<2).contains(column), (0..<8).contains(row) else { return nil }
-        return row * 2 + column
+    static func slot(at point: CGPoint, page: RemotePage) -> Int? {
+        let column = Int((point.x - 24) * CGFloat(page.gridColumns) / 504)
+        let row = Int((point.y - 142) * CGFloat(page.gridRows) / 712)
+        guard (0..<page.gridColumns).contains(column),
+              (0..<page.gridRows).contains(row) else { return nil }
+        return row * page.gridColumns + column
     }
 }
 

@@ -31,6 +31,17 @@ credentials in protocol fixtures.
 6. A fixture change is incomplete until Mac, iPhone, Windows, and firmware
    contract tests agree on it.
 
+## Remote Page Layout
+
+Pages may set `gridColumns` from 1 through 12 and `gridRows` from 1 through 16.
+Each control may set `layoutSlot`, `gridWidth`, and `gridHeight`; slots are
+zero-based in row-major order. Profiles that omit these fields retain the
+legacy 2-column by 8-row layout and legacy control sizing.
+
+The OpenBuilds controller template uses a 9-column by 14-row grid. Readers
+migrate older OpenBuilds controller pages that lack explicit grid metadata to
+that layout without changing controller pages that already specify a grid.
+
 ## Validation
 
 ```sh

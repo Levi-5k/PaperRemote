@@ -3,7 +3,7 @@ using PaperGIF.Windows.Core.Models;
 
 namespace PaperGIF.Windows.Host;
 
-internal sealed class ControlProperties(RemoteControl control, RemoteEditorStore store)
+internal sealed class ControlProperties(RemoteControl control, RemotePage page, RemoteEditorStore store)
 {
     [Category("Appearance")]
     public string Title { get => control.Title; set { control.Title = value; store.Commit(); } }
@@ -34,11 +34,44 @@ internal sealed class ControlProperties(RemoteControl control, RemoteEditorStore
     [Category("Layout"), DisplayName("Button height")]
     public int ButtonHeight { get => control.ButtonHeight ?? 2; set { control.ButtonHeight = Math.Clamp(value, 1, 2); store.Commit(); } }
 
+    [Category("Layout"), DisplayName("Width (columns)")]
+    public int ControlGridWidth
+    {
+        get => control.GridWidth ?? (control.Kind == RemoteControlKind.TextBox ? control.TextBox?.GridWidth ?? 2 : 1);
+        set { control.GridWidth = Math.Clamp(value, 1, page.GridColumns); store.Commit(); }
+    }
+
+    [Category("Layout"), DisplayName("Height (rows)")]
+    public int ControlGridHeight
+    {
+        get => control.GridHeight ?? (control.Kind switch
+        {
+            RemoteControlKind.Slider => 1,
+            RemoteControlKind.TextBox => control.TextBox?.GridHeight ?? 1,
+            _ => control.ButtonHeight ?? 2,
+        });
+        set { control.GridHeight = Math.Clamp(value, 1, page.GridRows); store.Commit(); }
+    }
+
+    [Category("Page grid"), DisplayName("Columns")]
+    public int PageGridColumns
+    {
+        get => page.GridColumns;
+        set { page.GridColumns = Math.Clamp(value, 1, 12); store.Commit(); }
+    }
+
+    [Category("Page grid"), DisplayName("Rows")]
+    public int PageGridRows
+    {
+        get => page.GridRows;
+        set { page.GridRows = Math.Clamp(value, 1, 16); store.Commit(); }
+    }
+
     [Category("Layout"), DisplayName("Grid slot (-1 for automatic)")]
     public int LayoutSlot
     {
         get => control.LayoutSlot ?? -1;
-        set { control.LayoutSlot = value < 0 ? null : Math.Clamp(value, 0, 15); store.Commit(); }
+        set { control.LayoutSlot = value < 0 ? null : Math.Clamp(value, 0, page.GridColumns * page.GridRows - 1); store.Commit(); }
     }
 
     [Category("Action"), DisplayName("Type")]
@@ -150,12 +183,6 @@ internal sealed class ControlProperties(RemoteControl control, RemoteEditorStore
         get => TextBox.ComputerID?.ToString() ?? string.Empty;
         set { TextBox.ComputerID = Guid.TryParse(value, out var id) ? id : null; store.Commit(); }
     }
-
-    [Category("Text Box"), DisplayName("Grid width")]
-    public int GridWidth { get => TextBox.GridWidth; set { TextBox.GridWidth = Math.Clamp(value, 1, 2); store.Commit(); } }
-
-    [Category("Text Box"), DisplayName("Grid height")]
-    public int GridHeight { get => TextBox.GridHeight; set { TextBox.GridHeight = Math.Clamp(value, 1, 8); store.Commit(); } }
 
     [Category("Text Box"), DisplayName("Text size")]
     public RemoteTextSize TextSize { get => TextBox.TextSize; set { TextBox.TextSize = value; store.Commit(); } }

@@ -151,6 +151,8 @@ public sealed class RemoteControl
     public RemoteControlKind Kind { get; set; }
     public bool? IsToggle { get; set; }
     public int? ButtonHeight { get; set; }
+    public int? GridWidth { get; set; }
+    public int? GridHeight { get; set; }
     public RemoteAction Action { get; set; } = new();
     public int? LayoutSlot { get; set; }
     public RemoteTextBox? TextBox { get; set; }
@@ -161,6 +163,8 @@ public sealed class RemotePage
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = string.Empty;
     public List<RemoteControl> Controls { get; set; } = [];
+    public int GridColumns { get; set; } = 2;
+    public int GridRows { get; set; } = 8;
     public RemotePageLayout? Layout { get; set; }
     public OpenBuildsControllerSettings? OpenBuildsController { get; set; }
     public string? ModuleID { get; set; }

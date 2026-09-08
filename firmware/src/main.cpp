@@ -241,7 +241,7 @@ struct RemoteControl {
     bool slider = false;
     bool toggle = false;
     bool toggleOn = false;
-    int8_t layoutSlot = -1;
+    int16_t layoutSlot = -1;
     uint8_t gridWidth = 1;
     uint8_t gridHeight = 1;
     char textSource[20] = {};
@@ -310,6 +310,8 @@ struct RemoteTextNetworkResult {
 struct RemotePage {
     char id[40] = {};
     char name[32] = {};
+    uint8_t gridColumns = 2;
+    uint8_t gridRows = 8;
     bool openBuildsController = false;
     char openBuildsHost[64] = "127.0.0.1";
     uint16_t openBuildsJogSpeed = 1000;
@@ -627,6 +629,7 @@ void displayRemote();
 void displayRemoteProfileChanges(const RemoteProfile& previousProfile, uint8_t previousPageIndex);
 void redrawRemoteTextBox(RemotePage& page, uint8_t controlIndex);
 void syncOpenBuildsControllerActions(RemotePage& page);
+void upgradeLegacyOpenBuildsGrid(RemotePage& page);
 void connectHomeWifi();
 bool dispatchRemoteAction(
     RemoteControl& control,
@@ -1283,6 +1286,9 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
         RemotePage& page = output.pages[output.pageCount];
         strlcpy(page.id, pageJson["id"] | "", sizeof(page.id));
         strlcpy(page.name, pageJson["name"] | "Remote", sizeof(page.name));
+        const bool hasFlexibleGrid = !pageJson["gridColumns"].isNull();
+        page.gridColumns = constrain(pageJson["gridColumns"] | 2, 1, 12);
+        page.gridRows = constrain(pageJson["gridRows"] | 8, 1, 16);
         page.openBuildsController = strcmp(pageJson["layout"] | "", "openBuildsController") == 0;
         if (page.openBuildsController) {
             JsonObject controllerJson = pageJson["openBuildsController"];
@@ -1310,11 +1316,17 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
             control.kind = strcmp(kind, "slider") == 0 ? 1 : strcmp(kind, "textBox") == 0 ? 2 : 0;
             control.slider = control.kind == 1;
             control.toggle = control.kind == 0 && (controlJson["isToggle"] | false);
-            control.layoutSlot = constrain(controlJson["layoutSlot"] | -1, -1, 15);
+            control.layoutSlot = constrain(
+                controlJson["layoutSlot"] | -1, -1,
+                static_cast<int>(page.gridColumns * page.gridRows - 1));
             if (control.kind == 2) {
                 JsonObject textBoxJson = controlJson["textBox"];
-                control.gridWidth = constrain(textBoxJson["gridWidth"] | 2, 1, 2);
-                control.gridHeight = constrain(textBoxJson["gridHeight"] | 1, 1, 8);
+                control.gridWidth = constrain(
+                    controlJson["gridWidth"] | (textBoxJson["gridWidth"] | 2),
+                    1, page.gridColumns);
+                control.gridHeight = constrain(
+                    controlJson["gridHeight"] | (textBoxJson["gridHeight"] | 1),
+                    1, page.gridRows);
                 strlcpy(control.textSource, textBoxJson["source"] | "staticText", sizeof(control.textSource));
                 strlcpy(control.sourceText, textBoxJson["sourceText"] | "Text", sizeof(control.sourceText));
                 strlcpy(control.referencedControlId,
@@ -1344,9 +1356,11 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
                 control.refreshIntervalMs = refreshSeconds == 0
                     ? 0 : constrain(refreshSeconds, 1UL, 3600UL) * 1000UL;
             } else {
-                control.gridWidth = 1;
-                control.gridHeight = control.slider
+                control.gridWidth = constrain(controlJson["gridWidth"] | 1, 1, page.gridColumns);
+                const int legacyHeight = control.slider
                     ? 1 : constrain(controlJson["buttonHeight"] | 2, 1, 2);
+                control.gridHeight = constrain(
+                    controlJson["gridHeight"] | legacyHeight, 1, page.gridRows);
             }
             JsonObject actionJson = controlJson["action"];
             strlcpy(control.action.type, actionJson["type"] | "", sizeof(control.action.type));
@@ -1408,6 +1422,9 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
             ++page.controlCount;
         }
         if (page.openBuildsController) {
+            if (!hasFlexibleGrid) {
+                upgradeLegacyOpenBuildsGrid(page);
+            }
             syncOpenBuildsControllerActions(page);
         }
         ++output.pageCount;
@@ -1422,6 +1439,37 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     restoreRemoteToggleStates(output);
     output.configured = true;
     return true;
+}
+
+void upgradeLegacyOpenBuildsGrid(RemotePage& page) {
+    page.gridColumns = 9;
+    page.gridRows = 14;
+    for (uint8_t index = 0; index < page.controlCount; ++index) {
+        RemoteControl& control = page.controls[index];
+        if (strcmp(control.textSource, "openBuildsPosition") == 0) {
+            const char* separator = strrchr(control.sourceText, '|');
+            const char axis = separator != nullptr ? separator[1] : 'x';
+            control.layoutSlot = axis == 'y' ? 3 : axis == 'z' ? 6 : 0;
+            control.gridWidth = 3;
+            control.gridHeight = 2;
+            continue;
+        }
+        const char* command = control.action.text;
+        const char* direction = strncmp(command, "continuousJog", 13) == 0
+            ? command + 13 : strncmp(command, "jog", 3) == 0 ? command + 3 : nullptr;
+        if (direction == nullptr) continue;
+        if (strcmp(direction, "XNegativeYPositive") == 0) control.layoutSlot = 18;
+        else if (strcmp(direction, "YPositive") == 0) control.layoutSlot = 20;
+        else if (strcmp(direction, "XPositiveYPositive") == 0) control.layoutSlot = 22;
+        else if (strcmp(direction, "XNegative") == 0) control.layoutSlot = 36;
+        else if (strcmp(direction, "XPositive") == 0) control.layoutSlot = 40;
+        else if (strcmp(direction, "XNegativeYNegative") == 0) control.layoutSlot = 54;
+        else if (strcmp(direction, "YNegative") == 0) control.layoutSlot = 56;
+        else if (strcmp(direction, "XPositiveYNegative") == 0) control.layoutSlot = 58;
+        else continue;
+        control.gridWidth = 2;
+        control.gridHeight = 2;
+    }
 }
 
 void syncOpenBuildsControllerActions(RemotePage& page) {
@@ -3759,48 +3807,12 @@ struct RemoteControlFrame {
 };
 
 bool remoteControlFrame(const RemotePage& page, size_t targetIndex, RemoteControlFrame& frame) {
-    if (page.openBuildsController && targetIndex < page.controlCount) {
-        const RemoteControl& control = page.controls[targetIndex];
-        if (strcmp(control.textSource, "openBuildsPosition") == 0) {
-            const char* separator = strrchr(control.sourceText, '|');
-            const char axis = separator != nullptr ? separator[1] : '\0';
-            const int32_t column = axis == 'x' ? 0 : axis == 'y' ? 1 : axis == 'z' ? 2 : -1;
-            if (column >= 0) {
-                frame = {24 + column * 168, 142, 156, 70};
-                return true;
-            }
-        }
-        if (strcmp(control.action.type, "openBuilds") == 0) {
-            const char* command = control.action.text;
-            const char* direction = nullptr;
-            if (strncmp(command, "continuousJog", 13) == 0) {
-                direction = command + 13;
-            } else if (strncmp(command, "jog", 3) == 0) {
-                direction = command + 3;
-            }
-            int8_t row = -1;
-            int8_t column = -1;
-            if (direction != nullptr && strcmp(direction, "XNegativeYPositive") == 0) { row = 0; column = 0; }
-            else if (direction != nullptr && strcmp(direction, "YPositive") == 0) { row = 0; column = 1; }
-            else if (direction != nullptr && strcmp(direction, "XPositiveYPositive") == 0) { row = 0; column = 2; }
-            else if (direction != nullptr && strcmp(direction, "XNegative") == 0) { row = 1; column = 0; }
-            else if (direction != nullptr && strcmp(direction, "XPositive") == 0) { row = 1; column = 2; }
-            else if (direction != nullptr && strcmp(direction, "XNegativeYNegative") == 0) { row = 2; column = 0; }
-            else if (direction != nullptr && strcmp(direction, "YNegative") == 0) { row = 2; column = 1; }
-            else if (direction != nullptr && strcmp(direction, "XPositiveYNegative") == 0) { row = 2; column = 2; }
-            if (row >= 0) {
-                frame = {24 + column * 108, 246 + row * 108, 96, 96};
-                return true;
-            }
-        }
-        return false;
-    }
     constexpr int32_t left = 24;
     constexpr int32_t top = 142;
     constexpr int32_t gap = 12;
-    constexpr int32_t width = 240;
-    constexpr int32_t halfHeight = 77;
-    bool occupied[8][2] = {};
+    constexpr int32_t availableWidth = 492;
+    constexpr int32_t availableHeight = 700;
+    bool occupied[16][12] = {};
     bool placed[kMaximumRemoteControls] = {};
     RemoteControlFrame frames[kMaximumRemoteControls] = {};
 
@@ -3808,10 +3820,11 @@ bool remoteControlFrame(const RemotePage& page, size_t targetIndex, RemoteContro
         const RemoteControl& control = page.controls[index];
         const uint8_t rowSpan = control.gridHeight;
         const uint8_t columnSpan = control.gridWidth;
-        if (columnSpan == 2) {
+        if (columnSpan == page.gridColumns) {
             column = 0;
         }
-        if (column >= 2 || column + columnSpan > 2 || row + rowSpan > 8) {
+        if (column >= page.gridColumns || column + columnSpan > page.gridColumns ||
+            row + rowSpan > page.gridRows) {
             return false;
         }
         for (uint8_t offset = 0; offset < rowSpan; ++offset) {
@@ -3827,18 +3840,18 @@ bool remoteControlFrame(const RemotePage& page, size_t targetIndex, RemoteContro
             }
         }
         frames[index] = {
-            left + column * (width + gap),
-            top + row * (halfHeight + gap),
-            width * columnSpan + gap * (columnSpan - 1),
-            halfHeight * rowSpan + gap * (rowSpan - 1)};
+            left + column * (availableWidth + gap) / page.gridColumns,
+            top + row * (availableHeight + gap) / page.gridRows,
+            columnSpan * (availableWidth + gap) / page.gridColumns - gap,
+            rowSpan * (availableHeight + gap) / page.gridRows - gap};
         placed[index] = true;
         return true;
     };
 
     for (size_t index = 0; index < page.controlCount; ++index) {
         const int8_t slot = page.controls[index].layoutSlot;
-        if (slot >= 0 && slot < 16) {
-            place(index, slot / 2, slot % 2);
+        if (slot >= 0 && slot < page.gridColumns * page.gridRows) {
+            place(index, slot / page.gridColumns, slot % page.gridColumns);
         }
     }
 
@@ -3846,8 +3859,8 @@ bool remoteControlFrame(const RemotePage& page, size_t targetIndex, RemoteContro
         if (placed[index]) {
             continue;
         }
-        for (uint8_t row = 0; row < 8 && !placed[index]; ++row) {
-            for (uint8_t column = 0; column < 2 && !placed[index]; ++column) {
+        for (uint8_t row = 0; row < page.gridRows && !placed[index]; ++row) {
+            for (uint8_t column = 0; column < page.gridColumns && !placed[index]; ++column) {
                 if (place(index, row, column)) {
                     break;
                 }

@@ -35,8 +35,15 @@ final class ModuleCatalogTests: XCTestCase {
         let definition = try XCTUnwrap(module.pages?.first)
         let page = ModuleCatalog.clonePage(definition, moduleID: module.id)
         XCTAssertEqual(page.layout, .openBuildsController)
+        XCTAssertEqual(page.gridColumns, 9)
+        XCTAssertEqual(page.gridRows, 14)
         XCTAssertEqual(page.openBuildsController?.jogMode, .incremental)
         XCTAssertEqual(page.controls.count, 11)
+        XCTAssertEqual(page.controls[0].gridSpan(columns: page.gridColumns, rows: page.gridRows),
+                   RemoteGridSpan(width: 3, height: 2))
+        XCTAssertEqual(page.controls[3].layoutSlot, 18)
+        XCTAssertEqual(page.controls[3].gridSpan(columns: page.gridColumns, rows: page.gridRows),
+                   RemoteGridSpan(width: 2, height: 2))
         XCTAssertEqual(page.moduleID, module.id)
         XCTAssertNotEqual(page.id, definition.page.id)
         XCTAssertTrue(zip(page.controls, definition.page.controls).allSatisfy { $0.id != $1.id })

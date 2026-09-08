@@ -144,7 +144,8 @@ internal sealed class RemoteEditorStore : IDisposable
     public bool AddControl(RemoteControl control)
     {
         var page = SelectedPage;
-        if (page is null || page.Controls.Count >= 16 || LayoutUnits(page) + LayoutUnits(control) > 16)
+        if (page is null || page.Controls.Count >= 16 ||
+            LayoutUnits(page) + LayoutUnits(control, page) > page.GridColumns * page.GridRows)
         {
             return false;
         }
@@ -208,21 +209,22 @@ internal sealed class RemoteEditorStore : IDisposable
     {
         var page = SelectedPage;
         var control = page?.Controls.FirstOrDefault(candidate => candidate.Id == controlId);
-        if (page is null || control is null || requestedSlot is < 0 or >= 16)
+        if (page is null || control is null ||
+            requestedSlot is < 0 || requestedSlot >= page.GridColumns * page.GridRows)
         {
             return;
         }
-        var destination = Placement(control, requestedSlot);
+        var destination = Placement(control, requestedSlot, page);
         if (destination is null)
         {
             return;
         }
-        var destinationCells = Cells(destination.Value);
+        var destinationCells = Cells(destination.Value, page.GridColumns);
         foreach (var candidate in page.Controls.Where(candidate => candidate.Id != controlId))
         {
             if (candidate.LayoutSlot is { } slot &&
-                Placement(candidate, slot) is { } placement &&
-                destinationCells.Overlaps(Cells(placement)))
+                Placement(candidate, slot, page) is { } placement &&
+                destinationCells.Overlaps(Cells(placement, page.GridColumns)))
             {
                 candidate.LayoutSlot = null;
             }
@@ -571,46 +573,50 @@ internal sealed class RemoteEditorStore : IDisposable
         ],
     };
 
-    private static int LayoutUnits(RemotePage page) => page.Controls.Sum(LayoutUnits);
+    private static int LayoutUnits(RemotePage page) => page.Controls.Sum(control => LayoutUnits(control, page));
 
-    private static int LayoutUnits(RemoteControl control) => control.Kind switch
+    private static int LayoutUnits(RemoteControl control, RemotePage page)
     {
-        RemoteControlKind.Slider => 1,
-        RemoteControlKind.Button => Math.Clamp(control.ButtonHeight ?? 2, 1, 2),
-        RemoteControlKind.TextBox =>
-            Math.Clamp(control.TextBox?.GridWidth ?? 2, 1, 2) *
-            Math.Clamp(control.TextBox?.GridHeight ?? 1, 1, 8),
-        _ => 2,
-    };
+        var (width, height) = Span(control, page);
+        return width * height;
+    }
 
-    private static GridPlacement? Placement(RemoteControl control, int requestedSlot)
+    private static (int Width, int Height) Span(RemoteControl control, RemotePage page)
     {
-        var width = control.Kind == RemoteControlKind.TextBox
+        var legacyWidth = control.Kind == RemoteControlKind.TextBox
             ? Math.Clamp(control.TextBox?.GridWidth ?? 2, 1, 2)
             : 1;
-        var height = control.Kind switch
+        var legacyHeight = control.Kind switch
         {
             RemoteControlKind.Slider => 1,
             RemoteControlKind.TextBox => Math.Clamp(control.TextBox?.GridHeight ?? 1, 1, 8),
             _ => Math.Clamp(control.ButtonHeight ?? 2, 1, 2),
         };
-        var row = requestedSlot / 2;
-        var column = width == 2 ? 0 : requestedSlot % 2;
-        return column + width <= 2 && row + height <= 8
-            ? new GridPlacement(row * 2 + column, width, height)
+        return (
+            Math.Clamp(control.GridWidth ?? legacyWidth, 1, page.GridColumns),
+            Math.Clamp(control.GridHeight ?? legacyHeight, 1, page.GridRows));
+    }
+
+    private static GridPlacement? Placement(RemoteControl control, int requestedSlot, RemotePage page)
+    {
+        var (width, height) = Span(control, page);
+        var row = requestedSlot / page.GridColumns;
+        var column = width == page.GridColumns ? 0 : requestedSlot % page.GridColumns;
+        return column + width <= page.GridColumns && row + height <= page.GridRows
+            ? new GridPlacement(row * page.GridColumns + column, width, height)
             : null;
     }
 
-    private static HashSet<int> Cells(GridPlacement placement)
+    private static HashSet<int> Cells(GridPlacement placement, int columns)
     {
         var cells = new HashSet<int>();
-        var row = placement.Slot / 2;
-        var column = placement.Slot % 2;
+        var row = placement.Slot / columns;
+        var column = placement.Slot % columns;
         for (var y = row; y < row + placement.Height; y++)
         {
             for (var x = column; x < column + placement.Width; x++)
             {
-                cells.Add(y * 2 + x);
+                cells.Add(y * columns + x);
             }
         }
         return cells;

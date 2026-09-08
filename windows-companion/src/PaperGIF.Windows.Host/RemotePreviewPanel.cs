@@ -53,9 +53,11 @@ internal sealed class RemotePreviewPanel : Control
             draggedControlId = null;
             return;
         }
-        var column = Math.Clamp((eventArgs.X - gridFrame.Left) * 2 / Math.Max(1, gridFrame.Width), 0, 1);
-        var row = Math.Clamp((eventArgs.Y - gridFrame.Top) * 8 / Math.Max(1, gridFrame.Height), 0, 7);
-        ControlMoved?.Invoke(this, new ControlMoveEventArgs(controlId, row * 2 + column));
+        var columns = Math.Clamp(page?.GridColumns ?? 2, 1, 12);
+        var rows = Math.Clamp(page?.GridRows ?? 8, 1, 16);
+        var column = Math.Clamp((eventArgs.X - gridFrame.Left) * columns / Math.Max(1, gridFrame.Width), 0, columns - 1);
+        var row = Math.Clamp((eventArgs.Y - gridFrame.Top) * rows / Math.Max(1, gridFrame.Height), 0, rows - 1);
+        ControlMoved?.Invoke(this, new ControlMoveEventArgs(controlId, row * columns + column));
         draggedControlId = null;
     }
 
@@ -135,51 +137,30 @@ internal sealed class RemotePreviewPanel : Control
             screen.Width - 20,
             screen.Height - headerHeight - footerHeight);
         gridFrame = grid;
-        DrawControls(graphics, grid, page.Controls);
+        DrawControls(graphics, grid, page);
     }
 
     private void DrawOpenBuildsController(Graphics graphics, Rectangle screen, RemotePage controllerPage)
     {
+        var columns = Math.Clamp(controllerPage.GridColumns, 1, 12);
+        var rows = Math.Clamp(controllerPage.GridRows, 1, 16);
+        var occupied = new bool[columns * rows];
         foreach (var control in controllerPage.Controls.Take(16))
         {
-            RectangleF? canonicalFrame = null;
-            if (control.Kind == RemoteControlKind.TextBox &&
-                control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition)
-            {
-                var axis = control.TextBox.SourceText.Split('|').LastOrDefault()?.ToLowerInvariant();
-                var column = axis switch { "x" => 0, "y" => 1, "z" => 2, _ => -1 };
-                if (column >= 0)
-                {
-                    canonicalFrame = new RectangleF(24 + column * 168, 142, 156, 70);
-                }
-            }
-            else if (control.Action.Type == RemoteActionType.OpenBuilds)
-            {
-                var direction = control.Action.Text
-                    .Replace("continuousJog", string.Empty, StringComparison.Ordinal)
-                    .Replace("jog", string.Empty, StringComparison.Ordinal);
-                var position = direction switch
-                {
-                    "XNegativeYPositive" => (Row: 0, Column: 0),
-                    "YPositive" => (Row: 0, Column: 1),
-                    "XPositiveYPositive" => (Row: 0, Column: 2),
-                    "XNegative" => (Row: 1, Column: 0),
-                    "XPositive" => (Row: 1, Column: 2),
-                    "XNegativeYNegative" => (Row: 2, Column: 0),
-                    "YNegative" => (Row: 2, Column: 1),
-                    "XPositiveYNegative" => (Row: 2, Column: 2),
-                    _ => (Row: -1, Column: -1),
-                };
-                if (position.Row >= 0)
-                {
-                    canonicalFrame = new RectangleF(
-                        24 + position.Column * 108, 246 + position.Row * 108, 96, 96);
-                }
-            }
-            if (canonicalFrame is not { } canonical)
+            var (width, height) = Span(control, columns, rows);
+            var slot = FindSlot(control.LayoutSlot, width, height, occupied, columns, rows);
+            if (slot < 0)
             {
                 continue;
             }
+            MarkOccupied(slot, width, height, occupied, columns);
+            var column = slot % columns;
+            var row = slot / columns;
+            var canonical = new RectangleF(
+                24 + column * 504f / columns,
+                142 + row * 712f / rows,
+                width * 504f / columns - 12,
+                height * 712f / rows - 12);
             var frame = ScaleFrame(screen, canonical);
             controlFrames[control.Id] = frame;
             DrawControl(graphics, frame, control);
@@ -250,30 +231,24 @@ internal sealed class RemotePreviewPanel : Control
         graphics.DrawString(text, font, selected ? Brushes.White : Brushes.Black, frame, format);
     }
 
-    private void DrawControls(Graphics graphics, Rectangle grid, IReadOnlyList<RemoteControl> controls)
+    private void DrawControls(Graphics graphics, Rectangle grid, RemotePage remotePage)
     {
-        var occupied = new bool[16];
-        foreach (var control in controls.Take(16))
+        var columns = Math.Clamp(remotePage.GridColumns, 1, 12);
+        var rows = Math.Clamp(remotePage.GridRows, 1, 16);
+        var occupied = new bool[columns * rows];
+        foreach (var control in remotePage.Controls.Take(16))
         {
-            var width = control.Kind == RemoteControlKind.TextBox
-                ? Math.Clamp(control.TextBox?.GridWidth ?? 2, 1, 2)
-                : 1;
-            var height = control.Kind switch
-            {
-                RemoteControlKind.Slider => 1,
-                RemoteControlKind.TextBox => Math.Clamp(control.TextBox?.GridHeight ?? 1, 1, 8),
-                _ => Math.Clamp(control.ButtonHeight ?? 2, 1, 2),
-            };
-            var slot = FindSlot(control.LayoutSlot, width, height, occupied);
+            var (width, height) = Span(control, columns, rows);
+            var slot = FindSlot(control.LayoutSlot, width, height, occupied, columns, rows);
             if (slot < 0)
             {
                 continue;
             }
-            MarkOccupied(slot, width, height, occupied);
-            var column = slot % 2;
-            var row = slot / 2;
-            var cellWidth = grid.Width / 2f;
-            var cellHeight = grid.Height / 8f;
+            MarkOccupied(slot, width, height, occupied, columns);
+            var column = slot % columns;
+            var row = slot / columns;
+            var cellWidth = grid.Width / (float)columns;
+            var cellHeight = grid.Height / (float)rows;
             var frame = Rectangle.Round(new RectangleF(
                 grid.Left + column * cellWidth + 4,
                 grid.Top + row * cellHeight + 4,
@@ -320,15 +295,33 @@ internal sealed class RemotePreviewPanel : Control
         }
     }
 
-    private static int FindSlot(int? preferred, int width, int height, bool[] occupied)
+    private static (int Width, int Height) Span(RemoteControl control, int columns, int rows)
     {
-        if (preferred is >= 0 and < 16 && Fits(preferred.Value, width, height, occupied))
+        var legacyWidth = control.Kind == RemoteControlKind.TextBox
+            ? Math.Clamp(control.TextBox?.GridWidth ?? 2, 1, 2)
+            : 1;
+        var legacyHeight = control.Kind switch
+        {
+            RemoteControlKind.Slider => 1,
+            RemoteControlKind.TextBox => Math.Clamp(control.TextBox?.GridHeight ?? 1, 1, 8),
+            _ => Math.Clamp(control.ButtonHeight ?? 2, 1, 2),
+        };
+        return (
+            Math.Clamp(control.GridWidth ?? legacyWidth, 1, columns),
+            Math.Clamp(control.GridHeight ?? legacyHeight, 1, rows));
+    }
+
+    private static int FindSlot(
+        int? preferred, int width, int height, bool[] occupied, int columns, int rows)
+    {
+        if (preferred is >= 0 && preferred < columns * rows &&
+            Fits(preferred.Value, width, height, occupied, columns, rows))
         {
             return preferred.Value;
         }
-        for (var slot = 0; slot < 16; slot++)
+        for (var slot = 0; slot < columns * rows; slot++)
         {
-            if (Fits(slot, width, height, occupied))
+            if (Fits(slot, width, height, occupied, columns, rows))
             {
                 return slot;
             }
@@ -336,11 +329,12 @@ internal sealed class RemotePreviewPanel : Control
         return -1;
     }
 
-    private static bool Fits(int slot, int width, int height, bool[] occupied)
+    private static bool Fits(
+        int slot, int width, int height, bool[] occupied, int columns, int rows)
     {
-        var column = slot % 2;
-        var row = slot / 2;
-        if (column + width > 2 || row + height > 8)
+        var column = slot % columns;
+        var row = slot / columns;
+        if (column + width > columns || row + height > rows)
         {
             return false;
         }
@@ -348,7 +342,7 @@ internal sealed class RemotePreviewPanel : Control
         {
             for (var x = column; x < column + width; x++)
             {
-                if (occupied[y * 2 + x])
+                if (occupied[y * columns + x])
                 {
                     return false;
                 }
@@ -357,15 +351,16 @@ internal sealed class RemotePreviewPanel : Control
         return true;
     }
 
-    private static void MarkOccupied(int slot, int width, int height, bool[] occupied)
+    private static void MarkOccupied(
+        int slot, int width, int height, bool[] occupied, int columns)
     {
-        var column = slot % 2;
-        var row = slot / 2;
+        var column = slot % columns;
+        var row = slot / columns;
         for (var y = row; y < row + height; y++)
         {
             for (var x = column; x < column + width; x++)
             {
-                occupied[y * 2 + x] = true;
+                occupied[y * columns + x] = true;
             }
         }
     }

@@ -804,8 +804,8 @@ internal sealed class RemoteEditorWindow : Form
         preview.PageCount = store.Profile.Pages.Count;
         preview.SelectedControlId = store.SelectedControlId;
         var selectedControl = store.SelectedControl;
-        controlProperties.SelectedObject = selectedControl is { } control
-            ? new ControlProperties(control, store)
+        controlProperties.SelectedObject = selectedControl is { } control && store.SelectedPage is { } selectedPage
+            ? new ControlProperties(control, selectedPage, store)
             : null;
         controlProperties.Visible = selectedControl is not null;
         emptyControlHint.Visible = selectedControl is null;

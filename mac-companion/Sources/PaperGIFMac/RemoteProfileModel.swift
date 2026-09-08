@@ -248,20 +248,31 @@ struct RemoteControl: Codable, Equatable, Identifiable, Sendable {
     var kind: RemoteControlKind
     var isToggle: Bool? = nil
     var buttonHeight: Int? = nil
+    var gridWidth: Int? = nil
+    var gridHeight: Int? = nil
     var action: RemoteAction
     var layoutSlot: Int?
     var textBox: RemoteTextBox? = nil
 
     var gridSpan: RemoteGridSpan {
+        gridSpan(columns: 2, rows: 8)
+    }
+
+    func gridSpan(columns: Int, rows: Int) -> RemoteGridSpan {
+        let legacySpan: RemoteGridSpan
         switch kind {
-        case .button: RemoteGridSpan(width: 1, height: buttonGridHeight)
-        case .slider: RemoteGridSpan(width: 1, height: 1)
+        case .button: legacySpan = RemoteGridSpan(width: 1, height: buttonGridHeight)
+        case .slider: legacySpan = RemoteGridSpan(width: 1, height: 1)
         case .textBox:
-            RemoteGridSpan(
+            legacySpan = RemoteGridSpan(
                 width: min(max(textBox?.gridWidth ?? 2, 1), 2),
                 height: min(max(textBox?.gridHeight ?? 1, 1), 8)
             )
         }
+        return RemoteGridSpan(
+            width: min(max(gridWidth ?? legacySpan.width, 1), columns),
+            height: min(max(gridHeight ?? legacySpan.height, 1), rows)
+        )
     }
 
     var buttonGridHeight: Int {
@@ -283,9 +294,14 @@ enum RemoteGrid {
     static let columns = 2
     static let rows = 8
 
-    static func placement(for control: RemoteControl, at requestedSlot: Int) -> RemoteGridPlacement? {
+    static func placement(
+        for control: RemoteControl,
+        at requestedSlot: Int,
+        columns: Int = RemoteGrid.columns,
+        rows: Int = RemoteGrid.rows
+    ) -> RemoteGridPlacement? {
         guard (0..<(columns * rows)).contains(requestedSlot) else { return nil }
-        let span = control.gridSpan
+        let span = control.gridSpan(columns: columns, rows: rows)
         let row = requestedSlot / columns
         var column = requestedSlot % columns
         if span.width == columns { column = 0 }
@@ -293,7 +309,10 @@ enum RemoteGrid {
         return RemoteGridPlacement(slot: row * columns + column, span: span)
     }
 
-    static func cells(for placement: RemoteGridPlacement) -> Set<Int> {
+    static func cells(
+        for placement: RemoteGridPlacement,
+        columns: Int = RemoteGrid.columns
+    ) -> Set<Int> {
         let row = placement.slot / columns
         let column = placement.slot % columns
         return Set((0..<placement.span.height).flatMap { rowOffset in
@@ -308,10 +327,58 @@ struct RemotePage: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
     var name: String
     var controls: [RemoteControl]
+    var gridColumns = 2
+    var gridRows = 8
     var layout: RemotePageLayout? = nil
     var openBuildsController: RemoteOpenBuildsController? = nil
     var moduleID: String? = nil
     var modulePageID: String? = nil
+}
+
+extension RemotePage {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        controls = try container.decode([RemoteControl].self, forKey: .controls)
+        gridColumns = try container.decodeIfPresent(Int.self, forKey: .gridColumns) ?? 2
+        gridRows = try container.decodeIfPresent(Int.self, forKey: .gridRows) ?? 8
+        layout = try container.decodeIfPresent(RemotePageLayout.self, forKey: .layout)
+        openBuildsController = try container.decodeIfPresent(
+            RemoteOpenBuildsController.self, forKey: .openBuildsController
+        )
+        moduleID = try container.decodeIfPresent(String.self, forKey: .moduleID)
+        modulePageID = try container.decodeIfPresent(String.self, forKey: .modulePageID)
+        if layout == .openBuildsController && !container.contains(.gridColumns) {
+            upgradeLegacyOpenBuildsGrid()
+        }
+    }
+
+    private mutating func upgradeLegacyOpenBuildsGrid() {
+        gridColumns = 9
+        gridRows = 14
+        let slots = [
+            "XNegativeYPositive": 18, "YPositive": 20, "XPositiveYPositive": 22,
+            "XNegative": 36, "XPositive": 40,
+            "XNegativeYNegative": 54, "YNegative": 56, "XPositiveYNegative": 58,
+        ]
+        for index in controls.indices {
+            if controls[index].textBox?.source == .openBuildsPosition {
+                let axis = controls[index].textBox?.sourceText.split(separator: "|").last?.lowercased()
+                controls[index].layoutSlot = ["x": 0, "y": 3, "z": 6][axis ?? "x"] ?? 0
+                controls[index].gridWidth = 3
+                controls[index].gridHeight = 2
+            } else {
+                let direction = controls[index].action.text
+                    .replacingOccurrences(of: "continuousJog", with: "")
+                    .replacingOccurrences(of: "jog", with: "")
+                guard let slot = slots[direction] else { continue }
+                controls[index].layoutSlot = slot
+                controls[index].gridWidth = 2
+                controls[index].gridHeight = 2
+            }
+        }
+    }
 }
 
 extension RemotePage {

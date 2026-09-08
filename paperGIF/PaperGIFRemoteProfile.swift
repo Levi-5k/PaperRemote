@@ -280,6 +280,8 @@ struct PaperGIFRemoteControl: Codable, Equatable, Identifiable, Sendable {
     var kind: PaperGIFRemoteControlKind
     var isToggle: Bool? = nil
     var buttonHeight: Int? = nil
+    var gridWidth: Int? = nil
+    var gridHeight: Int? = nil
     var action: PaperGIFRemoteAction
     var layoutSlot: Int? = nil
     var textBox: PaperGIFRemoteTextBox? = nil
@@ -294,17 +296,26 @@ struct PaperGIFRemoteControl: Codable, Equatable, Identifiable, Sendable {
     }
 
     var gridSpan: PaperGIFRemoteGridSpan {
+        gridSpan(columns: 2, rows: 8)
+    }
+
+    func gridSpan(columns: Int, rows: Int) -> PaperGIFRemoteGridSpan {
+        let legacySpan: PaperGIFRemoteGridSpan
         switch kind {
         case .button:
-            PaperGIFRemoteGridSpan(width: 1, height: buttonGridHeight)
+            legacySpan = PaperGIFRemoteGridSpan(width: 1, height: buttonGridHeight)
         case .slider:
-            PaperGIFRemoteGridSpan(width: 1, height: 1)
+            legacySpan = PaperGIFRemoteGridSpan(width: 1, height: 1)
         case .textBox:
-            PaperGIFRemoteGridSpan(
+            legacySpan = PaperGIFRemoteGridSpan(
                 width: min(max(textBox?.gridWidth ?? 2, 1), 2),
                 height: min(max(textBox?.gridHeight ?? 1, 1), 8)
             )
         }
+        return PaperGIFRemoteGridSpan(
+            width: min(max(gridWidth ?? legacySpan.width, 1), columns),
+            height: min(max(gridHeight ?? legacySpan.height, 1), rows)
+        )
     }
 
     var buttonGridHeight: Int {
@@ -326,24 +337,29 @@ enum PaperGIFRemoteGrid {
     static let columnCount = 2
     static let rowCount = 8
 
-    static func placements(for controls: [PaperGIFRemoteControl]) -> [PaperGIFRemoteGridPlacement?] {
+    static func placements(
+        for controls: [PaperGIFRemoteControl],
+        columns: Int = columnCount,
+        rows: Int = rowCount
+    ) -> [PaperGIFRemoteGridPlacement?] {
         var occupied: Set<Int> = []
         var result = Array<PaperGIFRemoteGridPlacement?>(repeating: nil, count: controls.count)
 
         for index in controls.indices {
             guard let slot = controls[index].layoutSlot,
-                  let placement = placement(for: controls[index], at: slot),
-                  occupied.isDisjoint(with: cells(for: placement)) else { continue }
+                let placement = placement(for: controls[index], at: slot, columns: columns, rows: rows),
+                occupied.isDisjoint(with: cells(for: placement, columns: columns)) else { continue }
             result[index] = placement
-            occupied.formUnion(cells(for: placement))
+            occupied.formUnion(cells(for: placement, columns: columns))
         }
 
         for index in controls.indices where result[index] == nil {
-            for slot in 0..<(columnCount * rowCount) {
-                guard let placement = placement(for: controls[index], at: slot),
-                      occupied.isDisjoint(with: cells(for: placement)) else { continue }
+            for slot in 0..<(columns * rows) {
+                guard let placement = placement(
+                    for: controls[index], at: slot, columns: columns, rows: rows
+                ), occupied.isDisjoint(with: cells(for: placement, columns: columns)) else { continue }
                 result[index] = placement
-                occupied.formUnion(cells(for: placement))
+                occupied.formUnion(cells(for: placement, columns: columns))
                 break
             }
         }
@@ -352,25 +368,30 @@ enum PaperGIFRemoteGrid {
 
     static func placement(
         for control: PaperGIFRemoteControl,
-        at requestedSlot: Int
+        at requestedSlot: Int,
+        columns: Int = columnCount,
+        rows: Int = rowCount
     ) -> PaperGIFRemoteGridPlacement? {
-        guard (0..<(columnCount * rowCount)).contains(requestedSlot) else { return nil }
-        let span = control.gridSpan
-        let row = requestedSlot / columnCount
-        var column = requestedSlot % columnCount
-        if span.width == columnCount {
+        guard (0..<(columns * rows)).contains(requestedSlot) else { return nil }
+        let span = control.gridSpan(columns: columns, rows: rows)
+        let row = requestedSlot / columns
+        var column = requestedSlot % columns
+        if span.width == columns {
             column = 0
         }
-        guard column + span.width <= columnCount, row + span.height <= rowCount else { return nil }
-        return PaperGIFRemoteGridPlacement(slot: row * columnCount + column, span: span)
+        guard column + span.width <= columns, row + span.height <= rows else { return nil }
+        return PaperGIFRemoteGridPlacement(slot: row * columns + column, span: span)
     }
 
-    static func cells(for placement: PaperGIFRemoteGridPlacement) -> Set<Int> {
-        let row = placement.slot / columnCount
-        let column = placement.slot % columnCount
+    static func cells(
+        for placement: PaperGIFRemoteGridPlacement,
+        columns: Int = columnCount
+    ) -> Set<Int> {
+        let row = placement.slot / columns
+        let column = placement.slot % columns
         return Set((0..<placement.span.height).flatMap { rowOffset in
             (0..<placement.span.width).map { columnOffset in
-                (row + rowOffset) * columnCount + column + columnOffset
+                (row + rowOffset) * columns + column + columnOffset
             }
         })
     }
@@ -380,10 +401,58 @@ struct PaperGIFRemotePage: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
     var name: String
     var controls: [PaperGIFRemoteControl]
+    var gridColumns = 2
+    var gridRows = 8
     var layout: PaperGIFRemotePageLayout? = nil
     var openBuildsController: PaperGIFOpenBuildsController? = nil
     var moduleID: String? = nil
     var modulePageID: String? = nil
+}
+
+extension PaperGIFRemotePage {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        controls = try container.decode([PaperGIFRemoteControl].self, forKey: .controls)
+        gridColumns = try container.decodeIfPresent(Int.self, forKey: .gridColumns) ?? 2
+        gridRows = try container.decodeIfPresent(Int.self, forKey: .gridRows) ?? 8
+        layout = try container.decodeIfPresent(PaperGIFRemotePageLayout.self, forKey: .layout)
+        openBuildsController = try container.decodeIfPresent(
+            PaperGIFOpenBuildsController.self, forKey: .openBuildsController
+        )
+        moduleID = try container.decodeIfPresent(String.self, forKey: .moduleID)
+        modulePageID = try container.decodeIfPresent(String.self, forKey: .modulePageID)
+        if layout == .openBuildsController && !container.contains(.gridColumns) {
+            upgradeLegacyOpenBuildsGrid()
+        }
+    }
+
+    private mutating func upgradeLegacyOpenBuildsGrid() {
+        gridColumns = 9
+        gridRows = 14
+        let slots = [
+            "XNegativeYPositive": 18, "YPositive": 20, "XPositiveYPositive": 22,
+            "XNegative": 36, "XPositive": 40,
+            "XNegativeYNegative": 54, "YNegative": 56, "XPositiveYNegative": 58,
+        ]
+        for index in controls.indices {
+            if controls[index].textBox?.source == .openBuildsPosition {
+                let axis = controls[index].textBox?.sourceText.split(separator: "|").last?.lowercased()
+                controls[index].layoutSlot = ["x": 0, "y": 3, "z": 6][axis ?? "x"] ?? 0
+                controls[index].gridWidth = 3
+                controls[index].gridHeight = 2
+            } else {
+                let direction = controls[index].action.text
+                    .replacingOccurrences(of: "continuousJog", with: "")
+                    .replacingOccurrences(of: "jog", with: "")
+                guard let slot = slots[direction] else { continue }
+                controls[index].layoutSlot = slot
+                controls[index].gridWidth = 2
+                controls[index].gridHeight = 2
+            }
+        }
+    }
 }
 
 extension PaperGIFRemotePage {

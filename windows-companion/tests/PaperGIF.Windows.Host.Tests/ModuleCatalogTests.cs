@@ -41,8 +41,15 @@ public sealed class ModuleCatalogTests
         var definition = Assert.Single(module.Pages);
         var page = ModuleCatalogService.ClonePage(definition, module.Id);
         Assert.Equal(PaperGIF.Windows.Core.Models.RemotePageLayout.OpenBuildsController, page.Layout);
+        Assert.Equal(9, page.GridColumns);
+        Assert.Equal(14, page.GridRows);
         Assert.Equal(PaperGIF.Windows.Core.Models.RemoteJogMode.Incremental, page.OpenBuildsController?.JogMode);
         Assert.Equal(11, page.Controls.Count);
+        Assert.Equal(3, page.Controls[0].GridWidth);
+        Assert.Equal(2, page.Controls[0].GridHeight);
+        Assert.Equal(18, page.Controls[3].LayoutSlot);
+        Assert.Equal(2, page.Controls[3].GridWidth);
+        Assert.Equal(2, page.Controls[3].GridHeight);
         Assert.Equal(module.Id, page.ModuleID);
         Assert.NotEqual(definition.Page.Id, page.Id);
         Assert.All(page.Controls.Zip(definition.Page.Controls), pair => Assert.NotEqual(pair.First.Id, pair.Second.Id));

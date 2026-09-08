@@ -58,6 +58,41 @@ public sealed class RemoteProfileContractTests
     }
 
     [Fact]
+    public void LegacyOpenBuildsPageMigratesToFlexibleGrid()
+    {
+        const string json = """
+            {"version":6,"pages":[{"name":"Motion","layout":"openBuildsController","controls":[
+              {"title":"X","kind":"textBox","action":{"type":"openBuilds"},"textBox":{"source":"openBuildsPosition","sourceText":"127.0.0.1|x"}},
+              {"title":"Up Left","kind":"button","action":{"type":"openBuilds","text":"jogXNegativeYPositive"}}
+            ]}]}
+            """;
+
+        var page = Assert.Single(RemoteProfileJson.Deserialize(json).Pages);
+
+        Assert.Equal(9, page.GridColumns);
+        Assert.Equal(14, page.GridRows);
+        Assert.Equal(0, page.Controls[0].LayoutSlot);
+        Assert.Equal(3, page.Controls[0].GridWidth);
+        Assert.Equal(2, page.Controls[0].GridHeight);
+        Assert.Equal(18, page.Controls[1].LayoutSlot);
+        Assert.Equal(2, page.Controls[1].GridWidth);
+        Assert.Equal(2, page.Controls[1].GridHeight);
+    }
+
+    [Fact]
+    public void ExplicitOpenBuildsGridIsNotMigrated()
+    {
+        const string json = """
+            {"version":6,"pages":[{"name":"Motion","gridColumns":4,"gridRows":5,"layout":"openBuildsController","controls":[]}]}
+            """;
+
+        var page = Assert.Single(RemoteProfileJson.Deserialize(json).Pages);
+
+        Assert.Equal(4, page.GridColumns);
+        Assert.Equal(5, page.GridRows);
+    }
+
+    [Fact]
     public void NewerProfileVersionIsRejected()
     {
         var error = Assert.Throws<JsonException>(() =>

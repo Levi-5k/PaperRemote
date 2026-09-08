@@ -1057,6 +1057,8 @@ private struct PaperGIFRemotePageEditor: View {
 
             Section("Page") {
                 TextField("Name", text: $page.name)
+                Stepper("Grid columns: \(page.gridColumns)", value: $page.gridColumns, in: 1...12)
+                Stepper("Grid rows: \(page.gridRows)", value: $page.gridRows, in: 1...16)
             }
 
             Section("Controls") {
@@ -1067,6 +1069,8 @@ private struct PaperGIFRemotePageEditor: View {
                             pages: pages,
                             computers: computers,
                             temperatureUnit: temperatureUnit,
+                            gridColumns: page.gridColumns,
+                            gridRows: page.gridRows,
                             wledDiscovery: wledDiscovery
                         )
                     } label: {
@@ -1084,7 +1088,7 @@ private struct PaperGIFRemotePageEditor: View {
                             action: .playPause
                         ))
                     }
-                    .disabled(layoutUnitsUsed > 14)
+                    .disabled(layoutUnitsUsed + 2 > layoutCapacity)
 
                     Button("Slider", systemImage: "slider.horizontal.3") {
                         page.controls.append(PaperGIFRemoteControl(
@@ -1095,7 +1099,7 @@ private struct PaperGIFRemotePageEditor: View {
                             action: .init(type: .wledBrightness)
                         ))
                     }
-                    .disabled(layoutUnitsUsed > 15)
+                    .disabled(layoutUnitsUsed + 1 > layoutCapacity)
 
                     Button("Text Box", systemImage: "text.rectangle") {
                         let control = PaperGIFRemoteControl(
@@ -1108,11 +1112,11 @@ private struct PaperGIFRemotePageEditor: View {
                         )
                         page.controls.append(control)
                     }
-                    .disabled(layoutUnitsUsed > 14)
+                    .disabled(layoutUnitsUsed + 2 > layoutCapacity)
                 } label: {
                     Label("Add Control", systemImage: "plus")
                 }
-                .disabled(page.controls.count >= 16 || layoutUnitsUsed >= 16)
+                .disabled(page.controls.count >= 16 || layoutUnitsUsed >= layoutCapacity)
             }
         }
         .navigationTitle(page.name)
@@ -1124,6 +1128,8 @@ private struct PaperGIFRemotePageEditor: View {
                     pages: pages,
                     computers: computers,
                     temperatureUnit: temperatureUnit,
+                    gridColumns: page.gridColumns,
+                    gridRows: page.gridRows,
                     wledDiscovery: wledDiscovery
                 )
             }
@@ -1131,7 +1137,14 @@ private struct PaperGIFRemotePageEditor: View {
     }
 
     private var layoutUnitsUsed: Int {
-        page.controls.reduce(0) { $0 + $1.gridSpan.width * $1.gridSpan.height }
+        page.controls.reduce(0) {
+            let span = $1.gridSpan(columns: page.gridColumns, rows: page.gridRows)
+            return $0 + span.width * span.height
+        }
+    }
+
+    private var layoutCapacity: Int {
+        page.gridColumns * page.gridRows
     }
 }
 
@@ -1412,10 +1425,11 @@ private struct PaperGIFRemotePagePreview: View {
     }
 
     private func layoutSlot(at location: CGPoint, scale: CGFloat) -> Int? {
-        let column = Int((location.x / scale - 24) / 252)
-        let row = Int((location.y / scale - 142) / 89)
-        guard (0..<2).contains(column), (0..<8).contains(row) else { return nil }
-        return row * 2 + column
+        let column = Int((location.x / scale - 24) * CGFloat(page.gridColumns) / 504)
+        let row = Int((location.y / scale - 142) * CGFloat(page.gridRows) / 712)
+        guard (0..<page.gridColumns).contains(column),
+              (0..<page.gridRows).contains(row) else { return nil }
+        return row * page.gridColumns + column
     }
 
     private func moveControl(_ controlID: UUID, to requestedSlot: Int) {
@@ -1429,18 +1443,24 @@ private struct PaperGIFRemotePagePreview: View {
         let sourceSlot = controls[sourceIndex].layoutSlot ?? 0
         guard let destination = PaperGIFRemoteGrid.placement(
             for: controls[sourceIndex],
-            at: requestedSlot
+            at: requestedSlot,
+            columns: page.gridColumns,
+            rows: page.gridRows
         ) else { return }
         let destinationSlot = destination.slot
         guard sourceSlot != destinationSlot else { return }
-        let destinationCells = PaperGIFRemoteGrid.cells(for: destination)
+        let destinationCells = PaperGIFRemoteGrid.cells(
+            for: destination, columns: page.gridColumns
+        )
 
         for index in controls.indices where index != sourceIndex {
             guard let placement = PaperGIFRemoteGrid.placement(
                 for: controls[index],
-                at: controls[index].layoutSlot ?? -1
+                at: controls[index].layoutSlot ?? -1,
+                columns: page.gridColumns,
+                rows: page.gridRows
             ) else { continue }
-            let slots = PaperGIFRemoteGrid.cells(for: placement)
+            let slots = PaperGIFRemoteGrid.cells(for: placement, columns: page.gridColumns)
             if !destinationCells.isDisjoint(with: slots) {
                 controls[index].layoutSlot = nil
             }
@@ -1450,52 +1470,24 @@ private struct PaperGIFRemotePagePreview: View {
     }
 
     private func slot(for frame: CGRect) -> Int {
-        let column = Int(((frame.minX - 24) / 252).rounded())
-        let row = Int(((frame.minY - 142) / 89).rounded())
-        return row * 2 + column
+        let column = Int(((frame.minX - 24) * CGFloat(page.gridColumns) / 504).rounded())
+        let row = Int(((frame.minY - 142) * CGFloat(page.gridRows) / 712).rounded())
+        return row * page.gridColumns + column
     }
 
     private func controlFrames(scale: CGFloat) -> [CGRect] {
         let controls = Array(page.controls.prefix(16))
-        if page.layout == .openBuildsController {
-            return controls.map { control in
-                if control.kind == .textBox,
-                   let axis = control.textBox?.sourceText.split(separator: "|").last?.lowercased(),
-                   let column = ["x", "y", "z"].firstIndex(of: axis) {
-                    return CGRect(
-                        x: CGFloat(24 + column * 168) * scale,
-                        y: 142 * scale,
-                        width: 156 * scale,
-                        height: 70 * scale
-                    )
-                }
-                let direction = control.action.text
-                    .replacingOccurrences(of: "continuousJog", with: "")
-                    .replacingOccurrences(of: "jog", with: "")
-                let positions: [String: (Int, Int)] = [
-                    "XNegativeYPositive": (0, 0), "YPositive": (0, 1),
-                    "XPositiveYPositive": (0, 2), "XNegative": (1, 0),
-                    "XPositive": (1, 2), "XNegativeYNegative": (2, 0),
-                    "YNegative": (2, 1), "XPositiveYNegative": (2, 2),
-                ]
-                guard let (row, column) = positions[direction] else { return .zero }
-                return CGRect(
-                    x: CGFloat(24 + column * 108) * scale,
-                    y: CGFloat(246 + row * 108) * scale,
-                    width: 96 * scale,
-                    height: 96 * scale
-                )
-            }
-        }
-        return PaperGIFRemoteGrid.placements(for: controls).map { placement in
+        return PaperGIFRemoteGrid.placements(
+            for: controls, columns: page.gridColumns, rows: page.gridRows
+        ).map { placement in
             guard let placement else { return .zero }
-            let row = placement.slot / PaperGIFRemoteGrid.columnCount
-            let column = placement.slot % PaperGIFRemoteGrid.columnCount
+            let row = placement.slot / page.gridColumns
+            let column = placement.slot % page.gridColumns
             return CGRect(
-                x: (24 + CGFloat(column) * 252) * scale,
-                y: (142 + CGFloat(row) * 89) * scale,
-                width: CGFloat(240 * placement.span.width + 12 * (placement.span.width - 1)) * scale,
-                height: CGFloat(77 * placement.span.height + 12 * (placement.span.height - 1)) * scale
+                x: (24 + CGFloat(column) * 504 / CGFloat(page.gridColumns)) * scale,
+                y: (142 + CGFloat(row) * 712 / CGFloat(page.gridRows)) * scale,
+                width: (CGFloat(placement.span.width) * 504 / CGFloat(page.gridColumns) - 12) * scale,
+                height: (CGFloat(placement.span.height) * 712 / CGFloat(page.gridRows) - 12) * scale
             )
         }
     }
@@ -1570,6 +1562,8 @@ private struct PaperGIFRemoteControlEditor: View {
     let pages: [PaperGIFRemotePage]
     let computers: [PaperGIFRemoteComputer]
     let temperatureUnit: PaperGIFTemperatureUnit
+    let gridColumns: Int
+    let gridRows: Int
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     @StateObject private var applicationCatalog = PaperGIFMacApplicationCatalog()
 
@@ -1607,13 +1601,16 @@ private struct PaperGIFRemoteControlEditor: View {
                             .disabled(kind == .button && !canUseButtonLayout)
                     }
                 }
-                if control.kind == .button {
-                    Picker("Height", selection: buttonHeightBinding) {
-                        Text("1 Row").tag(1)
-                        Text("2 Rows").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                }
+                Stepper(
+                    "Width: \(control.gridSpan(columns: gridColumns, rows: gridRows).width) column(s)",
+                    value: controlGridWidthBinding,
+                    in: 1...gridColumns
+                )
+                Stepper(
+                    "Height: \(control.gridSpan(columns: gridColumns, rows: gridRows).height) row(s)",
+                    value: controlGridHeightBinding,
+                    in: 1...gridRows
+                )
                 Toggle("Toggle button", isOn: toggleButtonBinding)
                     .disabled(control.kind != .button)
             }
@@ -1715,8 +1712,6 @@ private struct PaperGIFRemoteControlEditor: View {
         }
 
         Section("Text Layout") {
-            Stepper("Width: \(control.textBox?.gridWidth ?? 2) column(s)", value: textBoxBinding(\.gridWidth), in: 1...2)
-            Stepper("Height: \(control.textBox?.gridHeight ?? 1) row(s)", value: textBoxBinding(\.gridHeight), in: 1...8)
             Picker("Text size", selection: textBoxBinding(\.textSize)) {
                 Text("Small").tag(PaperGIFRemoteTextSize.small)
                 Text("Medium").tag(PaperGIFRemoteTextSize.medium)
@@ -2524,6 +2519,20 @@ private struct PaperGIFRemoteControlEditor: View {
         Binding(
             get: { control.buttonGridHeight },
             set: { control.buttonHeight = $0 }
+        )
+    }
+
+    private var controlGridWidthBinding: Binding<Int> {
+        Binding(
+            get: { control.gridSpan(columns: gridColumns, rows: gridRows).width },
+            set: { control.gridWidth = $0 }
+        )
+    }
+
+    private var controlGridHeightBinding: Binding<Int> {
+        Binding(
+            get: { control.gridSpan(columns: gridColumns, rows: gridRows).height },
+            set: { control.gridHeight = $0 }
         )
     }
 

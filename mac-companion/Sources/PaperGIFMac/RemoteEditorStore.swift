@@ -146,7 +146,7 @@ final class RemoteEditorStore: ObservableObject {
         if profile.pages.contains(where: { $0.controls.count > 16 }) {
             return "Each page can contain at most 16 controls."
         }
-        if profile.pages.contains(where: { layoutUnitsUsed(on: $0) > 16 }) {
+        if profile.pages.contains(where: { layoutUnitsUsed(on: $0) > $0.gridColumns * $0.gridRows }) {
             return "A page has more controls than fit on the display."
         }
         if profile.pages.contains(where: { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
@@ -194,7 +194,9 @@ final class RemoteEditorStore: ObservableObject {
     func addControl(_ control: RemoteControl) {
         guard let pageIndex = selectedPageIndex,
               profile.pages[pageIndex].controls.count < 16,
-              layoutUnitsUsed(on: profile.pages[pageIndex]) + layoutUnits(for: control) <= 16 else { return }
+                            layoutUnitsUsed(on: profile.pages[pageIndex]) +
+                                layoutUnits(for: control, on: profile.pages[pageIndex]) <=
+                                profile.pages[pageIndex].gridColumns * profile.pages[pageIndex].gridRows else { return }
         profile.pages[pageIndex].controls.append(control)
         selectedControlID = control.id
     }
@@ -203,7 +205,8 @@ final class RemoteEditorStore: ObservableObject {
         guard let pageIndex = selectedPageIndex else { return false }
         let page = profile.pages[pageIndex]
         let units = kind == .slider ? 1 : 2
-        return page.controls.count < 16 && layoutUnitsUsed(on: page) + units <= 16
+        return page.controls.count < 16 &&
+            layoutUnitsUsed(on: page) + units <= page.gridColumns * page.gridRows
     }
 
     func deleteSelectedControl() {
@@ -216,7 +219,9 @@ final class RemoteEditorStore: ObservableObject {
         guard let location = selectedControlLocation,
               profile.pages[location.page].controls.count < 16 else { return }
         var copy = profile.pages[location.page].controls[location.control]
-        guard layoutUnitsUsed(on: profile.pages[location.page]) + layoutUnits(for: copy) <= 16 else { return }
+        guard layoutUnitsUsed(on: profile.pages[location.page]) +
+            layoutUnits(for: copy, on: profile.pages[location.page]) <=
+            profile.pages[location.page].gridColumns * profile.pages[location.page].gridRows else { return }
         copy.id = UUID()
         copy.title += " Copy"
         copy.layoutSlot = nil
@@ -349,30 +354,39 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     func layoutUnitsUsed(on page: RemotePage) -> Int {
-        page.controls.reduce(0) { $0 + layoutUnits(for: $1) }
+        page.controls.reduce(0) { $0 + layoutUnits(for: $1, on: page) }
     }
 
     func canChangeSelectedControl(to kind: RemoteControlKind) -> Bool {
         guard let location = selectedControlLocation else { return false }
         let page = profile.pages[location.page]
+        if page.gridColumns * page.gridRows > 16 {
+            return true
+        }
         let control = page.controls[location.control]
         let newUnits = kind == .slider ? 1 : 2
-        return layoutUnitsUsed(on: page) - layoutUnits(for: control) + newUnits <= 16
+        return layoutUnitsUsed(on: page) - layoutUnits(for: control, on: page) + newUnits <=
+            page.gridColumns * page.gridRows
     }
 
     func moveControl(_ controlID: UUID, to requestedSlot: Int) {
         guard let pageIndex = selectedPageIndex,
               let sourceIndex = profile.pages[pageIndex].controls.firstIndex(where: { $0.id == controlID }) else { return }
+        let page = profile.pages[pageIndex]
         let source = profile.pages[pageIndex].controls[sourceIndex]
-        guard let destination = RemoteGrid.placement(for: source, at: requestedSlot) else { return }
-        let destinationSlots = RemoteGrid.cells(for: destination)
+        guard let destination = RemoteGrid.placement(
+            for: source, at: requestedSlot, columns: page.gridColumns, rows: page.gridRows
+        ) else { return }
+        let destinationSlots = RemoteGrid.cells(for: destination, columns: page.gridColumns)
         for index in profile.pages[pageIndex].controls.indices where index != sourceIndex {
             let control = profile.pages[pageIndex].controls[index]
             guard let placement = RemoteGrid.placement(
                 for: control,
-                at: control.layoutSlot ?? -1
+                at: control.layoutSlot ?? -1,
+                columns: page.gridColumns,
+                rows: page.gridRows
             ) else { continue }
-            let slots = RemoteGrid.cells(for: placement)
+            let slots = RemoteGrid.cells(for: placement, columns: page.gridColumns)
             if !destinationSlots.isDisjoint(with: slots) {
                 profile.pages[pageIndex].controls[index].layoutSlot = nil
             }
@@ -618,8 +632,9 @@ final class RemoteEditorStore: ObservableObject {
         return nil
     }
 
-    private func layoutUnits(for control: RemoteControl) -> Int {
-        control.gridSpan.width * control.gridSpan.height
+    private func layoutUnits(for control: RemoteControl, on page: RemotePage) -> Int {
+        let span = control.gridSpan(columns: page.gridColumns, rows: page.gridRows)
+        return span.width * span.height
     }
 
     private func synchronizeDefaultComputer() {
