@@ -38,5 +38,13 @@ public sealed class ModuleCatalogTests
         Assert.Equal(16, module.Controls.Count);
         Assert.All(module.Controls, definition =>
             Assert.Equal(PaperGIF.Windows.Core.Models.RemoteActionType.OpenBuilds, definition.Control.Action.Type));
+        var definition = Assert.Single(module.Pages);
+        var page = ModuleCatalogService.ClonePage(definition, module.Id);
+        Assert.Equal(PaperGIF.Windows.Core.Models.RemotePageLayout.OpenBuildsController, page.Layout);
+        Assert.Equal(PaperGIF.Windows.Core.Models.RemoteJogMode.Incremental, page.OpenBuildsController?.JogMode);
+        Assert.Equal(11, page.Controls.Count);
+        Assert.Equal(module.Id, page.ModuleID);
+        Assert.NotEqual(definition.Page.Id, page.Id);
+        Assert.All(page.Controls.Zip(definition.Page.Controls), pair => Assert.NotEqual(pair.First.Id, pair.Second.Id));
     }
 }

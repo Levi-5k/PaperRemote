@@ -4,7 +4,7 @@
   "id": "openbuilds-control",
   "name": "OpenBuilds CONTROL",
   "summary": "Local CNC jogging and run-state controls for OpenBuilds CONTROL.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "paperGIF",
   "controls": [
     {
@@ -213,6 +213,83 @@
         "tintHex": "3568A8",
         "kind": "button",
         "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "home", "value": 0, "modifiers": [] }
+      }
+    }
+  ],
+  "pages": [
+    {
+      "id": "motion-controller",
+      "detail": "Eight-direction XY jogging with live coordinates, speed, mode, and distance controls.",
+      "page": {
+        "id": "fa557def-6f56-4939-b569-9457d0f29c65",
+        "name": "Motion Control",
+        "layout": "openBuildsController",
+        "openBuildsController": {
+          "host": "127.0.0.1",
+          "jogSpeed": 1000,
+          "jogMode": "incremental",
+          "jogDistanceTenths": 10
+        },
+        "controls": [
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa01",
+            "title": "X Position", "symbol": "move.3d", "tintHex": "D1495B", "kind": "textBox",
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "", "value": 0, "modifiers": [] },
+            "textBox": { "source": "openBuildsPosition", "sourceText": "127.0.0.1|x", "placeholder": "X --.---", "gridWidth": 1, "gridHeight": 1, "textSize": "medium", "horizontalAlignment": "center", "verticalAlignment": "center", "refreshIntervalSeconds": 1 }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa02",
+            "title": "Y Position", "symbol": "move.3d", "tintHex": "197248", "kind": "textBox",
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "", "value": 0, "modifiers": [] },
+            "textBox": { "source": "openBuildsPosition", "sourceText": "127.0.0.1|y", "placeholder": "Y --.---", "gridWidth": 1, "gridHeight": 1, "textSize": "medium", "horizontalAlignment": "center", "verticalAlignment": "center", "refreshIntervalSeconds": 1 }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa03",
+            "title": "Z Position", "symbol": "move.3d", "tintHex": "3568A8", "kind": "textBox",
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "", "value": 0, "modifiers": [] },
+            "textBox": { "source": "openBuildsPosition", "sourceText": "127.0.0.1|z", "placeholder": "Z --.---", "gridWidth": 1, "gridHeight": 1, "textSize": "medium", "horizontalAlignment": "center", "verticalAlignment": "center", "refreshIntervalSeconds": 1 }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa04",
+            "title": "NW", "symbol": "arrow.up.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegativeYPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa05",
+            "title": "Y+", "symbol": "arrow.up", "tintHex": "197278", "kind": "button", "buttonHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogYPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa06",
+            "title": "NE", "symbol": "arrow.up.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositiveYPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa07",
+            "title": "X-", "symbol": "arrow.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa08",
+            "title": "X+", "symbol": "arrow.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa09",
+            "title": "SW", "symbol": "arrow.down.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegativeYNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa10",
+            "title": "Y-", "symbol": "arrow.down", "tintHex": "197278", "kind": "button", "buttonHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogYNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa11",
+            "title": "SE", "symbol": "arrow.down.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositiveYNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          }
+        ]
       }
     }
   ]

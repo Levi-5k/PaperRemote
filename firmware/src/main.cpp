@@ -310,6 +310,11 @@ struct RemoteTextNetworkResult {
 struct RemotePage {
     char id[40] = {};
     char name[32] = {};
+    bool openBuildsController = false;
+    char openBuildsHost[64] = "127.0.0.1";
+    uint16_t openBuildsJogSpeed = 1000;
+    bool openBuildsContinuous = false;
+    uint16_t openBuildsJogDistanceTenths = 10;
     RemoteControl controls[kMaximumRemoteControls];
     uint8_t controlCount = 0;
 };
@@ -524,6 +529,7 @@ int8_t activeRemoteControlIndex = -1;
 uint8_t activeRemoteTouchPage = 0;
 bool activeRemoteControlVisual = false;
 bool activeRemoteHoldTriggered = false;
+bool activeRemoteContinuousJog = false;
 uint32_t activeRemoteTouchStartedAt = 0;
 uint32_t activeRemoteLastRepeatAt = 0;
 uint32_t activeRemoteSliderRenderedAt = 0;
@@ -620,6 +626,7 @@ void setBluetoothTransferPerformance(bool transferring);
 void displayRemote();
 void displayRemoteProfileChanges(const RemoteProfile& previousProfile, uint8_t previousPageIndex);
 void redrawRemoteTextBox(RemotePage& page, uint8_t controlIndex);
+void syncOpenBuildsControllerActions(RemotePage& page);
 void connectHomeWifi();
 bool dispatchRemoteAction(
     RemoteControl& control,
@@ -1276,6 +1283,17 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
         RemotePage& page = output.pages[output.pageCount];
         strlcpy(page.id, pageJson["id"] | "", sizeof(page.id));
         strlcpy(page.name, pageJson["name"] | "Remote", sizeof(page.name));
+        page.openBuildsController = strcmp(pageJson["layout"] | "", "openBuildsController") == 0;
+        if (page.openBuildsController) {
+            JsonObject controllerJson = pageJson["openBuildsController"];
+            strlcpy(page.openBuildsHost,
+                controllerJson["host"] | "127.0.0.1", sizeof(page.openBuildsHost));
+            page.openBuildsJogSpeed = constrain(controllerJson["jogSpeed"] | 1000, 100, 10000);
+            page.openBuildsContinuous =
+                strcmp(controllerJson["jogMode"] | "incremental", "continuous") == 0;
+            page.openBuildsJogDistanceTenths = constrain(
+                controllerJson["jogDistanceTenths"] | 10, 1, 1000);
+        }
         for (JsonObject controlJson : pageJson["controls"].as<JsonArray>()) {
             if (page.controlCount >= kMaximumRemoteControls) {
                 break;
@@ -1324,7 +1342,7 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
                     : strcmp(tapBehavior, "action") == 0 ? 2 : 0;
                 const uint32_t refreshSeconds = textBoxJson["refreshIntervalSeconds"] | 0;
                 control.refreshIntervalMs = refreshSeconds == 0
-                    ? 0 : constrain(refreshSeconds, 5UL, 3600UL) * 1000UL;
+                    ? 0 : constrain(refreshSeconds, 1UL, 3600UL) * 1000UL;
             } else {
                 control.gridWidth = 1;
                 control.gridHeight = control.slider
@@ -1389,6 +1407,9 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
             }
             ++page.controlCount;
         }
+        if (page.openBuildsController) {
+            syncOpenBuildsControllerActions(page);
+        }
         ++output.pageCount;
     }
     if (output.pageCount == 0) {
@@ -1401,6 +1422,43 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     restoreRemoteToggleStates(output);
     output.configured = true;
     return true;
+}
+
+void syncOpenBuildsControllerActions(RemotePage& page) {
+    for (uint8_t index = 0; index < page.controlCount; ++index) {
+        RemoteControl& control = page.controls[index];
+        if (strcmp(control.action.type, "openBuilds") == 0) {
+            strlcpy(control.action.host, page.openBuildsHost, sizeof(control.action.host));
+        }
+        if (strcmp(control.textSource, "openBuildsPosition") == 0) {
+            const char* separator = strrchr(control.sourceText, '|');
+            const char axis = separator != nullptr && separator[1] != '\0' ? separator[1] : 'x';
+            snprintf(control.sourceText, sizeof(control.sourceText), "%s|%c", page.openBuildsHost, axis);
+        }
+        if (strcmp(control.action.type, "openBuilds") != 0) {
+            continue;
+        }
+        const bool incrementalCommand = strncmp(control.action.text, "jog", 3) == 0;
+        const bool continuousCommand = strncmp(control.action.text, "continuousJog", 13) == 0;
+        if (!incrementalCommand && !continuousCommand) {
+            continue;
+        }
+        char command[sizeof(control.action.text)];
+        if (page.openBuildsContinuous && incrementalCommand) {
+            snprintf(command, sizeof(command), "continuousJog%s", control.action.text + 3);
+            strlcpy(control.action.text, command, sizeof(control.action.text));
+        } else if (!page.openBuildsContinuous && continuousCommand) {
+            snprintf(command, sizeof(command), "jog%s", control.action.text + 13);
+            strlcpy(control.action.text, command, sizeof(control.action.text));
+        }
+        control.action.valueTenths = page.openBuildsJogDistanceTenths;
+        control.action.value = page.openBuildsContinuous
+            ? page.openBuildsJogSpeed
+            : static_cast<int>((page.openBuildsJogDistanceTenths + 5) / 10);
+        control.action.modifierCount = 1;
+        snprintf(control.action.modifiers[0], sizeof(control.action.modifiers[0]),
+            "feed=%u", page.openBuildsJogSpeed);
+    }
 }
 
 bool loadRemoteProfile() {
@@ -2445,6 +2503,20 @@ void configureWifiServer() {
         }
         if (remoteProfile != nullptr) {
             for (JsonObject pageJson : document["pages"].as<JsonArray>()) {
+                const char* pageId = pageJson["id"] | "";
+                for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
+                    const RemotePage& page = remoteProfile->pages[pageIndex];
+                    if (!page.openBuildsController || strcmp(page.id, pageId) != 0) {
+                        continue;
+                    }
+                    JsonObject controllerJson = pageJson["openBuildsController"];
+                    controllerJson["host"] = page.openBuildsHost;
+                    controllerJson["jogSpeed"] = page.openBuildsJogSpeed;
+                    controllerJson["jogMode"] = page.openBuildsContinuous
+                        ? "continuous" : "incremental";
+                    controllerJson["jogDistanceTenths"] = page.openBuildsJogDistanceTenths;
+                    break;
+                }
                 for (JsonObject controlJson : pageJson["controls"].as<JsonArray>()) {
                     const char* controlId = controlJson["id"] | "";
                     for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
@@ -3687,6 +3759,42 @@ struct RemoteControlFrame {
 };
 
 bool remoteControlFrame(const RemotePage& page, size_t targetIndex, RemoteControlFrame& frame) {
+    if (page.openBuildsController && targetIndex < page.controlCount) {
+        const RemoteControl& control = page.controls[targetIndex];
+        if (strcmp(control.textSource, "openBuildsPosition") == 0) {
+            const char* separator = strrchr(control.sourceText, '|');
+            const char axis = separator != nullptr ? separator[1] : '\0';
+            const int32_t column = axis == 'x' ? 0 : axis == 'y' ? 1 : axis == 'z' ? 2 : -1;
+            if (column >= 0) {
+                frame = {24 + column * 168, 142, 156, 70};
+                return true;
+            }
+        }
+        if (strcmp(control.action.type, "openBuilds") == 0) {
+            const char* command = control.action.text;
+            const char* direction = nullptr;
+            if (strncmp(command, "continuousJog", 13) == 0) {
+                direction = command + 13;
+            } else if (strncmp(command, "jog", 3) == 0) {
+                direction = command + 3;
+            }
+            int8_t row = -1;
+            int8_t column = -1;
+            if (direction != nullptr && strcmp(direction, "XNegativeYPositive") == 0) { row = 0; column = 0; }
+            else if (direction != nullptr && strcmp(direction, "YPositive") == 0) { row = 0; column = 1; }
+            else if (direction != nullptr && strcmp(direction, "XPositiveYPositive") == 0) { row = 0; column = 2; }
+            else if (direction != nullptr && strcmp(direction, "XNegative") == 0) { row = 1; column = 0; }
+            else if (direction != nullptr && strcmp(direction, "XPositive") == 0) { row = 1; column = 2; }
+            else if (direction != nullptr && strcmp(direction, "XNegativeYNegative") == 0) { row = 2; column = 0; }
+            else if (direction != nullptr && strcmp(direction, "YNegative") == 0) { row = 2; column = 1; }
+            else if (direction != nullptr && strcmp(direction, "XPositiveYNegative") == 0) { row = 2; column = 2; }
+            if (row >= 0) {
+                frame = {24 + column * 108, 246 + row * 108, 96, 96};
+                return true;
+            }
+        }
+        return false;
+    }
     constexpr int32_t left = 24;
     constexpr int32_t top = 142;
     constexpr int32_t gap = 12;
@@ -4138,6 +4246,27 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
     const int32_t width = frame.width;
     const int32_t height = frame.height;
 
+    if (page.openBuildsController && strcmp(control.action.type, "openBuilds") == 0 &&
+        control.kind == 0) {
+        const uint32_t foreground = pressed ? TFT_WHITE : TFT_BLACK;
+        const uint32_t background = pressed ? TFT_BLACK : TFT_WHITE;
+        M5.Display.fillRoundRect(x, y, width, height, 8, background);
+        if (!pressed) {
+            M5.Display.drawRoundRect(x, y, width, height, 8, foreground);
+        }
+        drawRemoteControlIcon(control.symbol,
+            control.hasIconBitmap ? control.iconBitmap : nullptr,
+            control.iconDimension,
+            x + width / 2, y + 40, control.hasIconBitmap ? 42 : 30,
+            foreground, background);
+        M5.Display.setTextColor(foreground, background);
+        M5.Display.setFont(&fonts::FreeSansBold9pt7b);
+        M5.Display.setTextDatum(textdatum_t::middle_center);
+        M5.Display.drawCenterString(control.title, x + width / 2, y + 76);
+        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+        return;
+    }
+
     if (control.kind == 2) {
         constexpr int32_t radius = 10;
         M5.Display.fillRoundRect(x, y, width, height, radius, TFT_WHITE);
@@ -4448,6 +4577,95 @@ void drawRemoteIconLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
     }
 }
 
+void drawOpenBuildsControllerSettings(const RemotePage& page) {
+    constexpr int32_t x = 364;
+    constexpr int32_t width = 152;
+    M5.Display.fillRect(x, 232, width, 430, TFT_WHITE);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setTextDatum(textdatum_t::top_left);
+    M5.Display.setFont(&fonts::FreeSansBold9pt7b);
+    M5.Display.drawString("JOG SPEED", x, 238);
+    char speedText[20];
+    snprintf(speedText, sizeof(speedText), "%u mm/min", page.openBuildsJogSpeed);
+    M5.Display.setTextDatum(textdatum_t::top_right);
+    M5.Display.drawString(speedText, x + width, 238);
+
+    constexpr int32_t sliderY = 278;
+    M5.Display.drawRoundRect(x, sliderY, width, 42, 8, TFT_BLACK);
+    const int32_t sliderWidth =
+        (page.openBuildsJogSpeed - 100) * (width - 8) / (10000 - 100);
+    if (sliderWidth > 0) {
+        M5.Display.fillRoundRect(x + 4, sliderY + 4, sliderWidth, 34,
+            min<int32_t>(5, sliderWidth / 2), TFT_BLACK);
+    }
+
+    M5.Display.setTextDatum(textdatum_t::top_left);
+    M5.Display.drawString("JOG MODE", x, 350);
+    const int32_t segmentY = 382;
+    const int32_t segmentWidth = 72;
+    const char* modeLabels[] = {"STEP", "HOLD"};
+    for (uint8_t index = 0; index < 2; ++index) {
+        const int32_t segmentX = x + index * 80;
+        const bool selected = page.openBuildsContinuous == (index == 1);
+        M5.Display.fillRoundRect(segmentX, segmentY, segmentWidth, 48, 7,
+            selected ? TFT_BLACK : TFT_WHITE);
+        if (!selected) {
+            M5.Display.drawRoundRect(segmentX, segmentY, segmentWidth, 48, 7, TFT_BLACK);
+        }
+        M5.Display.setTextColor(selected ? TFT_WHITE : TFT_BLACK,
+            selected ? TFT_BLACK : TFT_WHITE);
+        M5.Display.setTextDatum(textdatum_t::middle_center);
+        M5.Display.drawCenterString(modeLabels[index], segmentX + segmentWidth / 2, segmentY + 24);
+    }
+
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setTextDatum(textdatum_t::top_left);
+    M5.Display.drawString(page.openBuildsContinuous ? "RELEASE TO STOP" : "STEP DISTANCE", x, 458);
+    if (page.openBuildsContinuous) {
+        M5.Display.setFont(&fonts::FreeSans12pt7b);
+        M5.Display.drawString("Motion stops", x, 504);
+        M5.Display.drawString("when released.", x, 536);
+    } else {
+        const uint16_t distances[] = {1, 10, 100, 1000};
+        const char* labels[] = {"0.1", "1", "10", "100"};
+        for (uint8_t index = 0; index < 4; ++index) {
+            const int32_t chipX = x + (index % 2) * 80;
+            const int32_t chipY = 490 + (index / 2) * 60;
+            const bool selected = page.openBuildsJogDistanceTenths == distances[index];
+            M5.Display.fillRoundRect(chipX, chipY, 72, 48, 7,
+                selected ? TFT_BLACK : TFT_WHITE);
+            if (!selected) {
+                M5.Display.drawRoundRect(chipX, chipY, 72, 48, 7, TFT_BLACK);
+            }
+            M5.Display.setTextColor(selected ? TFT_WHITE : TFT_BLACK,
+                selected ? TFT_BLACK : TFT_WHITE);
+            M5.Display.setTextDatum(textdatum_t::middle_center);
+            M5.Display.drawCenterString(labels[index], chipX + 36, chipY + 24);
+        }
+        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+        M5.Display.setTextDatum(textdatum_t::top_right);
+        M5.Display.drawString("mm", x + width, 606);
+    }
+}
+
+void redrawOpenBuildsControllerSettings(RemotePage& page) {
+    syncOpenBuildsControllerActions(page);
+    M5.Display.waitDisplay();
+    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+    M5.Display.startWrite();
+    drawOpenBuildsControllerSettings(page);
+    M5.Display.endWrite();
+}
+
+bool cancelOpenBuildsContinuousJog(RemoteControl& control) {
+    RemoteControl cancelControl = control;
+    strlcpy(cancelControl.action.text, "cancelJog", sizeof(cancelControl.action.text));
+    cancelControl.action.value = 0;
+    cancelControl.action.valueTenths = 0;
+    cancelControl.action.modifierCount = 0;
+    return dispatchRemoteAction(cancelControl, false, true);
+}
+
 bool isHomeWifiAuthenticationFailure(uint16_t reason) {
     return reason == WIFI_REASON_AUTH_FAIL ||
         reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
@@ -4584,6 +4802,7 @@ void displayRemote() {
     activeRemoteControlIndex = -1;
     activeRemoteControlVisual = false;
     activeRemoteHoldTriggered = false;
+    activeRemoteContinuousJog = false;
     M5.Display.startWrite();
     M5.Display.fillScreen(TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -4610,6 +4829,9 @@ void displayRemote() {
 
     prepareRemoteTextBoxes();
     const RemotePage& page = remoteProfile->pages[remotePageIndex];
+    if (page.openBuildsController) {
+        drawOpenBuildsControllerSettings(page);
+    }
     for (size_t index = 0; index < page.controlCount; ++index) {
         drawRemoteControl(page, index);
     }
@@ -5181,7 +5403,8 @@ void refreshReferencedTextBoxes(RemotePage& page, const char* controlId, bool re
 
 bool isMacTextSource(const RemoteControl& control) {
     return strncmp(control.textSource, "mac", 3) == 0 ||
-        strcmp(control.textSource, "nowPlaying") == 0;
+        strcmp(control.textSource, "nowPlaying") == 0 ||
+        strcmp(control.textSource, "openBuildsPosition") == 0;
 }
 
 uint32_t textBoxRefreshIntervalMs(const RemoteControl& control) {
@@ -5549,6 +5772,7 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
         document["text"] = action.text;
         document["value"] = action.value;
         if (strcmp(action.type, "netHomeTemperature") == 0 ||
+            strcmp(action.type, "openBuilds") == 0 ||
             strcmp(action.type, "netHomeClimate") == 0) {
             document["valueTenths"] = action.valueTenths;
         }
@@ -6254,6 +6478,14 @@ void navigateRemote(int direction) {
     if (remoteProfile == nullptr || !remoteProfile->configured) {
         return;
     }
+    if (activeRemoteContinuousJog && activeRemoteControlIndex >= 0 &&
+        activeRemoteTouchPage < remoteProfile->pageCount) {
+        RemotePage& activePage = remoteProfile->pages[activeRemoteTouchPage];
+        if (activeRemoteControlIndex < activePage.controlCount) {
+            cancelOpenBuildsContinuousJog(activePage.controls[activeRemoteControlIndex]);
+        }
+        activeRemoteContinuousJog = false;
+    }
     if (direction < 0) {
         remotePageIndex = remotePageIndex == 0
             ? remoteProfile->pageCount - 1
@@ -6524,6 +6756,46 @@ void handleTouch() {
     if (remoteVisible) {
         lastRemoteActivityAt = millis();
         RemotePage& page = remoteProfile->pages[remotePageIndex];
+        if (page.openBuildsController && touch.x >= 354 && touch.x < 526 &&
+            touch.y >= 224 && touch.y < 670) {
+            if (activeRemoteContinuousJog && activeRemoteControlIndex >= 0 &&
+                activeRemoteControlIndex < page.controlCount) {
+                if (cancelOpenBuildsContinuousJog(page.controls[activeRemoteControlIndex])) {
+                    activeRemoteContinuousJog = false;
+                    activeRemoteControlIndex = -1;
+                    activeRemoteControlVisual = false;
+                }
+            }
+            if ((touch.wasPressed() || touch.isPressed()) && touch.y >= 268 && touch.y < 332) {
+                const int32_t sliderPosition = constrain(
+                    static_cast<int32_t>(touch.x - 364), static_cast<int32_t>(0), static_cast<int32_t>(152));
+                const int32_t rawSpeed = 100 + sliderPosition * (10000 - 100) / 152;
+                const uint16_t nextSpeed = constrain(
+                    static_cast<int32_t>(((rawSpeed + 50) / 100) * 100),
+                    static_cast<int32_t>(100), static_cast<int32_t>(10000));
+                if (nextSpeed != page.openBuildsJogSpeed) {
+                    page.openBuildsJogSpeed = nextSpeed;
+                    redrawOpenBuildsControllerSettings(page);
+                }
+            } else if (touch.wasClicked() && touch.y >= 370 && touch.y < 442) {
+                const bool continuous = touch.x >= 440;
+                if (continuous != page.openBuildsContinuous) {
+                    page.openBuildsContinuous = continuous;
+                    redrawOpenBuildsControllerSettings(page);
+                }
+            } else if (touch.wasClicked() && !page.openBuildsContinuous &&
+                touch.y >= 480 && touch.y < 610) {
+                const uint8_t column = touch.x >= 440 ? 1 : 0;
+                const uint8_t row = touch.y >= 545 ? 1 : 0;
+                const uint16_t distances[] = {1, 10, 100, 1000};
+                const uint16_t nextDistance = distances[row * 2 + column];
+                if (nextDistance != page.openBuildsJogDistanceTenths) {
+                    page.openBuildsJogDistanceTenths = nextDistance;
+                    redrawOpenBuildsControllerSettings(page);
+                }
+            }
+            return;
+        }
         int32_t hitControl = -1;
         RemoteControlFrame hitFrame;
         for (size_t index = 0; index < page.controlCount; ++index) {
@@ -6583,6 +6855,11 @@ void handleTouch() {
                     activeRemoteSliderSentValue = control.action.value;
                 } else if (control.kind == 0) {
                     displayRemoteControlFeedback(hitControl, true);
+                    if (page.openBuildsContinuous &&
+                        strncmp(control.action.text, "continuousJog", 13) == 0) {
+                        activeRemoteHoldTriggered = true;
+                        activeRemoteContinuousJog = dispatchRemoteAction(control, false, true);
+                    }
                 }
             }
             return;
@@ -6595,6 +6872,9 @@ void handleTouch() {
                 insideCapturedControl != activeRemoteControlVisual) {
                 activeRemoteControlVisual = insideCapturedControl;
                 displayRemoteControlFeedback(activeRemoteControlIndex, insideCapturedControl);
+                if (!insideCapturedControl && activeRemoteContinuousJog) {
+                    cancelOpenBuildsContinuousJog(control);
+                }
             }
 
             if (touch.isPressed() && control.slider) {
@@ -6662,6 +6942,10 @@ void handleTouch() {
             if (touch.wasReleased()) {
                 const int8_t releasedControlIndex = activeRemoteControlIndex;
                 const bool shouldActivate = insideCapturedControl && !activeRemoteHoldTriggered;
+                if (activeRemoteContinuousJog) {
+                    cancelOpenBuildsContinuousJog(control);
+                    activeRemoteContinuousJog = false;
+                }
                 if (activeRemoteControlVisual && control.kind == 0) {
                     displayRemoteControlFeedback(releasedControlIndex, false);
                 }

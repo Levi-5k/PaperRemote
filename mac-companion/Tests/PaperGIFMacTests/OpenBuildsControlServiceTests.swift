@@ -19,6 +19,23 @@ final class OpenBuildsControlServiceTests: XCTestCase {
             OpenBuildsCommandMapper.emission(command: "jogXNegativeYPositive", value: 2),
             OpenBuildsEmission(event: "jogXY", payload: .jogXY(x: -2, y: 2, feed: 1_000))
         )
+        XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(
+                command: "jogXPositiveYNegative",
+                value: 0,
+                valueTenths: 1,
+                modifiers: ["feed=2400"]
+            ),
+            OpenBuildsEmission(event: "jogXY", payload: .jogXY(x: 0.1, y: -0.1, feed: 2_400))
+        )
+        XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(command: "continuousJogXNegativeYPositive", value: 3_200),
+            OpenBuildsEmission(event: "runCommand", payload: .string("$J=G91 G21 X-1000 Y1000 F3200\n"))
+        )
+        XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(command: "cancelJog", value: 0),
+            OpenBuildsEmission(event: "stop", payload: .stop(stop: false, jog: true, abort: false))
+        )
     }
 
     func testRejectsUnknownCommandsAndUnsafeJogDistances() {
@@ -26,6 +43,7 @@ final class OpenBuildsControlServiceTests: XCTestCase {
         XCTAssertNil(OpenBuildsCommandMapper.emission(command: "jogXPositive", value: 0))
         XCTAssertNil(OpenBuildsCommandMapper.emission(command: "jogXPositive", value: 101))
         XCTAssertNil(OpenBuildsCommandMapper.emission(command: "jogXPositiveYPositive", value: 101))
+        XCTAssertNil(OpenBuildsCommandMapper.emission(command: "continuousJogXPositive", value: 99))
     }
 
     func testBuildsOnlyLocalNetworkTargets() {
@@ -35,5 +53,14 @@ final class OpenBuildsControlServiceTests: XCTestCase {
         XCTAssertTrue(OpenBuildsControlService.endpoints(host: "8.8.8.8").isEmpty)
         XCTAssertTrue(OpenBuildsControlService.endpoints(host: "example.com").isEmpty)
         XCTAssertTrue(OpenBuildsControlService.endpoints(host: "localhost/path").isEmpty)
+    }
+
+    func testParsesWorkPositionFromStatusPayload() {
+        let position = OpenBuildsControlService.position(from: [
+            "machine": ["position": ["work": ["x": 12.5, "y": "-3.25", "z": 0]]],
+        ])
+
+        XCTAssertEqual(position, OpenBuildsPosition(x: 12.5, y: -3.25, z: 0))
+        XCTAssertNil(OpenBuildsControlService.position(from: ["machine": [:]]))
     }
 }

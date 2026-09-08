@@ -1216,17 +1216,27 @@ private struct PaperGIFRemotePagePreview: View {
                     .frame(width: 492 * scale, height: max(1, scale))
                     .position(x: 270 * scale, y: 106 * scale)
 
-                ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
-                    previewControl(control, frame: frames[index], scale: scale)
-                        .contentShape(Rectangle())
-                        .position(
-                            draggedControlID == control.id
-                                ? dragLocation ?? center(of: frames[index])
-                                : center(of: frames[index])
-                        )
-                        .zIndex(draggedControlID == control.id ? 1 : 0)
-                        .onTapGesture { onEditControl(control.id) }
-                        .simultaneousGesture(reorderGesture(for: control.id, scale: scale))
+                if page.layout == .openBuildsController {
+                    PaperGIFOpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
+                    ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
+                        previewControl(control, frame: frames[index], scale: scale, controllerCompact: true)
+                            .contentShape(Rectangle())
+                            .position(center(of: frames[index]))
+                            .onTapGesture { onEditControl(control.id) }
+                    }
+                } else {
+                    ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
+                        previewControl(control, frame: frames[index], scale: scale)
+                            .contentShape(Rectangle())
+                            .position(
+                                draggedControlID == control.id
+                                    ? dragLocation ?? center(of: frames[index])
+                                    : center(of: frames[index])
+                            )
+                            .zIndex(draggedControlID == control.id ? 1 : 0)
+                            .onTapGesture { onEditControl(control.id) }
+                            .simultaneousGesture(reorderGesture(for: control.id, scale: scale))
+                    }
                 }
 
                 Text("<  \(pageIndex + 1) / \(max(pageCount, 1))  >")
@@ -1247,7 +1257,8 @@ private struct PaperGIFRemotePagePreview: View {
     private func previewControl(
         _ control: PaperGIFRemoteControl,
         frame: CGRect,
-        scale: CGFloat
+        scale: CGFloat,
+        controllerCompact: Bool = false
     ) -> some View {
         let progress = CGFloat(min(max(control.action.value, 0), 255)) / 255
 
@@ -1293,6 +1304,14 @@ private struct PaperGIFRemotePagePreview: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(progress >= 0.5 ? .white : .black)
                 .padding(.horizontal, 10 * scale)
+            } else if controllerCompact && control.kind == .button {
+                VStack(spacing: 5 * scale) {
+                    PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
+                        .frame(width: 30 * scale, height: 30 * scale)
+                    Text(control.title)
+                        .font(.system(size: 10 * scale, weight: .semibold))
+                }
+                .foregroundStyle(.black)
             } else if control.buttonGridHeight == 1 {
                 HStack(spacing: 8 * scale) {
                     PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
@@ -1336,6 +1355,8 @@ private struct PaperGIFRemotePagePreview: View {
             }
             return "128"
         case .nowPlaying: return "Song Title - Artist"
+        case .openBuildsPosition:
+            return "\(textBox.sourceText.split(separator: "|").last?.uppercased() ?? "X") 0.000"
         }
     }
 
@@ -1436,6 +1457,36 @@ private struct PaperGIFRemotePagePreview: View {
 
     private func controlFrames(scale: CGFloat) -> [CGRect] {
         let controls = Array(page.controls.prefix(16))
+        if page.layout == .openBuildsController {
+            return controls.map { control in
+                if control.kind == .textBox,
+                   let axis = control.textBox?.sourceText.split(separator: "|").last?.lowercased(),
+                   let column = ["x", "y", "z"].firstIndex(of: axis) {
+                    return CGRect(
+                        x: CGFloat(24 + column * 168) * scale,
+                        y: 142 * scale,
+                        width: 156 * scale,
+                        height: 70 * scale
+                    )
+                }
+                let direction = control.action.text
+                    .replacingOccurrences(of: "continuousJog", with: "")
+                    .replacingOccurrences(of: "jog", with: "")
+                let positions: [String: (Int, Int)] = [
+                    "XNegativeYPositive": (0, 0), "YPositive": (0, 1),
+                    "XPositiveYPositive": (0, 2), "XNegative": (1, 0),
+                    "XPositive": (1, 2), "XNegativeYNegative": (2, 0),
+                    "YNegative": (2, 1), "XPositiveYNegative": (2, 2),
+                ]
+                guard let (row, column) = positions[direction] else { return .zero }
+                return CGRect(
+                    x: CGFloat(24 + column * 108) * scale,
+                    y: CGFloat(246 + row * 108) * scale,
+                    width: 96 * scale,
+                    height: 96 * scale
+                )
+            }
+        }
         return PaperGIFRemoteGrid.placements(for: controls).map { placement in
             guard let placement else { return .zero }
             let row = placement.slot / PaperGIFRemoteGrid.columnCount
@@ -1447,6 +1498,70 @@ private struct PaperGIFRemotePagePreview: View {
                 height: CGFloat(77 * placement.span.height + 12 * (placement.span.height - 1)) * scale
             )
         }
+    }
+}
+
+private struct PaperGIFOpenBuildsSettingsPreview: View {
+    let controller: PaperGIFOpenBuildsController?
+    let scale: CGFloat
+
+    var body: some View {
+        let settings = controller ?? PaperGIFOpenBuildsController()
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("JOG SPEED")
+                Spacer()
+                Text("\(settings.jogSpeed) mm/min")
+            }
+            .font(.system(size: 9 * scale, weight: .bold))
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 7 * scale).stroke(.black, lineWidth: max(1, scale))
+                RoundedRectangle(cornerRadius: 5 * scale)
+                    .fill(.black)
+                    .padding(4 * scale)
+                    .frame(width: max(8 * scale, 152 * scale * CGFloat(settings.jogSpeed - 100) / 9_900))
+            }
+            .frame(height: 42 * scale)
+            .padding(.top, 22 * scale)
+
+            Text("JOG MODE")
+                .font(.system(size: 9 * scale, weight: .bold))
+                .padding(.top, 26 * scale)
+            HStack(spacing: 8 * scale) {
+                chip("STEP", selected: settings.jogMode == .incremental)
+                chip("HOLD", selected: settings.jogMode == .continuous)
+            }
+            .padding(.top, 14 * scale)
+
+            Text(settings.jogMode == .continuous ? "RELEASE TO STOP" : "STEP DISTANCE")
+                .font(.system(size: 9 * scale, weight: .bold))
+                .padding(.top, 26 * scale)
+            if settings.jogMode == .continuous {
+                Text("Motion stops\nwhen released.")
+                    .font(.system(size: 12 * scale))
+                    .padding(.top, 26 * scale)
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(72 * scale)), count: 2), spacing: 12 * scale) {
+                    ForEach([(1, "0.1"), (10, "1"), (100, "10"), (1000, "100")], id: \.0) { value, label in
+                        chip(label, selected: settings.jogDistanceTenths == value)
+                    }
+                }
+                .padding(.top, 14 * scale)
+            }
+        }
+        .foregroundStyle(.black)
+        .frame(width: 152 * scale, alignment: .topLeading)
+        .position(x: 440 * scale, y: 447 * scale)
+    }
+
+    private func chip(_ title: String, selected: Bool) -> some View {
+        Text(title)
+            .font(.system(size: 9 * scale, weight: .bold))
+            .foregroundStyle(selected ? .white : .black)
+            .frame(width: 72 * scale, height: 48 * scale)
+            .background(selected ? Color.black : Color.white)
+            .overlay(RoundedRectangle(cornerRadius: 7 * scale).stroke(.black, lineWidth: max(1, scale)))
+            .clipShape(RoundedRectangle(cornerRadius: 7 * scale))
     }
 }
 
@@ -1560,6 +1675,7 @@ private struct PaperGIFRemoteControlEditor: View {
                 Text("Shortcut output").tag(PaperGIFRemoteTextSource.macShortcut)
                 Text("Control value").tag(PaperGIFRemoteTextSource.controlValue)
                 Text("Mac now playing").tag(PaperGIFRemoteTextSource.nowPlaying)
+                Text("OpenBuilds position").tag(PaperGIFRemoteTextSource.openBuildsPosition)
             }
 
             switch control.textBox?.source ?? .staticText {
@@ -1586,6 +1702,11 @@ private struct PaperGIFRemoteControlEditor: View {
                 }
             case .nowPlaying:
                 macTextSourceComputerPicker
+            case .openBuildsPosition:
+                macTextSourceComputerPicker
+                TextField("127.0.0.1|x", text: textBoxBinding(\.sourceText))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
             }
 
             if control.textBox?.source != .staticText {
@@ -2276,7 +2397,7 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private var supportsAutomaticRefresh: Bool {
         switch control.textBox?.source ?? .staticText {
-        case .dateTime, .macScript, .macShortcut, .nowPlaying:
+        case .dateTime, .macScript, .macShortcut, .nowPlaying, .openBuildsPosition:
             true
         case .staticText, .controlValue:
             false

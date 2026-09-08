@@ -13,6 +13,17 @@ public enum RemoteControlKind
     TextBox,
 }
 
+public enum RemotePageLayout
+{
+    OpenBuildsController,
+}
+
+public enum RemoteJogMode
+{
+    Incremental,
+    Continuous,
+}
+
 public enum RemoteTextSource
 {
     StaticText,
@@ -21,6 +32,7 @@ public enum RemoteTextSource
     MacShortcut,
     ControlValue,
     NowPlaying,
+    OpenBuildsPosition,
 }
 
 public enum RemoteTextSize
@@ -149,6 +161,18 @@ public sealed class RemotePage
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = string.Empty;
     public List<RemoteControl> Controls { get; set; } = [];
+    public RemotePageLayout? Layout { get; set; }
+    public OpenBuildsControllerSettings? OpenBuildsController { get; set; }
+    public string? ModuleID { get; set; }
+    public string? ModulePageID { get; set; }
+}
+
+public sealed class OpenBuildsControllerSettings
+{
+    public string Host { get; set; } = "127.0.0.1";
+    public int JogSpeed { get; set; } = 1_000;
+    public RemoteJogMode JogMode { get; set; } = RemoteJogMode.Incremental;
+    public int JogDistanceTenths { get; set; } = 10;
 }
 
 public sealed class RemoteProfile

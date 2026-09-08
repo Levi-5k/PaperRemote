@@ -105,6 +105,21 @@ internal sealed class ModuleCatalogService
         return clone;
     }
 
+    public static RemotePage ClonePage(PaperModulePage definition, string moduleId)
+    {
+        var clone = JsonSerializer.Deserialize<RemotePage>(
+            JsonSerializer.Serialize(definition.Page, RemoteProfileJson.Options),
+            RemoteProfileJson.Options) ?? throw new InvalidDataException("A module page could not be copied.");
+        clone.Id = Guid.NewGuid();
+        foreach (var control in clone.Controls)
+        {
+            control.Id = Guid.NewGuid();
+        }
+        clone.ModuleID = moduleId;
+        clone.ModulePageID = definition.Id;
+        return clone;
+    }
+
     private async Task<byte[]> DownloadAsync(Uri uri, CancellationToken cancellationToken)
     {
         using var response = await httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
@@ -171,7 +186,14 @@ internal sealed class ModuleCatalogService
                 string.IsNullOrWhiteSpace(control.Category) ||
                 string.IsNullOrWhiteSpace(control.Detail) ||
                 string.IsNullOrWhiteSpace(control.Control.Title)) ||
-            manifest.Controls.Select(control => control.Id).Distinct(StringComparer.Ordinal).Count() != manifest.Controls.Count)
+            manifest.Controls.Select(control => control.Id).Distinct(StringComparer.Ordinal).Count() != manifest.Controls.Count ||
+            manifest.Pages.Count > 8 ||
+            manifest.Pages.Any(page =>
+                !IsValidIdentifier(page.Id) ||
+                string.IsNullOrWhiteSpace(page.Detail) ||
+                string.IsNullOrWhiteSpace(page.Page.Name) ||
+                page.Page.Controls.Count > 16) ||
+            manifest.Pages.Select(page => page.Id).Distinct(StringComparer.Ordinal).Count() != manifest.Pages.Count)
         {
             throw new InvalidDataException("The module manifest is invalid.");
         }
@@ -205,6 +227,7 @@ internal sealed class PaperModuleManifest
     public string Version { get; set; } = string.Empty;
     public string Author { get; set; } = string.Empty;
     public List<PaperModuleControl> Controls { get; set; } = [];
+    public List<PaperModulePage> Pages { get; set; } = [];
 }
 
 internal sealed class PaperModuleControl
@@ -213,4 +236,11 @@ internal sealed class PaperModuleControl
     public string Category { get; set; } = string.Empty;
     public string Detail { get; set; } = string.Empty;
     public RemoteControl Control { get; set; } = new();
+}
+
+internal sealed class PaperModulePage
+{
+    public string Id { get; set; } = string.Empty;
+    public string Detail { get; set; } = string.Empty;
+    public RemotePage Page { get; set; } = new();
 }

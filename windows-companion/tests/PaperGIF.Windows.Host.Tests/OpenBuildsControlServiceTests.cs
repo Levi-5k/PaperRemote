@@ -22,6 +22,18 @@ public sealed class OpenBuildsControlServiceTests
             new OpenBuildsEmission("jogXY", OpenBuildsPayloadKind.JogXY,
                 JogXYValue: new OpenBuildsJogXYPayload(-2, 2, 1_000)),
             OpenBuildsCommandMapper.Create("jogXNegativeYPositive", 2));
+        Assert.Equal(
+            new OpenBuildsEmission("jogXY", OpenBuildsPayloadKind.JogXY,
+                JogXYValue: new OpenBuildsJogXYPayload(0.1, -0.1, 2_400)),
+            OpenBuildsCommandMapper.Create("jogXPositiveYNegative", 0, 1, ["feed=2400"]));
+        Assert.Equal(
+            new OpenBuildsEmission("runCommand", OpenBuildsPayloadKind.String,
+                StringValue: "$J=G91 G21 X-1000 Y1000 F3200\n"),
+            OpenBuildsCommandMapper.Create("continuousJogXNegativeYPositive", 3_200));
+        Assert.Equal(
+            new OpenBuildsEmission("stop", OpenBuildsPayloadKind.Stop,
+                StopValue: new OpenBuildsStopPayload(false, true, false)),
+            OpenBuildsCommandMapper.Create("cancelJog", 0));
     }
 
     [Fact]
@@ -31,6 +43,7 @@ public sealed class OpenBuildsControlServiceTests
         Assert.Null(OpenBuildsCommandMapper.Create("jogXPositive", 0));
         Assert.Null(OpenBuildsCommandMapper.Create("jogXPositive", 101));
         Assert.Null(OpenBuildsCommandMapper.Create("jogXPositiveYPositive", 101));
+        Assert.Null(OpenBuildsCommandMapper.Create("continuousJogXPositive", 99));
     }
 
     [Fact]
@@ -41,5 +54,16 @@ public sealed class OpenBuildsControlServiceTests
         Assert.Empty(OpenBuildsControlService.Endpoints("8.8.8.8"));
         Assert.Empty(OpenBuildsControlService.Endpoints("example.com"));
         Assert.Empty(OpenBuildsControlService.Endpoints("localhost/path"));
+    }
+
+    [Fact]
+    public void ParsesWorkPositionFromStatusPayload()
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(
+            """{"machine":{"position":{"work":{"x":12.5,"y":"-3.25","z":0}}}}""");
+
+        Assert.Equal(
+            new OpenBuildsPosition(12.5, -3.25, 0),
+            OpenBuildsControlService.ParsePosition(document.RootElement));
     }
 }

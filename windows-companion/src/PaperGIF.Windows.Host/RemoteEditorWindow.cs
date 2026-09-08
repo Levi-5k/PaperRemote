@@ -461,9 +461,12 @@ internal sealed class RemoteEditorWindow : Form
     private Control BuildModuleCard(PaperModuleListing module)
     {
         var installed = moduleCatalog.IsInstalled(module.Id, module.Version);
+        var pageTemplate = installed
+            ? moduleCatalog.GetInstalled(module.Id)?.Pages.FirstOrDefault()
+            : null;
         var card = new Panel
         {
-            Height = 112,
+            Height = pageTemplate is null ? 112 : 150,
             Margin = new Padding(0, 0, 0, 9),
             BackColor = EditorTheme.Surface,
             Tag = "module-card",
@@ -503,7 +506,19 @@ internal sealed class RemoteEditorWindow : Form
         }, installed ? 88 : 76);
         action.Enabled = !installed;
         action.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
-        action.Location = new Point(220, 74);
+        action.Location = new Point(220, pageTemplate is null ? 74 : 112);
+        Button? addPage = null;
+        if (pageTemplate is not null)
+        {
+            addPage = Button("Add Page", (_, _) =>
+            {
+                store.AddPage(ModuleCatalogService.ClonePage(pageTemplate, module.Id));
+                moduleStatus.Text = $"Added {pageTemplate.Page.Name}.";
+            }, 92);
+            addPage.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
+            addPage.Location = new Point(14, 112);
+            addPage.Enabled = store.Profile.Pages.Count < 8;
+        }
         card.Resize += (_, _) =>
         {
             name.Width = Math.Max(100, card.ClientSize.Width - 28);
@@ -511,6 +526,10 @@ internal sealed class RemoteEditorWindow : Form
             action.Left = Math.Max(14, card.ClientSize.Width - action.Width - 14);
         };
         card.Controls.AddRange([name, details, metadata, action]);
+        if (addPage is not null)
+        {
+            card.Controls.Add(addPage);
+        }
         return card;
     }
 
@@ -520,7 +539,9 @@ internal sealed class RemoteEditorWindow : Form
         try
         {
             var module = await moduleCatalog.InstallAsync(listing);
-            moduleStatus.Text = $"Installed {module.Name}. Its controls are now in Add Controls.";
+            moduleStatus.Text = module.Pages.Count > 0
+                ? $"Installed {module.Name}. Add its page here or use individual controls."
+                : $"Installed {module.Name}. Its controls are now in Add Controls.";
             RefreshCatalog();
             RenderModules();
         }

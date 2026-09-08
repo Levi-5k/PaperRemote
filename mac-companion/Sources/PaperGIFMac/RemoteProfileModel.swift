@@ -36,6 +36,22 @@ enum RemoteControlKind: String, Codable, CaseIterable, Identifiable, Sendable {
     var id: Self { self }
 }
 
+enum RemotePageLayout: String, Codable, Sendable {
+    case openBuildsController
+}
+
+enum RemoteJogMode: String, Codable, Sendable {
+    case incremental
+    case continuous
+}
+
+struct RemoteOpenBuildsController: Codable, Equatable, Sendable {
+    var host = "127.0.0.1"
+    var jogSpeed = 1_000
+    var jogMode: RemoteJogMode = .incremental
+    var jogDistanceTenths = 10
+}
+
 enum RemoteTextSource: String, Codable, CaseIterable, Identifiable, Sendable {
     case staticText
     case dateTime
@@ -43,6 +59,7 @@ enum RemoteTextSource: String, Codable, CaseIterable, Identifiable, Sendable {
     case macShortcut
     case controlValue
     case nowPlaying
+    case openBuildsPosition
 
     var id: Self { self }
 }
@@ -291,6 +308,10 @@ struct RemotePage: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
     var name: String
     var controls: [RemoteControl]
+    var layout: RemotePageLayout? = nil
+    var openBuildsController: RemoteOpenBuildsController? = nil
+    var moduleID: String? = nil
+    var modulePageID: String? = nil
 }
 
 extension RemotePage {

@@ -36,6 +36,22 @@ enum PaperGIFRemoteControlKind: String, Codable, CaseIterable, Identifiable, Sen
     var id: Self { self }
 }
 
+enum PaperGIFRemotePageLayout: String, Codable, Sendable {
+    case openBuildsController
+}
+
+enum PaperGIFRemoteJogMode: String, Codable, Sendable {
+    case incremental
+    case continuous
+}
+
+struct PaperGIFOpenBuildsController: Codable, Equatable, Sendable {
+    var host = "127.0.0.1"
+    var jogSpeed = 1_000
+    var jogMode: PaperGIFRemoteJogMode = .incremental
+    var jogDistanceTenths = 10
+}
+
 enum PaperGIFRemoteTextSource: String, Codable, CaseIterable, Identifiable, Sendable {
     case staticText
     case dateTime
@@ -43,6 +59,7 @@ enum PaperGIFRemoteTextSource: String, Codable, CaseIterable, Identifiable, Send
     case macShortcut
     case controlValue
     case nowPlaying
+    case openBuildsPosition
 
     var id: Self { self }
 }
@@ -363,6 +380,10 @@ struct PaperGIFRemotePage: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
     var name: String
     var controls: [PaperGIFRemoteControl]
+    var layout: PaperGIFRemotePageLayout? = nil
+    var openBuildsController: PaperGIFOpenBuildsController? = nil
+    var moduleID: String? = nil
+    var modulePageID: String? = nil
 }
 
 extension PaperGIFRemotePage {

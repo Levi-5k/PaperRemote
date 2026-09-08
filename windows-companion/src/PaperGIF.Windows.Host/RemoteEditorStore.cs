@@ -97,6 +97,18 @@ internal sealed class RemoteEditorStore : IDisposable
         Commit();
     }
 
+    public void AddPage(RemotePage page)
+    {
+        if (Profile.Pages.Count >= 8)
+        {
+            return;
+        }
+        Profile.Pages.Add(page);
+        SelectedPageId = page.Id;
+        SelectedControlId = null;
+        Commit();
+    }
+
     public void DeleteSelectedPage()
     {
         var page = SelectedPage;

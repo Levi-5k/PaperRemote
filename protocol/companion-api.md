@@ -74,14 +74,22 @@ The `mac*` action names are retained for compatibility and mean desktop-hosted
 actions. Capability metadata will determine which actions each host presents.
 
 `openBuilds` is a desktop-hosted integration with OpenBuilds CONTROL. `host`
-contains a loopback or private-LAN address with an optional port, `text` is one
-of `jogXNegative`, `jogXPositive`, `jogYNegative`, `jogYPositive`,
-`jogZNegative`, `jogZPositive`, `jogXNegativeYNegative`,
-`jogXNegativeYPositive`, `jogXPositiveYNegative`, `jogXPositiveYPositive`,
-`pause`, `resume`, `stop`, `abort`, `unlock`, or `home`, and `value` is a 1-100
-mm per-axis distance for jog commands. Companions probe
-CONTROL's `/api/version` endpoint before emitting an allowlisted Socket.IO
-event; arbitrary G-code is not accepted.
+contains a loopback or private-LAN address with an optional port. Incremental
+jog commands are `jogXNegative`, `jogXPositive`, `jogYNegative`,
+`jogYPositive`, `jogZNegative`, `jogZPositive`, and the four corresponding
+`jogX...Y...` diagonal names. Their distance is `valueTenths / 10` mm when
+`valueTenths` is present, otherwise `value` mm. An optional `feed=<100-10000>`
+modifier selects mm/min.
+
+Continuous XY commands use the same direction suffix prefixed by
+`continuousJog`, put feed in `value`, and must be paired with `cancelJog` on
+release or pointer exit. Other commands are `pause`, `resume`, `stop`, `abort`,
+`unlock`, and `home`. Companions probe CONTROL's `/api/version` endpoint before
+emitting an allowlisted Socket.IO event; arbitrary G-code is not accepted.
+
+The `openBuildsPosition` text source uses `host|axis` in `sourceText`, where
+axis is `x`, `y`, or `z`. The companion subscribes to CONTROL status and returns
+the current work coordinate without issuing machine movement.
 
 ### `POST /text-source`
 

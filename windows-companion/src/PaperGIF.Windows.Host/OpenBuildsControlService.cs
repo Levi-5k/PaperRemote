@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using SocketIOClient;
@@ -22,8 +23,8 @@ internal sealed record OpenBuildsStopPayload(
     [property: JsonPropertyName("abort")] bool Abort);
 
 internal sealed record OpenBuildsJogXYPayload(
-    [property: JsonPropertyName("x")] int X,
-    [property: JsonPropertyName("y")] int Y,
+    [property: JsonPropertyName("x")] double X,
+    [property: JsonPropertyName("y")] double Y,
     [property: JsonPropertyName("feed")] int Feed);
 
 internal sealed record OpenBuildsEmission(
@@ -35,45 +36,86 @@ internal sealed record OpenBuildsEmission(
     OpenBuildsJogXYPayload? JogXYValue = null,
     OpenBuildsStopPayload? StopValue = null);
 
+internal sealed record OpenBuildsPosition(double X, double Y, double Z);
+
 internal static class OpenBuildsCommandMapper
 {
-    public static OpenBuildsEmission? Create(string command, int value) => command switch
+    public static OpenBuildsEmission? Create(
+        string command,
+        int value,
+        int? valueTenths = null,
+        IReadOnlyList<string>? modifiers = null)
     {
-        "jogXNegative" => Jog("X", -1, value, 1_000),
-        "jogXPositive" => Jog("X", 1, value, 1_000),
-        "jogYNegative" => Jog("Y", -1, value, 1_000),
-        "jogYPositive" => Jog("Y", 1, value, 1_000),
-        "jogZNegative" => Jog("Z", -1, value, 500),
-        "jogZPositive" => Jog("Z", 1, value, 500),
-        "jogXNegativeYNegative" => JogXY(-1, -1, value),
-        "jogXNegativeYPositive" => JogXY(-1, 1, value),
-        "jogXPositiveYNegative" => JogXY(1, -1, value),
-        "jogXPositiveYPositive" => JogXY(1, 1, value),
-        "pause" => new("pause", OpenBuildsPayloadKind.Boolean, BooleanValue: true),
-        "resume" => new("resume", OpenBuildsPayloadKind.Boolean, BooleanValue: true),
-        "stop" => new("stop", OpenBuildsPayloadKind.Stop,
-            StopValue: new OpenBuildsStopPayload(true, false, false)),
-        "abort" => new("stop", OpenBuildsPayloadKind.Stop,
-            StopValue: new OpenBuildsStopPayload(false, false, true)),
-        "unlock" => new("clearAlarm", OpenBuildsPayloadKind.Integer, IntegerValue: 2),
-        "home" => new("runCommand", OpenBuildsPayloadKind.String, StringValue: "$H\n"),
-        _ => null,
-    };
+        var distance = (valueTenths ?? value * 10) / 10d;
+        var configuredFeed = Feed(modifiers);
+        var xyFeed = configuredFeed ?? 1_000;
+        var zFeed = configuredFeed ?? 500;
+        return command switch
+        {
+            "jogXNegative" => Jog("X", -1, distance, xyFeed),
+            "jogXPositive" => Jog("X", 1, distance, xyFeed),
+            "jogYNegative" => Jog("Y", -1, distance, xyFeed),
+            "jogYPositive" => Jog("Y", 1, distance, xyFeed),
+            "jogZNegative" => Jog("Z", -1, distance, zFeed),
+            "jogZPositive" => Jog("Z", 1, distance, zFeed),
+            "jogXNegativeYNegative" => JogXY(-1, -1, distance, xyFeed),
+            "jogXNegativeYPositive" => JogXY(-1, 1, distance, xyFeed),
+            "jogXPositiveYNegative" => JogXY(1, -1, distance, xyFeed),
+            "jogXPositiveYPositive" => JogXY(1, 1, distance, xyFeed),
+            "continuousJogXNegative" => ContinuousJog(-1, 0, value),
+            "continuousJogXPositive" => ContinuousJog(1, 0, value),
+            "continuousJogYNegative" => ContinuousJog(0, -1, value),
+            "continuousJogYPositive" => ContinuousJog(0, 1, value),
+            "continuousJogXNegativeYNegative" => ContinuousJog(-1, -1, value),
+            "continuousJogXNegativeYPositive" => ContinuousJog(-1, 1, value),
+            "continuousJogXPositiveYNegative" => ContinuousJog(1, -1, value),
+            "continuousJogXPositiveYPositive" => ContinuousJog(1, 1, value),
+            "cancelJog" => new("stop", OpenBuildsPayloadKind.Stop,
+                StopValue: new OpenBuildsStopPayload(false, true, false)),
+            "pause" => new("pause", OpenBuildsPayloadKind.Boolean, BooleanValue: true),
+            "resume" => new("resume", OpenBuildsPayloadKind.Boolean, BooleanValue: true),
+            "stop" => new("stop", OpenBuildsPayloadKind.Stop,
+                StopValue: new OpenBuildsStopPayload(true, false, false)),
+            "abort" => new("stop", OpenBuildsPayloadKind.Stop,
+                StopValue: new OpenBuildsStopPayload(false, false, true)),
+            "unlock" => new("clearAlarm", OpenBuildsPayloadKind.Integer, IntegerValue: 2),
+            "home" => new("runCommand", OpenBuildsPayloadKind.String, StringValue: "$H\n"),
+            _ => null,
+        };
+    }
 
-    private static OpenBuildsEmission? Jog(string axis, int direction, int distance, int feed) =>
-        distance is >= 1 and <= 100
+    private static OpenBuildsEmission? Jog(string axis, int direction, double distance, int feed) =>
+        distance is >= 0.1 and <= 100 && feed is >= 100 and <= 10_000
             ? new("jog", OpenBuildsPayloadKind.String,
-                StringValue: $"{axis},{direction * distance},{feed}")
+                StringValue: $"{axis},{(direction * distance).ToString("0.###", CultureInfo.InvariantCulture)},{feed}")
             : null;
 
-    private static OpenBuildsEmission? JogXY(int xDirection, int yDirection, int distance) =>
-        distance is >= 1 and <= 100
+    private static OpenBuildsEmission? JogXY(int xDirection, int yDirection, double distance, int feed) =>
+        distance is >= 0.1 and <= 100 && feed is >= 100 and <= 10_000
             ? new("jogXY", OpenBuildsPayloadKind.JogXY,
                 JogXYValue: new OpenBuildsJogXYPayload(
                     xDirection * distance,
                     yDirection * distance,
-                    1_000))
+                    feed))
             : null;
+
+    private static OpenBuildsEmission? ContinuousJog(int x, int y, int feed)
+    {
+        if (feed is < 100 or > 10_000 || x == 0 && y == 0)
+        {
+            return null;
+        }
+        var xWord = x == 0 ? string.Empty : $" X{x * 1_000}";
+        var yWord = y == 0 ? string.Empty : $" Y{y * 1_000}";
+        return new("runCommand", OpenBuildsPayloadKind.String,
+            StringValue: $"$J=G91 G21{xWord}{yWord} F{feed}\n");
+    }
+
+    private static int? Feed(IReadOnlyList<string>? modifiers)
+    {
+        var value = modifiers?.FirstOrDefault(modifier => modifier.StartsWith("feed=", StringComparison.Ordinal));
+        return value is not null && int.TryParse(value.AsSpan(5), out var feed) ? feed : null;
+    }
 }
 
 internal sealed class OpenBuildsControlService
@@ -86,7 +128,11 @@ internal sealed class OpenBuildsControlService
 
     internal async Task<bool> PerformAsync(RemoteRequest request)
     {
-        var emission = OpenBuildsCommandMapper.Create(request.Text, request.Value);
+        var emission = OpenBuildsCommandMapper.Create(
+            request.Text,
+            request.Value,
+            request.ValueTenths,
+            request.Modifiers);
         if (emission is null)
         {
             return false;
@@ -99,6 +145,20 @@ internal sealed class OpenBuildsControlService
             }
         }
         return false;
+    }
+
+    internal async Task<OpenBuildsPosition?> PositionAsync(
+        string host,
+        CancellationToken cancellationToken = default)
+    {
+        foreach (var endpoint in Endpoints(host))
+        {
+            if (await IsOpenBuildsControlAsync(endpoint))
+            {
+                return await ReadPositionAsync(endpoint, cancellationToken);
+            }
+        }
+        return null;
     }
 
     internal static IReadOnlyList<Uri> Endpoints(string host)
@@ -199,5 +259,73 @@ internal sealed class OpenBuildsControlService
         {
             return false;
         }
+    }
+
+    private static async Task<OpenBuildsPosition?> ReadPositionAsync(
+        Uri endpoint,
+        CancellationToken cancellationToken)
+    {
+        using var client = new SocketIOClient.SocketIO(endpoint, new SocketIOOptions
+        {
+            Reconnection = false,
+            ConnectionTimeout = TimeSpan.FromSeconds(3),
+        });
+        var completion = new TaskCompletionSource<OpenBuildsPosition?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        client.On("status", response =>
+        {
+            try
+            {
+                completion.TrySetResult(ParsePosition(response.GetValue<JsonElement>()));
+            }
+            catch (JsonException)
+            {
+                completion.TrySetResult(null);
+            }
+        });
+        try
+        {
+            await client.ConnectAsync();
+            return await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
+        }
+        catch (Exception exception) when (
+            exception is HttpRequestException or TaskCanceledException or TimeoutException or WebSocketException)
+        {
+            return null;
+        }
+        finally
+        {
+            if (client.Connected)
+            {
+                await client.DisconnectAsync();
+            }
+        }
+    }
+
+    internal static OpenBuildsPosition? ParsePosition(JsonElement status)
+    {
+        if (!status.TryGetProperty("machine", out var machine) ||
+            !machine.TryGetProperty("position", out var position) ||
+            !position.TryGetProperty("work", out var work) ||
+            !TryNumber(work, "x", out var x) ||
+            !TryNumber(work, "y", out var y) ||
+            !TryNumber(work, "z", out var z))
+        {
+            return null;
+        }
+        return new OpenBuildsPosition(x, y, z);
+    }
+
+    private static bool TryNumber(JsonElement parent, string name, out double value)
+    {
+        value = 0;
+        if (!parent.TryGetProperty(name, out var element))
+        {
+            return false;
+        }
+        return element.ValueKind == JsonValueKind.Number
+            ? element.TryGetDouble(out value)
+            : element.ValueKind == JsonValueKind.String &&
+                double.TryParse(element.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out value);
     }
 }

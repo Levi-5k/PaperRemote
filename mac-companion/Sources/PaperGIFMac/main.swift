@@ -777,7 +777,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             let succeeded = openBuildsService.perform(
                 host: request.host,
                 command: request.text,
-                value: request.value
+                value: request.value,
+                valueTenths: request.valueTenths,
+                modifiers: request.modifiers
             )
             result = (succeeded, succeeded)
         case "netHomePower", "netHomeTemperature", "netHomeMode", "netHomeFan", "netHomeClimate":
@@ -840,6 +842,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             permittedScripts = allowedScripts
         }
+        let positionHosts = Set(request.items.compactMap { item -> String? in
+            guard item.source == "openBuildsPosition" else { return nil }
+            return item.sourceText.split(separator: "|", maxSplits: 1).first.map(String.init)
+        })
+        let openBuildsPositions = Dictionary(uniqueKeysWithValues: positionHosts.compactMap { host in
+            openBuildsService.position(host: host).map { (host, $0) }
+        })
         let items = request.items.map { item -> TextSourceResponse in
             if item.source == "playbackState" {
                 let isPlaying = playbackIsPlaying()
@@ -869,6 +878,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 output = commandOutput("/usr/bin/shortcuts", arguments: ["run", item.sourceText])
             case "nowPlaying":
                 output = nowPlayingText()
+            case "openBuildsPosition":
+                let components = item.sourceText.split(separator: "|", maxSplits: 1).map(String.init)
+                guard components.count == 2,
+                      let position = openBuildsPositions[components[0]] else {
+                    output = nil
+                    break
+                }
+                let axis = components[1].lowercased()
+                let value = axis == "x" ? position.x : axis == "y" ? position.y : axis == "z" ? position.z : nil
+                output = value.map { String(format: "%@ %.3f", axis.uppercased(), $0) }
             default:
                 output = nil
             }

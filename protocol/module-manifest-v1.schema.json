@@ -28,6 +28,20 @@
           "control": { "$ref": "remote-profile-v6.schema.json#/$defs/control" }
         }
       }
+    },
+    "pages": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "detail", "page"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+          "detail": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "page": { "$ref": "remote-profile-v6.schema.json#/$defs/page" }
+        }
+      }
     }
   }
 }

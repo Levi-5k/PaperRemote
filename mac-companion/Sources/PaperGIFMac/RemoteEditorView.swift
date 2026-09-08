@@ -462,6 +462,7 @@ private struct ModulesPanel: View {
 
     private func moduleCard(_ module: PaperModuleListing) -> some View {
         let installed = catalog.isInstalled(module)
+        let pageTemplates = installed ? catalog.installedModule(id: module.id)?.pages ?? [] : []
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -494,6 +495,18 @@ private struct ModulesPanel: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(installingID != nil || installed)
+
+            ForEach(pageTemplates, id: \.id) { definition in
+                Button {
+                    store.addPage(ModuleCatalog.clonePage(definition, moduleID: module.id))
+                    status = "Added \(definition.page.name)."
+                } label: {
+                    Label("Add \(definition.page.name) Page", systemImage: "plus.rectangle.on.rectangle")
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.profile.pages.count >= 8)
+                .help(definition.detail)
+            }
         }
         .padding(12)
         .background(Color(nsColor: .textBackgroundColor))
@@ -519,7 +532,9 @@ private struct ModulesPanel: View {
         defer { installingID = nil }
         do {
             let module = try await catalog.install(listing)
-            status = "Installed \(module.name). Its controls are now in Add Controls."
+            status = module.pages?.isEmpty == false
+                ? "Installed \(module.name). Add its page here or use individual controls."
+                : "Installed \(module.name). Its controls are now in Add Controls."
         } catch {
             status = "Install failed: \(error.localizedDescription)"
         }
@@ -643,6 +658,7 @@ private struct ControlInspector: View {
                     Text("Shortcut output").tag(RemoteTextSource.macShortcut)
                     Text("Control value").tag(RemoteTextSource.controlValue)
                     Text("Mac now playing").tag(RemoteTextSource.nowPlaying)
+                    Text("OpenBuilds position").tag(RemoteTextSource.openBuildsPosition)
                 }
                 .labelsHidden()
             }
@@ -678,6 +694,11 @@ private struct ControlInspector: View {
                 }
             case .nowPlaying:
                 textSourceComputerPicker
+            case .openBuildsPosition:
+                textSourceComputerPicker
+                LabeledContent("Target") {
+                    TextField("127.0.0.1|x", text: textBoxBinding(\.sourceText))
+                }
             }
 
             if control.textBox?.source != .staticText {
@@ -1343,7 +1364,7 @@ private struct ControlInspector: View {
 
     private var supportsAutomaticRefresh: Bool {
         switch control.textBox?.source ?? .staticText {
-        case .dateTime, .macScript, .macShortcut, .nowPlaying: true
+        case .dateTime, .macScript, .macShortcut, .nowPlaying, .openBuildsPosition: true
         case .staticText, .controlValue: false
         }
     }
@@ -1653,7 +1674,7 @@ private struct DevicePreview: View {
             let width = 540 * scale
             let height = 960 * scale
             let origin = CGPoint(x: (geometry.size.width - width) / 2, y: (geometry.size.height - height) / 2)
-            let frames = RemoteLayout.frames(for: page.controls)
+            let frames = RemoteLayout.frames(for: page)
 
             ZStack(alignment: .topLeading) {
                 Rectangle().fill(Color(red: 0.97, green: 0.965, blue: 0.93))
@@ -1665,25 +1686,42 @@ private struct DevicePreview: View {
                 .padding(.horizontal, 24 * scale)
                 .padding(.top, 55 * scale)
 
-                ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
-                    let frame = frames[index]
-                    PreviewControl(
-                        control: control,
-                        temperatureUnit: temperatureUnit,
-                        selected: selectedControlID == control.id,
-                        scale: scale
-                    )
+                if page.layout == .openBuildsController {
+                    OpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
+                    ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
+                        let frame = frames[index]
+                        PreviewControl(
+                            control: control,
+                            temperatureUnit: temperatureUnit,
+                            selected: selectedControlID == control.id,
+                            scale: scale,
+                            controllerCompact: control.kind == .button
+                        )
                         .frame(width: frame.width * scale, height: frame.height * scale)
                         .position(x: frame.midX * scale, y: frame.midY * scale)
                         .onTapGesture { onSelect(control.id) }
-                        .gesture(DragGesture(minimumDistance: 8).onEnded { drag in
-                            let point = CGPoint(
-                                x: frame.midX + drag.translation.width / scale,
-                                y: frame.midY + drag.translation.height / scale
-                            )
-                            guard let slot = RemoteLayout.slot(at: point) else { return }
-                            onMove(control.id, slot)
-                        })
+                    }
+                } else {
+                    ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
+                        let frame = frames[index]
+                        PreviewControl(
+                            control: control,
+                            temperatureUnit: temperatureUnit,
+                            selected: selectedControlID == control.id,
+                            scale: scale
+                        )
+                            .frame(width: frame.width * scale, height: frame.height * scale)
+                            .position(x: frame.midX * scale, y: frame.midY * scale)
+                            .onTapGesture { onSelect(control.id) }
+                            .gesture(DragGesture(minimumDistance: 8).onEnded { drag in
+                                let point = CGPoint(
+                                    x: frame.midX + drag.translation.width / scale,
+                                    y: frame.midY + drag.translation.height / scale
+                                )
+                                guard let slot = RemoteLayout.slot(at: point) else { return }
+                                onMove(control.id, slot)
+                            })
+                    }
                 }
 
                 Text("<  \(pageIndex + 1) / \(max(pageCount, 1))  >")
@@ -1699,11 +1737,76 @@ private struct DevicePreview: View {
     }
 }
 
+private struct OpenBuildsSettingsPreview: View {
+    let controller: RemoteOpenBuildsController?
+    let scale: CGFloat
+
+    var body: some View {
+        let settings = controller ?? RemoteOpenBuildsController()
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("JOG SPEED")
+                Spacer()
+                Text("\(settings.jogSpeed) mm/min")
+            }
+            .font(.system(size: 9 * scale, weight: .bold))
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 7 * scale).stroke(.black, lineWidth: max(1, scale))
+                RoundedRectangle(cornerRadius: 5 * scale)
+                    .fill(.black)
+                    .padding(4 * scale)
+                    .frame(width: max(8 * scale, 152 * scale * CGFloat(settings.jogSpeed - 100) / 9_900))
+            }
+            .frame(height: 42 * scale)
+            .padding(.top, 22 * scale)
+
+            Text("JOG MODE")
+                .font(.system(size: 9 * scale, weight: .bold))
+                .padding(.top, 26 * scale)
+            HStack(spacing: 8 * scale) {
+                modeChip("STEP", selected: settings.jogMode == .incremental)
+                modeChip("HOLD", selected: settings.jogMode == .continuous)
+            }
+            .padding(.top, 14 * scale)
+
+            Text(settings.jogMode == .continuous ? "RELEASE TO STOP" : "STEP DISTANCE")
+                .font(.system(size: 9 * scale, weight: .bold))
+                .padding(.top, 26 * scale)
+            if settings.jogMode == .continuous {
+                Text("Motion stops\nwhen released.")
+                    .font(.system(size: 12 * scale))
+                    .padding(.top, 26 * scale)
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.fixed(72 * scale)), count: 2), spacing: 12 * scale) {
+                    ForEach([(1, "0.1"), (10, "1"), (100, "10"), (1000, "100")], id: \.0) { value, label in
+                        modeChip(label, selected: settings.jogDistanceTenths == value)
+                    }
+                }
+                .padding(.top, 14 * scale)
+            }
+        }
+        .foregroundStyle(.black)
+        .frame(width: 152 * scale, alignment: .topLeading)
+        .position(x: 440 * scale, y: 447 * scale)
+    }
+
+    private func modeChip(_ title: String, selected: Bool) -> some View {
+        Text(title)
+            .font(.system(size: 9 * scale, weight: .bold))
+            .foregroundStyle(selected ? .white : .black)
+            .frame(width: 72 * scale, height: 48 * scale)
+            .background(selected ? Color.black : Color.white)
+            .overlay(RoundedRectangle(cornerRadius: 7 * scale).stroke(.black, lineWidth: max(1, scale)))
+            .clipShape(RoundedRectangle(cornerRadius: 7 * scale))
+    }
+}
+
 private struct PreviewControl: View {
     let control: RemoteControl
     let temperatureUnit: RemoteTemperatureUnit
     let selected: Bool
     let scale: CGFloat
+    var controllerCompact = false
 
     var body: some View {
         ZStack {
@@ -1735,6 +1838,13 @@ private struct PreviewControl: View {
                     Text(control.title).lineLimit(1)
                 }
                 .font(.system(size: 15 * scale, weight: .semibold))
+            } else if controllerCompact {
+                VStack(spacing: 5 * scale) {
+                    RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
+                        .frame(width: 30 * scale, height: 30 * scale)
+                    Text(control.title)
+                        .font(.system(size: 10 * scale, weight: .semibold))
+                }
             } else if control.buttonGridHeight == 1 {
                 HStack(spacing: 8 * scale) {
                     RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
@@ -1804,6 +1914,8 @@ private struct PreviewControl: View {
                 "128"
             }
         case .nowPlaying: "Song Title\nArtist"
+        case .openBuildsPosition:
+            "\(textBox.sourceText.split(separator: "|").last?.uppercased() ?? "X") 0.000"
         }
     }
 
@@ -1881,8 +1993,28 @@ private func remoteBitmapMaskImage(_ hex: String?) -> CGImage? {
 }
 
 private enum RemoteLayout {
-    static func frames(for controls: [RemoteControl]) -> [CGRect] {
-        let controls = Array(controls.prefix(16))
+    static func frames(for page: RemotePage) -> [CGRect] {
+        if page.layout == .openBuildsController {
+            return page.controls.prefix(16).map { control in
+                if control.kind == .textBox,
+                   let axis = control.textBox?.sourceText.split(separator: "|").last?.lowercased(),
+                   let column = ["x", "y", "z"].firstIndex(of: axis) {
+                    return CGRect(x: 24 + column * 168, y: 142, width: 156, height: 70)
+                }
+                let command = control.action.text
+                    .replacingOccurrences(of: "continuousJog", with: "")
+                    .replacingOccurrences(of: "jog", with: "")
+                let positions: [String: (Int, Int)] = [
+                    "XNegativeYPositive": (0, 0), "YPositive": (0, 1),
+                    "XPositiveYPositive": (0, 2), "XNegative": (1, 0),
+                    "XPositive": (1, 2), "XNegativeYNegative": (2, 0),
+                    "YNegative": (2, 1), "XPositiveYNegative": (2, 2),
+                ]
+                guard let (row, column) = positions[command] else { return .zero }
+                return CGRect(x: 24 + column * 108, y: 246 + row * 108, width: 96, height: 96)
+            }
+        }
+        let controls = Array(page.controls.prefix(16))
         var occupied: Set<Int> = []
         var frames = Array(repeating: CGRect.zero, count: controls.count)
         var placed = Array(repeating: false, count: controls.count)

@@ -73,6 +73,16 @@
           "action": { "type": "macMedia", "host": "", "text": "playPause", "value": 0, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000101" },
           "layoutSlot": 10,
           "textBox": { "source": "nowPlaying", "sourceText": "", "computerID": "00000000-0000-0000-0000-000000000101", "placeholder": "Nothing playing", "gridWidth": 2, "gridHeight": 1 }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000607",
+          "title": "X Position",
+          "symbol": "move.3d",
+          "tintHex": "202020",
+          "kind": "textBox",
+          "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "", "value": 0, "modifiers": [] },
+          "layoutSlot": 12,
+          "textBox": { "source": "openBuildsPosition", "sourceText": "127.0.0.1|x", "placeholder": "X --.---", "gridWidth": 2, "gridHeight": 1 }
         }
       ]
     }

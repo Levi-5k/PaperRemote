@@ -1,11 +1,14 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Windows.Media.Control;
 
 namespace PaperGIF.Windows.Host;
 
-internal sealed class WindowsTextSourceResolver(CompanionConfiguration configuration)
+internal sealed class WindowsTextSourceResolver(
+    CompanionConfiguration configuration,
+    OpenBuildsControlService openBuildsService)
 {
     private const int MaximumControlIdCharacters = 40;
     private const int MaximumTextBytes = 192;
@@ -19,10 +22,20 @@ internal sealed class WindowsTextSourceResolver(CompanionConfiguration configura
         var media = needsMediaSession
             ? await ReadMediaSessionAsync(cancellationToken)
             : null;
+        var openBuildsPositions = new Dictionary<string, OpenBuildsPosition?>(StringComparer.Ordinal);
+        foreach (var host in request.Items
+            .Where(item => item.Source == "openBuildsPosition")
+            .Select(item => ParseOpenBuildsTarget(item.SourceText).Host)
+            .Where(host => host is not null)
+            .Cast<string>()
+            .Distinct(StringComparer.Ordinal))
+        {
+            openBuildsPositions[host] = await openBuildsService.PositionAsync(host, cancellationToken);
+        }
         var responses = new List<TextSourceResponse>(request.Items.Count);
         foreach (var item in request.Items)
         {
-            responses.Add(await ResolveAsync(item, media, cancellationToken));
+            responses.Add(await ResolveAsync(item, media, openBuildsPositions, cancellationToken));
         }
         return new TextSourceBatchResponse(responses);
     }
@@ -30,6 +43,7 @@ internal sealed class WindowsTextSourceResolver(CompanionConfiguration configura
     private async Task<TextSourceResponse> ResolveAsync(
         TextSourceRequest request,
         MediaSessionState? media,
+        IReadOnlyDictionary<string, OpenBuildsPosition?> openBuildsPositions,
         CancellationToken cancellationToken)
     {
         var id = request.Id[..Math.Min(request.Id.Length, MaximumControlIdCharacters)];
@@ -50,6 +64,7 @@ internal sealed class WindowsTextSourceResolver(CompanionConfiguration configura
         string? text = request.Source switch
         {
             "nowPlaying" => media?.Description,
+            "openBuildsPosition" => FormatOpenBuildsPosition(request.SourceText, openBuildsPositions),
             "macScript" when configuration.AllowedScripts.Contains(
                 request.SourceText,
                 StringComparer.Ordinal) => await RunScriptAsync(request.SourceText, cancellationToken),
@@ -61,6 +76,35 @@ internal sealed class WindowsTextSourceResolver(CompanionConfiguration configura
             id,
             BoundUtf8(available ? text! : request.Placeholder, MaximumTextBytes),
             available);
+    }
+
+    private static (string? Host, string? Axis) ParseOpenBuildsTarget(string value)
+    {
+        var separator = value.LastIndexOf('|');
+        return separator <= 0 || separator == value.Length - 1
+            ? (null, null)
+            : (value[..separator], value[(separator + 1)..].ToLowerInvariant());
+    }
+
+    private static string? FormatOpenBuildsPosition(
+        string target,
+        IReadOnlyDictionary<string, OpenBuildsPosition?> positions)
+    {
+        var (host, axis) = ParseOpenBuildsTarget(target);
+        if (host is null || axis is null || !positions.TryGetValue(host, out var position) || position is null)
+        {
+            return null;
+        }
+        var value = axis switch
+        {
+            "x" => position.X,
+            "y" => position.Y,
+            "z" => position.Z,
+            _ => double.NaN,
+        };
+        return double.IsNaN(value)
+            ? null
+            : $"{axis.ToUpperInvariant()} {value.ToString("0.000", CultureInfo.InvariantCulture)}";
     }
 
     private static async Task<MediaSessionState?> ReadMediaSessionAsync(

@@ -32,6 +32,14 @@ final class ModuleCatalogTests: XCTestCase {
         XCTAssertEqual(module.id, "openbuilds-control")
         XCTAssertEqual(module.controls.count, 16)
         XCTAssertTrue(module.controls.allSatisfy { $0.control.action.type == .openBuilds })
+        let definition = try XCTUnwrap(module.pages?.first)
+        let page = ModuleCatalog.clonePage(definition, moduleID: module.id)
+        XCTAssertEqual(page.layout, .openBuildsController)
+        XCTAssertEqual(page.openBuildsController?.jogMode, .incremental)
+        XCTAssertEqual(page.controls.count, 11)
+        XCTAssertEqual(page.moduleID, module.id)
+        XCTAssertNotEqual(page.id, definition.page.id)
+        XCTAssertTrue(zip(page.controls, definition.page.controls).allSatisfy { $0.id != $1.id })
     }
 }
 

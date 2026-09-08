@@ -22,6 +22,12 @@ struct PaperModuleControl: Codable, Sendable {
     let control: RemoteControl
 }
 
+struct PaperModulePage: Codable, Sendable {
+    let id: String
+    let detail: String
+    let page: RemotePage
+}
+
 struct PaperModuleManifest: Codable, Identifiable, Sendable {
     let schemaVersion: Int
     let id: String
@@ -30,6 +36,7 @@ struct PaperModuleManifest: Codable, Identifiable, Sendable {
     let version: String
     let author: String
     let controls: [PaperModuleControl]
+    let pages: [PaperModulePage]?
 }
 
 @MainActor
@@ -72,6 +79,19 @@ final class ModuleCatalog: ObservableObject {
 
     func installedModule(id: String) -> PaperModuleManifest? {
         installedByID[id]
+    }
+
+    nonisolated static func clonePage(_ definition: PaperModulePage, moduleID: String) -> RemotePage {
+        var page = definition.page
+        page.id = UUID()
+        page.controls = page.controls.map { control in
+            var copy = control
+            copy.id = UUID()
+            return copy
+        }
+        page.moduleID = moduleID
+        page.modulePageID = definition.id
+        return page
     }
 
     func refresh() async throws {
@@ -144,6 +164,14 @@ final class ModuleCatalog: ObservableObject {
                       !$0.category.isEmpty &&
                       !$0.detail.isEmpty &&
                       !$0.control.title.isEmpty
+              }),
+              (manifest.pages ?? []).count <= 8,
+              Set((manifest.pages ?? []).map(\.id)).count == (manifest.pages ?? []).count,
+              (manifest.pages ?? []).allSatisfy({
+                  isValidIdentifier($0.id) &&
+                      !$0.detail.isEmpty &&
+                      !$0.page.name.isEmpty &&
+                      $0.page.controls.count <= 16
               }) else {
             throw ModuleCatalogError.invalidManifest
         }

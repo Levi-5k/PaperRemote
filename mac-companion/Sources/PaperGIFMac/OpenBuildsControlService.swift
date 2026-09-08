@@ -6,7 +6,7 @@ struct OpenBuildsEmission: Equatable {
         case boolean(Bool)
         case integer(Int)
         case string(String)
-        case jogXY(x: Int, y: Int, feed: Int)
+        case jogXY(x: Double, y: Double, feed: Int)
         case stop(stop: Bool, jog: Bool, abort: Bool)
     }
 
@@ -14,19 +14,42 @@ struct OpenBuildsEmission: Equatable {
     let payload: Payload
 }
 
+struct OpenBuildsPosition: Equatable {
+    let x: Double
+    let y: Double
+    let z: Double
+}
+
 enum OpenBuildsCommandMapper {
-    static func emission(command: String, value: Int) -> OpenBuildsEmission? {
-        switch command {
-        case "jogXNegative": jog(axis: "X", direction: -1, distance: value, feed: 1_000)
-        case "jogXPositive": jog(axis: "X", direction: 1, distance: value, feed: 1_000)
-        case "jogYNegative": jog(axis: "Y", direction: -1, distance: value, feed: 1_000)
-        case "jogYPositive": jog(axis: "Y", direction: 1, distance: value, feed: 1_000)
-        case "jogZNegative": jog(axis: "Z", direction: -1, distance: value, feed: 500)
-        case "jogZPositive": jog(axis: "Z", direction: 1, distance: value, feed: 500)
-        case "jogXNegativeYNegative": jogXY(xDirection: -1, yDirection: -1, distance: value)
-        case "jogXNegativeYPositive": jogXY(xDirection: -1, yDirection: 1, distance: value)
-        case "jogXPositiveYNegative": jogXY(xDirection: 1, yDirection: -1, distance: value)
-        case "jogXPositiveYPositive": jogXY(xDirection: 1, yDirection: 1, distance: value)
+    static func emission(
+        command: String,
+        value: Int,
+        valueTenths: Int? = nil,
+        modifiers: [String] = []
+    ) -> OpenBuildsEmission? {
+        let distance = Double(valueTenths ?? value * 10) / 10
+        let xyFeed = feed(in: modifiers) ?? 1_000
+        let zFeed = feed(in: modifiers) ?? 500
+        return switch command {
+        case "jogXNegative": jog(axis: "X", direction: -1, distance: distance, feed: xyFeed)
+        case "jogXPositive": jog(axis: "X", direction: 1, distance: distance, feed: xyFeed)
+        case "jogYNegative": jog(axis: "Y", direction: -1, distance: distance, feed: xyFeed)
+        case "jogYPositive": jog(axis: "Y", direction: 1, distance: distance, feed: xyFeed)
+        case "jogZNegative": jog(axis: "Z", direction: -1, distance: distance, feed: zFeed)
+        case "jogZPositive": jog(axis: "Z", direction: 1, distance: distance, feed: zFeed)
+        case "jogXNegativeYNegative": jogXY(xDirection: -1, yDirection: -1, distance: distance, feed: xyFeed)
+        case "jogXNegativeYPositive": jogXY(xDirection: -1, yDirection: 1, distance: distance, feed: xyFeed)
+        case "jogXPositiveYNegative": jogXY(xDirection: 1, yDirection: -1, distance: distance, feed: xyFeed)
+        case "jogXPositiveYPositive": jogXY(xDirection: 1, yDirection: 1, distance: distance, feed: xyFeed)
+        case "continuousJogXNegative": continuousJog(x: -1, y: 0, feed: value)
+        case "continuousJogXPositive": continuousJog(x: 1, y: 0, feed: value)
+        case "continuousJogYNegative": continuousJog(x: 0, y: -1, feed: value)
+        case "continuousJogYPositive": continuousJog(x: 0, y: 1, feed: value)
+        case "continuousJogXNegativeYNegative": continuousJog(x: -1, y: -1, feed: value)
+        case "continuousJogXNegativeYPositive": continuousJog(x: -1, y: 1, feed: value)
+        case "continuousJogXPositiveYNegative": continuousJog(x: 1, y: -1, feed: value)
+        case "continuousJogXPositiveYPositive": continuousJog(x: 1, y: 1, feed: value)
+        case "cancelJog": OpenBuildsEmission(event: "stop", payload: .stop(stop: false, jog: true, abort: false))
         case "pause": OpenBuildsEmission(event: "pause", payload: .boolean(true))
         case "resume": OpenBuildsEmission(event: "resume", payload: .boolean(true))
         case "stop": OpenBuildsEmission(event: "stop", payload: .stop(stop: true, jog: false, abort: false))
@@ -37,34 +60,71 @@ enum OpenBuildsCommandMapper {
         }
     }
 
-    private static func jog(axis: String, direction: Int, distance: Int, feed: Int) -> OpenBuildsEmission? {
-        guard (1...100).contains(distance) else { return nil }
+    private static func jog(axis: String, direction: Int, distance: Double, feed: Int) -> OpenBuildsEmission? {
+        guard (0.1...100).contains(distance), (100...10_000).contains(feed) else { return nil }
         return OpenBuildsEmission(
             event: "jog",
-            payload: .string("\(axis),\(direction * distance),\(feed)")
+            payload: .string("\(axis),\(number(Double(direction) * distance)),\(feed)")
         )
     }
 
-    private static func jogXY(xDirection: Int, yDirection: Int, distance: Int) -> OpenBuildsEmission? {
-        guard (1...100).contains(distance) else { return nil }
+    private static func jogXY(xDirection: Int, yDirection: Int, distance: Double, feed: Int) -> OpenBuildsEmission? {
+        guard (0.1...100).contains(distance), (100...10_000).contains(feed) else { return nil }
         return OpenBuildsEmission(
             event: "jogXY",
-            payload: .jogXY(x: xDirection * distance, y: yDirection * distance, feed: 1_000)
+            payload: .jogXY(x: Double(xDirection) * distance, y: Double(yDirection) * distance, feed: feed)
         )
+    }
+
+    private static func continuousJog(x: Int, y: Int, feed: Int) -> OpenBuildsEmission? {
+        guard (100...10_000).contains(feed), x != 0 || y != 0 else { return nil }
+        let xWord = x == 0 ? "" : " X\(x * 1_000)"
+        let yWord = y == 0 ? "" : " Y\(y * 1_000)"
+        return OpenBuildsEmission(
+            event: "runCommand",
+            payload: .string("$J=G91 G21\(xWord)\(yWord) F\(feed)\n")
+        )
+    }
+
+    private static func feed(in modifiers: [String]) -> Int? {
+        modifiers.lazy.compactMap { modifier -> Int? in
+            guard modifier.hasPrefix("feed=") else { return nil }
+            return Int(modifier.dropFirst(5))
+        }.first
+    }
+
+    private static func number(_ value: Double) -> String {
+        value.rounded() == value
+            ? String(Int(value))
+            : String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 }
 
 final class OpenBuildsControlService {
     private static let defaultPorts = [3_000, 3_020, 3_200, 3_220]
 
-    func perform(host: String?, command: String, value: Int) -> Bool {
-        guard let emission = OpenBuildsCommandMapper.emission(command: command, value: value) else {
+    func perform(host: String?, command: String, value: Int, valueTenths: Int?, modifiers: [String]) -> Bool {
+        guard let emission = OpenBuildsCommandMapper.emission(
+            command: command,
+            value: value,
+            valueTenths: valueTenths,
+            modifiers: modifiers
+        ) else {
             return false
         }
         for endpoint in Self.endpoints(host: host ?? "") where isOpenBuildsControl(endpoint) {
             return emit(emission, to: endpoint)
         }
         return false
+    }
+
+    func position(host: String) -> OpenBuildsPosition? {
+        for endpoint in Self.endpoints(host: host) where isOpenBuildsControl(endpoint) {
+            if let position = readPosition(from: endpoint) {
+                return position
+            }
+        }
+        return nil
     }
 
     static func endpoints(host: String) -> [URL] {
@@ -165,5 +225,57 @@ final class OpenBuildsControlService {
         socket.disconnect()
         socket.removeAllHandlers()
         return succeeded
+    }
+
+    private func readPosition(from endpoint: URL) -> OpenBuildsPosition? {
+        let callbackQueue = DispatchQueue(label: "paperGIF.openbuilds.status")
+        let manager = SocketManager(socketURL: endpoint, config: [
+            .log(false),
+            .reconnects(false),
+            .forceNew(true),
+            .forceWebsockets(true),
+            .handleQueue(callbackQueue),
+        ])
+        let socket = manager.defaultSocket
+        let semaphore = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var result: OpenBuildsPosition?
+        var finished = false
+        let finish: (OpenBuildsPosition?) -> Void = { position in
+            lock.lock()
+            defer { lock.unlock() }
+            guard !finished else { return }
+            finished = true
+            result = position
+            semaphore.signal()
+        }
+        socket.on("status") { data, _ in
+            guard let payload = data.first as? [String: Any] else { return }
+            finish(Self.position(from: payload))
+        }
+        socket.on(clientEvent: .error) { _, _ in finish(nil) }
+        socket.connect(withPayload: nil, timeoutAfter: 3) { finish(nil) }
+        _ = semaphore.wait(timeout: .now() + 3.5)
+        socket.disconnect()
+        socket.removeAllHandlers()
+        return result
+    }
+
+    static func position(from status: [String: Any]) -> OpenBuildsPosition? {
+        guard let machine = status["machine"] as? [String: Any],
+              let position = machine["position"] as? [String: Any],
+              let work = position["work"] as? [String: Any],
+              let x = number(work["x"]),
+              let y = number(work["y"]),
+              let z = number(work["z"]) else {
+            return nil
+        }
+        return OpenBuildsPosition(x: x, y: y, z: z)
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return Double(string) }
+        return nil
     }
 }

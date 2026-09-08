@@ -170,6 +170,13 @@ final class RemoteEditorStore: ObservableObject {
         selectedControlID = nil
     }
 
+    func addPage(_ page: RemotePage) {
+        guard profile.pages.count < 8 else { return }
+        profile.pages.append(page)
+        selectedPageID = page.id
+        selectedControlID = nil
+    }
+
     func deleteSelectedPage() {
         guard profile.pages.count > 1, let index = selectedPageIndex else { return }
         profile.pages.remove(at: index)
