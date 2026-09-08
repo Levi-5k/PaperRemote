@@ -471,6 +471,8 @@ bool wifiUploadRequestFinal = false;
 uint32_t wifiUploadRequestOffset = 0;
 uint32_t wifiUploadExpectedChunkBytes = 0;
 bool wifiScreenRefreshPending = false;
+bool remoteProfileDisplayPending = false;
+uint32_t remoteProfileDisplayAt = 0;
 volatile bool wifiStartRequested = false;
 uint32_t wifiStartRequestedAt = 0;
 volatile bool wifiScanRequested = false;
@@ -1628,7 +1630,6 @@ bool installTemporaryRemoteProfile() {
 
     char visiblePageId[sizeof(RemotePage::id)] = {};
     const uint8_t previousPageIndex = remotePageIndex;
-    const bool canPartiallyRefresh = remoteVisible && !screensaverActive;
     if (remotePageIndex < remoteProfile->pageCount) {
         strlcpy(visiblePageId, remoteProfile->pages[remotePageIndex].id, sizeof(visiblePageId));
     }
@@ -1643,11 +1644,9 @@ bool installTemporaryRemoteProfile() {
         M5.Rtc.setDateTime(remoteProfile->deviceClock);
     }
     remotePageIndex = min(previousPageIndex, static_cast<uint8_t>(remoteProfile->pageCount - 1));
-    bool preservedVisiblePage = false;
     for (uint8_t index = 0; index < remoteProfile->pageCount; ++index) {
         if (visiblePageId[0] != '\0' && strcmp(remoteProfile->pages[index].id, visiblePageId) == 0) {
             remotePageIndex = index;
-            preservedVisiblePage = true;
             break;
         }
     }
@@ -1661,12 +1660,8 @@ bool installTemporaryRemoteProfile() {
         homeWifiAuthenticationRetryPending = false;
         connectHomeWifi();
     }
-    if (canPartiallyRefresh && preservedVisiblePage && !wifiChanged) {
-        prepareRemoteTextBoxes();
-        displayRemoteProfileChanges(*pendingRemoteProfile, previousPageIndex);
-    } else {
-        displayRemote();
-    }
+    remoteProfileDisplayPending = true;
+    remoteProfileDisplayAt = millis() + 500;
     return true;
 }
 
@@ -7699,6 +7694,11 @@ void loop() {
         if (remoteVisible) {
             displayRemote();
         }
+    }
+    if (remoteProfileDisplayPending &&
+        static_cast<int32_t>(millis() - remoteProfileDisplayAt) >= 0) {
+        remoteProfileDisplayPending = false;
+        displayRemote();
     }
     if (homeWifiNotificationPending && deviceConnected) {
         homeWifiNotificationPending = false;
