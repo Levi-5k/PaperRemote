@@ -27,6 +27,12 @@ public static class RemoteProfileJson
         var pageElements = document.RootElement.GetProperty("pages").EnumerateArray().ToArray();
         for (var index = 0; index < Math.Min(profile.Pages.Count, pageElements.Length); index++)
         {
+            if (profile.Pages[index].OpenBuildsController is { } settings &&
+                pageElements[index].TryGetProperty("openBuildsController", out var controllerElement) &&
+                !controllerElement.TryGetProperty("jogDistanceThousandths", out _))
+            {
+                settings.JogDistanceThousandths = settings.JogDistanceTenths * 100;
+            }
             if (profile.Pages[index].Layout == RemotePageLayout.OpenBuildsController &&
                 !pageElements[index].TryGetProperty("gridColumns", out _))
             {

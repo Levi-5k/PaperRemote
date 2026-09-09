@@ -298,9 +298,11 @@
       "required": ["host", "jogSpeed", "jogMode", "jogDistanceTenths"],
       "properties": {
         "host": { "type": "string", "maxLength": 63 },
-        "jogSpeed": { "type": "integer", "minimum": 100, "maximum": 10000 },
+        "jogSpeed": { "type": "integer", "minimum": 4, "maximum": 10000 },
         "jogMode": { "enum": ["incremental", "continuous"] },
-        "jogDistanceTenths": { "type": "integer", "minimum": 1, "maximum": 1000 }
+        "jogDistanceTenths": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "units": { "enum": ["mm", "in"] },
+        "jogDistanceThousandths": { "type": "integer", "minimum": 1, "maximum": 100000 }
       }
     },
     "deviceClock": {

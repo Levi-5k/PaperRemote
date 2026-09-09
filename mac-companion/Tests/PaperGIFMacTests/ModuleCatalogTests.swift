@@ -3,6 +3,13 @@ import XCTest
 @testable import PaperGIFMac
 
 final class ModuleCatalogTests: XCTestCase {
+    func testModuleVersionComparisonPreventsDowngrades() {
+        XCTAssertTrue(ModuleCatalog.isVersion("1.4.0", newerThan: "1.3.0"))
+        XCTAssertTrue(ModuleCatalog.isVersion("1.10.0", newerThan: "1.9.0"))
+        XCTAssertFalse(ModuleCatalog.isVersion("1.3.0", newerThan: "1.4.0"))
+        XCTAssertFalse(ModuleCatalog.isVersion("1.4.0", newerThan: "1.4.0"))
+    }
+
     func testSharedModuleManifestCreatesControlsWithFreshIDs() throws {
         let module = try JSONDecoder().decode(
             PaperModuleManifest.self,
@@ -38,15 +45,56 @@ final class ModuleCatalogTests: XCTestCase {
         XCTAssertEqual(page.gridColumns, 9)
         XCTAssertEqual(page.gridRows, 14)
         XCTAssertEqual(page.openBuildsController?.jogMode, .incremental)
-        XCTAssertEqual(page.controls.count, 11)
+        XCTAssertEqual(page.openBuildsController?.units, .millimeters)
+        XCTAssertEqual(page.openBuildsController?.jogDistanceThousandths, 1_000)
+        XCTAssertEqual(page.controls.count, 12)
         XCTAssertEqual(page.controls[0].gridSpan(columns: page.gridColumns, rows: page.gridRows),
                    RemoteGridSpan(width: 3, height: 2))
         XCTAssertEqual(page.controls[3].layoutSlot, 18)
         XCTAssertEqual(page.controls[3].gridSpan(columns: page.gridColumns, rows: page.gridRows),
                    RemoteGridSpan(width: 2, height: 2))
+        XCTAssertEqual(page.controls.first(where: { $0.title == "STOP" })?.layoutSlot, 38)
         XCTAssertEqual(page.moduleID, module.id)
         XCTAssertNotEqual(page.id, definition.page.id)
         XCTAssertTrue(zip(page.controls, definition.page.controls).allSatisfy { $0.id != $1.id })
+    }
+
+    func testUpdatingModulePagePreservesIdentitySettingsAndRouting() throws {
+        let module = try JSONDecoder().decode(
+            PaperModuleManifest.self,
+            from: Data(contentsOf: moduleFixture("openbuilds-control.json"))
+        )
+        let definition = try XCTUnwrap(module.pages?.first)
+        var existing = ModuleCatalog.clonePage(definition, moduleID: module.id)
+        existing.name = "Workshop CNC"
+        existing.openBuildsController?.jogSpeed = 2_500
+        existing.controls.removeAll { $0.title == "STOP" }
+        for index in existing.controls.indices {
+            existing.controls[index].action.computerID = "windows-computer"
+            existing.controls[index].action.host = "10.0.0.25"
+            if existing.controls[index].textBox?.source == .openBuildsPosition {
+                existing.controls[index].textBox?.computerID = UUID(
+                    uuidString: "11111111-1111-1111-1111-111111111111"
+                )
+                existing.controls[index].textBox?.sourceText = "10.0.0.25|x|mm"
+            }
+        }
+        let existingID = existing.id
+        let xControlID = try XCTUnwrap(existing.controls.first { $0.title == "X+" }?.id)
+
+        let updated = ModuleCatalog.updatedPage(existing, from: definition, moduleID: module.id)
+
+        XCTAssertEqual(updated.id, existingID)
+        XCTAssertEqual(updated.name, "Workshop CNC")
+        XCTAssertEqual(updated.openBuildsController?.jogSpeed, 2_500)
+        XCTAssertEqual(updated.controls.first { $0.title == "X+" }?.id, xControlID)
+        XCTAssertNotNil(updated.controls.first { $0.title == "STOP" })
+        XCTAssertTrue(updated.controls.allSatisfy { $0.action.computerID == "windows-computer" })
+        XCTAssertTrue(updated.controls.allSatisfy { $0.action.host == "10.0.0.25" })
+        XCTAssertTrue(updated.controls.compactMap(\.textBox).allSatisfy {
+            $0.computerID?.uuidString == "11111111-1111-1111-1111-111111111111" &&
+                $0.sourceText.hasPrefix("10.0.0.25|")
+        })
     }
 }
 

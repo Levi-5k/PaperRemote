@@ -24,6 +24,12 @@ public enum RemoteJogMode
     Continuous,
 }
 
+public enum OpenBuildsUnits
+{
+    Mm,
+    In,
+}
+
 public enum RemoteTextSource
 {
     StaticText,
@@ -177,6 +183,8 @@ public sealed class OpenBuildsControllerSettings
     public int JogSpeed { get; set; } = 1_000;
     public RemoteJogMode JogMode { get; set; } = RemoteJogMode.Incremental;
     public int JogDistanceTenths { get; set; } = 10;
+    public OpenBuildsUnits Units { get; set; } = OpenBuildsUnits.Mm;
+    public int JogDistanceThousandths { get; set; } = 1_000;
 }
 
 public sealed class RemoteProfile

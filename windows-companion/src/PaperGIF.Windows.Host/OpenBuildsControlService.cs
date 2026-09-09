@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -46,10 +47,11 @@ internal static class OpenBuildsCommandMapper
         int? valueTenths = null,
         IReadOnlyList<string>? modifiers = null)
     {
-        var distance = (valueTenths ?? value * 10) / 10d;
+        var unitScale = modifiers?.Contains("units=in", StringComparer.Ordinal) == true ? 25.4 : 1;
+        var distance = Distance(modifiers, valueTenths ?? value * 10) * unitScale;
         var configuredFeed = Feed(modifiers);
-        var xyFeed = configuredFeed ?? 1_000;
-        var zFeed = configuredFeed ?? 500;
+        var xyFeed = ScaledFeed(configuredFeed ?? 1_000, unitScale);
+        var zFeed = ScaledFeed(configuredFeed ?? 500, unitScale);
         return command switch
         {
             "jogXNegative" => Jog("X", -1, distance, xyFeed),
@@ -62,14 +64,14 @@ internal static class OpenBuildsCommandMapper
             "jogXNegativeYPositive" => JogXY(-1, 1, distance, xyFeed),
             "jogXPositiveYNegative" => JogXY(1, -1, distance, xyFeed),
             "jogXPositiveYPositive" => JogXY(1, 1, distance, xyFeed),
-            "continuousJogXNegative" => ContinuousJog(-1, 0, value),
-            "continuousJogXPositive" => ContinuousJog(1, 0, value),
-            "continuousJogYNegative" => ContinuousJog(0, -1, value),
-            "continuousJogYPositive" => ContinuousJog(0, 1, value),
-            "continuousJogXNegativeYNegative" => ContinuousJog(-1, -1, value),
-            "continuousJogXNegativeYPositive" => ContinuousJog(-1, 1, value),
-            "continuousJogXPositiveYNegative" => ContinuousJog(1, -1, value),
-            "continuousJogXPositiveYPositive" => ContinuousJog(1, 1, value),
+            "continuousJogXNegative" => ContinuousJog(-1, 0, ScaledFeed(value, unitScale)),
+            "continuousJogXPositive" => ContinuousJog(1, 0, ScaledFeed(value, unitScale)),
+            "continuousJogYNegative" => ContinuousJog(0, -1, ScaledFeed(value, unitScale)),
+            "continuousJogYPositive" => ContinuousJog(0, 1, ScaledFeed(value, unitScale)),
+            "continuousJogXNegativeYNegative" => ContinuousJog(-1, -1, ScaledFeed(value, unitScale)),
+            "continuousJogXNegativeYPositive" => ContinuousJog(-1, 1, ScaledFeed(value, unitScale)),
+            "continuousJogXPositiveYNegative" => ContinuousJog(1, -1, ScaledFeed(value, unitScale)),
+            "continuousJogXPositiveYPositive" => ContinuousJog(1, 1, ScaledFeed(value, unitScale)),
             "cancelJog" => new("stop", OpenBuildsPayloadKind.Stop,
                 StopValue: new OpenBuildsStopPayload(false, true, false)),
             "pause" => new("pause", OpenBuildsPayloadKind.Boolean, BooleanValue: true),
@@ -85,13 +87,13 @@ internal static class OpenBuildsCommandMapper
     }
 
     private static OpenBuildsEmission? Jog(string axis, int direction, double distance, int feed) =>
-        distance is >= 0.1 and <= 100 && feed is >= 100 and <= 10_000
+        distance is >= 0.001 and <= 100 && feed is >= 100 and <= 10_000
             ? new("jog", OpenBuildsPayloadKind.String,
-                StringValue: $"{axis},{(direction * distance).ToString("0.###", CultureInfo.InvariantCulture)},{feed}")
+                StringValue: $"{axis},{(direction * distance).ToString("0.####", CultureInfo.InvariantCulture)},{feed}")
             : null;
 
     private static OpenBuildsEmission? JogXY(int xDirection, int yDirection, double distance, int feed) =>
-        distance is >= 0.1 and <= 100 && feed is >= 100 and <= 10_000
+        distance is >= 0.001 and <= 100 && feed is >= 100 and <= 10_000
             ? new("jogXY", OpenBuildsPayloadKind.JogXY,
                 JogXYValue: new OpenBuildsJogXYPayload(
                     xDirection * distance,
@@ -116,12 +118,24 @@ internal static class OpenBuildsCommandMapper
         var value = modifiers?.FirstOrDefault(modifier => modifier.StartsWith("feed=", StringComparison.Ordinal));
         return value is not null && int.TryParse(value.AsSpan(5), out var feed) ? feed : null;
     }
+
+    private static double Distance(IReadOnlyList<string>? modifiers, int fallbackTenths)
+    {
+        var value = modifiers?.FirstOrDefault(modifier => modifier.StartsWith("dist=", StringComparison.Ordinal));
+        return value is not null && int.TryParse(value.AsSpan(5), out var thousandths)
+            ? thousandths / 1_000d
+            : fallbackTenths / 10d;
+    }
+
+    private static int ScaledFeed(int feed, double scale) =>
+        (int)Math.Round(feed * scale, MidpointRounding.AwayFromZero);
 }
 
-internal sealed class OpenBuildsControlService
+internal sealed class OpenBuildsControlService : IDisposable
 {
     private static readonly int[] DefaultPorts = [3_000, 3_020, 3_200, 3_220];
     private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromMilliseconds(1_250) };
+    private readonly ConcurrentDictionary<string, OpenBuildsPositionSession> positionSessions = new();
 
     public bool Perform(RemoteRequest request) =>
         PerformAsync(request).GetAwaiter().GetResult();
@@ -155,10 +169,23 @@ internal sealed class OpenBuildsControlService
         {
             if (await IsOpenBuildsControlAsync(endpoint))
             {
-                return await ReadPositionAsync(endpoint, cancellationToken);
+                var session = positionSessions.GetOrAdd(
+                    endpoint.AbsoluteUri,
+                    _ => new OpenBuildsPositionSession(endpoint));
+                return await session.PositionAsync(cancellationToken);
             }
         }
         return null;
+    }
+
+    public void Dispose()
+    {
+        foreach (var session in positionSessions.Values)
+        {
+            session.Dispose();
+        }
+        positionSessions.Clear();
+        httpClient.Dispose();
     }
 
     internal static IReadOnlyList<Uri> Endpoints(string host)
@@ -261,44 +288,108 @@ internal sealed class OpenBuildsControlService
         }
     }
 
-    private static async Task<OpenBuildsPosition?> ReadPositionAsync(
-        Uri endpoint,
-        CancellationToken cancellationToken)
+    private sealed class OpenBuildsPositionSession : IDisposable
     {
-        using var client = new SocketIOClient.SocketIO(endpoint, new SocketIOOptions
+        private static readonly TimeSpan Freshness = TimeSpan.FromSeconds(2);
+        private readonly SocketIOClient.SocketIO client;
+        private readonly SemaphoreSlim connectionLock = new(1, 1);
+        private readonly object positionLock = new();
+        private OpenBuildsPosition? latestPosition;
+        private DateTimeOffset latestPositionAt = DateTimeOffset.MinValue;
+        private TaskCompletionSource<OpenBuildsPosition> nextPosition = NewPositionCompletion();
+
+        public OpenBuildsPositionSession(Uri endpoint)
         {
-            Reconnection = false,
-            ConnectionTimeout = TimeSpan.FromSeconds(3),
-        });
-        var completion = new TaskCompletionSource<OpenBuildsPosition?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        client.On("status", response =>
+            client = new SocketIOClient.SocketIO(endpoint, new SocketIOOptions
+            {
+                Reconnection = false,
+                ConnectionTimeout = TimeSpan.FromSeconds(3),
+            });
+            client.On("status", response =>
+            {
+                try
+                {
+                    Publish(ParsePosition(response.GetValue<JsonElement>()));
+                }
+                catch (JsonException)
+                {
+                }
+            });
+        }
+
+        public async Task<OpenBuildsPosition?> PositionAsync(CancellationToken cancellationToken)
         {
             try
             {
-                completion.TrySetResult(ParsePosition(response.GetValue<JsonElement>()));
+                Task<OpenBuildsPosition> next;
+                lock (positionLock)
+                {
+                    if (latestPosition is not null &&
+                        DateTimeOffset.UtcNow - latestPositionAt <= Freshness)
+                    {
+                        return latestPosition;
+                    }
+                    next = nextPosition.Task;
+                }
+
+                await EnsureConnectedAsync(cancellationToken);
+                return await next.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
             }
-            catch (JsonException)
+            catch (Exception exception) when (
+                exception is HttpRequestException or TaskCanceledException or TimeoutException or WebSocketException)
             {
-                completion.TrySetResult(null);
+                return null;
             }
-        });
-        try
-        {
-            await client.ConnectAsync();
-            return await completion.Task.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
         }
-        catch (Exception exception) when (
-            exception is HttpRequestException or TaskCanceledException or TimeoutException or WebSocketException)
-        {
-            return null;
-        }
-        finally
+
+        private async Task EnsureConnectedAsync(CancellationToken cancellationToken)
         {
             if (client.Connected)
             {
-                await client.DisconnectAsync();
+                return;
             }
+            await connectionLock.WaitAsync(cancellationToken);
+            try
+            {
+                if (!client.Connected)
+                {
+                    await client.ConnectAsync();
+                }
+            }
+            finally
+            {
+                connectionLock.Release();
+            }
+        }
+
+        private void Publish(OpenBuildsPosition? position)
+        {
+            if (position is null)
+            {
+                return;
+            }
+            TaskCompletionSource<OpenBuildsPosition> completion;
+            lock (positionLock)
+            {
+                latestPosition = position;
+                latestPositionAt = DateTimeOffset.UtcNow;
+                completion = nextPosition;
+                nextPosition = NewPositionCompletion();
+            }
+            completion.TrySetResult(position);
+        }
+
+        private static TaskCompletionSource<OpenBuildsPosition> NewPositionCompletion() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Dispose()
+        {
+            if (client.Connected)
+            {
+                client.DisconnectAsync().GetAwaiter().GetResult();
+            }
+            client.Dispose();
+            connectionLock.Dispose();
         }
     }
 

@@ -81,15 +81,22 @@ jog commands are `jogXNegative`, `jogXPositive`, `jogYNegative`,
 `valueTenths` is present, otherwise `value` mm. An optional `feed=<100-10000>`
 modifier selects mm/min.
 
+Unit-aware controller pages add `units=mm|in` and `dist=<thousandths>`
+modifiers. `dist` supersedes `valueTenths`; companions convert inch distance
+and feed values to the millimeter-based OpenBuilds socket contract. Actions
+without these modifiers retain the legacy millimeter behavior.
+
 Continuous XY commands use the same direction suffix prefixed by
 `continuousJog`, put feed in `value`, and must be paired with `cancelJog` on
 release or pointer exit. Other commands are `pause`, `resume`, `stop`, `abort`,
 `unlock`, and `home`. Companions probe CONTROL's `/api/version` endpoint before
 emitting an allowlisted Socket.IO event; arbitrary G-code is not accepted.
 
-The `openBuildsPosition` text source uses `host|axis` in `sourceText`, where
-axis is `x`, `y`, or `z`. The companion subscribes to CONTROL status and returns
-the current work coordinate without issuing machine movement.
+The `openBuildsPosition` text source uses `host|axis|units` in `sourceText`,
+where axis is `x`, `y`, or `z`, and units is `mm` or `in`. The units component
+is optional and defaults to `mm` for existing profiles. The companion
+subscribes to CONTROL status and returns the converted current work coordinate
+without issuing machine movement.
 
 ### `POST /text-source`
 

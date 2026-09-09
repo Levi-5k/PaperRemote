@@ -78,19 +78,21 @@ internal sealed class WindowsTextSourceResolver(
             available);
     }
 
-    private static (string? Host, string? Axis) ParseOpenBuildsTarget(string value)
+    private static (string? Host, string? Axis, string Units) ParseOpenBuildsTarget(string value)
     {
-        var separator = value.LastIndexOf('|');
-        return separator <= 0 || separator == value.Length - 1
-            ? (null, null)
-            : (value[..separator], value[(separator + 1)..].ToLowerInvariant());
+        var components = value.Split('|', 3);
+        return components.Length < 2 || string.IsNullOrWhiteSpace(components[0]) ||
+            string.IsNullOrWhiteSpace(components[1])
+            ? (null, null, "mm")
+            : (components[0], components[1].ToLowerInvariant(),
+                components.Length == 3 ? components[2].ToLowerInvariant() : "mm");
     }
 
     private static string? FormatOpenBuildsPosition(
         string target,
         IReadOnlyDictionary<string, OpenBuildsPosition?> positions)
     {
-        var (host, axis) = ParseOpenBuildsTarget(target);
+        var (host, axis, units) = ParseOpenBuildsTarget(target);
         if (host is null || axis is null || !positions.TryGetValue(host, out var position) || position is null)
         {
             return null;
@@ -102,9 +104,14 @@ internal sealed class WindowsTextSourceResolver(
             "z" => position.Z,
             _ => double.NaN,
         };
-        return double.IsNaN(value)
-            ? null
-            : $"{axis.ToUpperInvariant()} {value.ToString("0.000", CultureInfo.InvariantCulture)}";
+        if (double.IsNaN(value))
+        {
+            return null;
+        }
+        var usesInches = units == "in";
+        var displayValue = usesInches ? value / 25.4 : value;
+        return $"{axis.ToUpperInvariant()} {displayValue.ToString("0.000", CultureInfo.InvariantCulture)} " +
+            (usesInches ? "in" : "mm");
     }
 
     private static async Task<MediaSessionState?> ReadMediaSessionAsync(

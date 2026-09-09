@@ -27,9 +27,10 @@ enum OpenBuildsCommandMapper {
         valueTenths: Int? = nil,
         modifiers: [String] = []
     ) -> OpenBuildsEmission? {
-        let distance = Double(valueTenths ?? value * 10) / 10
-        let xyFeed = feed(in: modifiers) ?? 1_000
-        let zFeed = feed(in: modifiers) ?? 500
+        let unitScale = modifiers.contains("units=in") ? 25.4 : 1
+        let distance = distance(in: modifiers, fallbackTenths: valueTenths ?? value * 10) * unitScale
+        let xyFeed = scaledFeed(feed(in: modifiers) ?? 1_000, by: unitScale)
+        let zFeed = scaledFeed(feed(in: modifiers) ?? 500, by: unitScale)
         return switch command {
         case "jogXNegative": jog(axis: "X", direction: -1, distance: distance, feed: xyFeed)
         case "jogXPositive": jog(axis: "X", direction: 1, distance: distance, feed: xyFeed)
@@ -41,14 +42,14 @@ enum OpenBuildsCommandMapper {
         case "jogXNegativeYPositive": jogXY(xDirection: -1, yDirection: 1, distance: distance, feed: xyFeed)
         case "jogXPositiveYNegative": jogXY(xDirection: 1, yDirection: -1, distance: distance, feed: xyFeed)
         case "jogXPositiveYPositive": jogXY(xDirection: 1, yDirection: 1, distance: distance, feed: xyFeed)
-        case "continuousJogXNegative": continuousJog(x: -1, y: 0, feed: value)
-        case "continuousJogXPositive": continuousJog(x: 1, y: 0, feed: value)
-        case "continuousJogYNegative": continuousJog(x: 0, y: -1, feed: value)
-        case "continuousJogYPositive": continuousJog(x: 0, y: 1, feed: value)
-        case "continuousJogXNegativeYNegative": continuousJog(x: -1, y: -1, feed: value)
-        case "continuousJogXNegativeYPositive": continuousJog(x: -1, y: 1, feed: value)
-        case "continuousJogXPositiveYNegative": continuousJog(x: 1, y: -1, feed: value)
-        case "continuousJogXPositiveYPositive": continuousJog(x: 1, y: 1, feed: value)
+        case "continuousJogXNegative": continuousJog(x: -1, y: 0, feed: scaledFeed(value, by: unitScale))
+        case "continuousJogXPositive": continuousJog(x: 1, y: 0, feed: scaledFeed(value, by: unitScale))
+        case "continuousJogYNegative": continuousJog(x: 0, y: -1, feed: scaledFeed(value, by: unitScale))
+        case "continuousJogYPositive": continuousJog(x: 0, y: 1, feed: scaledFeed(value, by: unitScale))
+        case "continuousJogXNegativeYNegative": continuousJog(x: -1, y: -1, feed: scaledFeed(value, by: unitScale))
+        case "continuousJogXNegativeYPositive": continuousJog(x: -1, y: 1, feed: scaledFeed(value, by: unitScale))
+        case "continuousJogXPositiveYNegative": continuousJog(x: 1, y: -1, feed: scaledFeed(value, by: unitScale))
+        case "continuousJogXPositiveYPositive": continuousJog(x: 1, y: 1, feed: scaledFeed(value, by: unitScale))
         case "cancelJog": OpenBuildsEmission(event: "stop", payload: .stop(stop: false, jog: true, abort: false))
         case "pause": OpenBuildsEmission(event: "pause", payload: .boolean(true))
         case "resume": OpenBuildsEmission(event: "resume", payload: .boolean(true))
@@ -61,7 +62,7 @@ enum OpenBuildsCommandMapper {
     }
 
     private static func jog(axis: String, direction: Int, distance: Double, feed: Int) -> OpenBuildsEmission? {
-        guard (0.1...100).contains(distance), (100...10_000).contains(feed) else { return nil }
+        guard (0.001...100).contains(distance), (100...10_000).contains(feed) else { return nil }
         return OpenBuildsEmission(
             event: "jog",
             payload: .string("\(axis),\(number(Double(direction) * distance)),\(feed)")
@@ -69,7 +70,7 @@ enum OpenBuildsCommandMapper {
     }
 
     private static func jogXY(xDirection: Int, yDirection: Int, distance: Double, feed: Int) -> OpenBuildsEmission? {
-        guard (0.1...100).contains(distance), (100...10_000).contains(feed) else { return nil }
+        guard (0.001...100).contains(distance), (100...10_000).contains(feed) else { return nil }
         return OpenBuildsEmission(
             event: "jogXY",
             payload: .jogXY(x: Double(xDirection) * distance, y: Double(yDirection) * distance, feed: feed)
@@ -93,15 +94,28 @@ enum OpenBuildsCommandMapper {
         }.first
     }
 
+    private static func distance(in modifiers: [String], fallbackTenths: Int) -> Double {
+        let thousandths = modifiers.lazy.compactMap { modifier -> Int? in
+            guard modifier.hasPrefix("dist=") else { return nil }
+            return Int(modifier.dropFirst(5))
+        }.first
+        return Double(thousandths ?? fallbackTenths * 100) / 1_000
+    }
+
+    private static func scaledFeed(_ feed: Int, by scale: Double) -> Int {
+        Int((Double(feed) * scale).rounded())
+    }
+
     private static func number(_ value: Double) -> String {
-        value.rounded() == value
-            ? String(Int(value))
-            : String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
+        let formatted = String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), value)
+        return formatted.replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
     }
 }
 
 final class OpenBuildsControlService {
     private static let defaultPorts = [3_000, 3_020, 3_200, 3_220]
+    private let positionSessionsLock = NSLock()
+    private var positionSessions: [URL: OpenBuildsPositionSession] = [:]
 
     func perform(host: String?, command: String, value: Int, valueTenths: Int?, modifiers: [String]) -> Bool {
         guard let emission = OpenBuildsCommandMapper.emission(
@@ -120,7 +134,7 @@ final class OpenBuildsControlService {
 
     func position(host: String) -> OpenBuildsPosition? {
         for endpoint in Self.endpoints(host: host) where isOpenBuildsControl(endpoint) {
-            if let position = readPosition(from: endpoint) {
+            if let position = positionSession(for: endpoint).position() {
                 return position
             }
         }
@@ -227,38 +241,15 @@ final class OpenBuildsControlService {
         return succeeded
     }
 
-    private func readPosition(from endpoint: URL) -> OpenBuildsPosition? {
-        let callbackQueue = DispatchQueue(label: "paperGIF.openbuilds.status")
-        let manager = SocketManager(socketURL: endpoint, config: [
-            .log(false),
-            .reconnects(false),
-            .forceNew(true),
-            .forceWebsockets(true),
-            .handleQueue(callbackQueue),
-        ])
-        let socket = manager.defaultSocket
-        let semaphore = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        var result: OpenBuildsPosition?
-        var finished = false
-        let finish: (OpenBuildsPosition?) -> Void = { position in
-            lock.lock()
-            defer { lock.unlock() }
-            guard !finished else { return }
-            finished = true
-            result = position
-            semaphore.signal()
+    private func positionSession(for endpoint: URL) -> OpenBuildsPositionSession {
+        positionSessionsLock.lock()
+        defer { positionSessionsLock.unlock() }
+        if let session = positionSessions[endpoint] {
+            return session
         }
-        socket.on("status") { data, _ in
-            guard let payload = data.first as? [String: Any] else { return }
-            finish(Self.position(from: payload))
-        }
-        socket.on(clientEvent: .error) { _, _ in finish(nil) }
-        socket.connect(withPayload: nil, timeoutAfter: 3) { finish(nil) }
-        _ = semaphore.wait(timeout: .now() + 3.5)
-        socket.disconnect()
-        socket.removeAllHandlers()
-        return result
+        let session = OpenBuildsPositionSession(endpoint: endpoint)
+        positionSessions[endpoint] = session
+        return session
     }
 
     static func position(from status: [String: Any]) -> OpenBuildsPosition? {
@@ -277,5 +268,89 @@ final class OpenBuildsControlService {
         if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return Double(string) }
         return nil
+    }
+}
+
+private final class OpenBuildsPositionSession {
+    private static let freshness: TimeInterval = 2
+    private let manager: SocketManager
+    private let socket: SocketIOClient
+    private let condition = NSCondition()
+    private var connectionActive = false
+    private var latestPosition: OpenBuildsPosition?
+    private var latestPositionAt = Date.distantPast
+
+    init(endpoint: URL) {
+        let callbackQueue = DispatchQueue(label: "paperGIF.openbuilds.status.\(endpoint.port ?? 0)")
+        manager = SocketManager(socketURL: endpoint, config: [
+            .log(false),
+            .reconnects(false),
+            .forceNew(true),
+            .forceWebsockets(true),
+            .handleQueue(callbackQueue),
+        ])
+        socket = manager.defaultSocket
+        socket.on("status") { [weak self] data, _ in
+            guard let payload = data.first as? [String: Any],
+                  let position = OpenBuildsControlService.position(from: payload) else { return }
+            self?.publish(position)
+        }
+        socket.on(clientEvent: .connect) { [weak self] _, _ in
+            self?.setConnectionActive(true)
+        }
+        socket.on(clientEvent: .disconnect) { [weak self] _, _ in
+            self?.setConnectionActive(false)
+        }
+        socket.on(clientEvent: .error) { [weak self] _, _ in
+            self?.setConnectionActive(false)
+        }
+    }
+
+    deinit {
+        socket.disconnect()
+        socket.removeAllHandlers()
+    }
+
+    func position() -> OpenBuildsPosition? {
+        condition.lock()
+        if let latestPosition, Date().timeIntervalSince(latestPositionAt) <= Self.freshness {
+            condition.unlock()
+            return latestPosition
+        }
+        let shouldConnect = !connectionActive
+        if shouldConnect {
+            connectionActive = true
+        }
+        condition.unlock()
+
+        if shouldConnect {
+            socket.connect(withPayload: nil, timeoutAfter: 3) { [weak self] in
+                self?.setConnectionActive(false)
+            }
+        }
+
+        condition.lock()
+        let deadline = Date().addingTimeInterval(3.5)
+        while Date().timeIntervalSince(latestPositionAt) > Self.freshness &&
+            connectionActive && condition.wait(until: deadline) {}
+        let result = Date().timeIntervalSince(latestPositionAt) <= Self.freshness
+            ? latestPosition : nil
+        condition.unlock()
+        return result
+    }
+
+    private func publish(_ position: OpenBuildsPosition) {
+        condition.lock()
+        latestPosition = position
+        latestPositionAt = Date()
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    private func setConnectionActive(_ active: Bool) {
+        condition.lock()
+        connectionActive = active
+        condition.broadcast()
+        condition.unlock()
     }
 }

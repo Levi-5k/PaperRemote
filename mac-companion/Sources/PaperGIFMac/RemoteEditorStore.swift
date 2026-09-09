@@ -177,6 +177,32 @@ final class RemoteEditorStore: ObservableObject {
         selectedControlID = nil
     }
 
+    @discardableResult
+    func updateModulePages(from module: PaperModuleManifest) -> Int {
+        let definitions = Dictionary(uniqueKeysWithValues: (module.pages ?? []).map { ($0.id, $0) })
+        var updatedProfile = profile
+        var updatedCount = 0
+        for index in updatedProfile.pages.indices {
+            let existing = updatedProfile.pages[index]
+            guard existing.moduleID == module.id,
+                  let modulePageID = existing.modulePageID,
+                  let definition = definitions[modulePageID] else { continue }
+            updatedProfile.pages[index] = ModuleCatalog.updatedPage(
+                existing,
+                from: definition,
+                moduleID: module.id
+            )
+            updatedCount += 1
+        }
+        guard updatedCount > 0 else { return 0 }
+        profile = updatedProfile
+        if let selectedControlID,
+           !profile.pages.flatMap(\.controls).contains(where: { $0.id == selectedControlID }) {
+            self.selectedControlID = nil
+        }
+        return updatedCount
+    }
+
     func deleteSelectedPage() {
         guard profile.pages.count > 1, let index = selectedPageIndex else { return }
         profile.pages.remove(at: index)

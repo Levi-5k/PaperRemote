@@ -46,6 +46,25 @@ final class OpenBuildsControlServiceTests: XCTestCase {
         XCTAssertNil(OpenBuildsCommandMapper.emission(command: "continuousJogXPositive", value: 99))
     }
 
+    func testConvertsInchJogDistanceAndFeedToMillimeters() {
+        XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(
+                command: "jogXPositive",
+                value: 0,
+                modifiers: ["feed=10", "units=in", "dist=1"]
+            ),
+            OpenBuildsEmission(event: "jog", payload: .string("X,0.0254,254"))
+        )
+        XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(
+                command: "continuousJogYPositive",
+                value: 20,
+                modifiers: ["units=in"]
+            ),
+            OpenBuildsEmission(event: "runCommand", payload: .string("$J=G91 G21 Y1000 F508\n"))
+        )
+    }
+
     func testBuildsOnlyLocalNetworkTargets() {
         XCTAssertEqual(OpenBuildsControlService.endpoints(host: "").count, 4)
         XCTAssertEqual(OpenBuildsControlService.endpoints(host: "192.168.50.44:3020").first?.port, 3_020)

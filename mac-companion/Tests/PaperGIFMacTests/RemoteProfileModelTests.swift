@@ -104,6 +104,26 @@ final class RemoteProfileModelTests: XCTestCase {
         XCTAssertEqual(page.gridRows, 5)
     }
 
+    func testOpenBuildsUnitsDecodeLegacyDistanceAndRoundTripInches() throws {
+        let legacy = Data(#"{"host":"127.0.0.1","jogSpeed":1000,"jogMode":"incremental","jogDistanceTenths":10}"#.utf8)
+        let legacySettings = try JSONDecoder().decode(RemoteOpenBuildsController.self, from: legacy)
+
+        XCTAssertEqual(legacySettings.units, .millimeters)
+        XCTAssertEqual(legacySettings.jogDistanceThousandths, 1_000)
+
+        let inchSettings = RemoteOpenBuildsController(
+            jogSpeed: 40,
+            units: .inches,
+            jogDistanceThousandths: 1
+        )
+        let roundTripped = try JSONDecoder().decode(
+            RemoteOpenBuildsController.self,
+            from: JSONEncoder().encode(inchSettings)
+        )
+
+        XCTAssertEqual(roundTripped, inchSettings)
+    }
+
     func testTextBoxPlacementUsesEveryCellInItsSpan() throws {
         let control = RemoteControl(
             title: "Status",

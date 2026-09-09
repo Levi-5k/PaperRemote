@@ -74,7 +74,13 @@ final class ModuleCatalog: ObservableObject {
     }
 
     func isInstalled(_ listing: PaperModuleListing) -> Bool {
-        installedByID[listing.id]?.version == listing.version
+        guard let installedVersion = installedByID[listing.id]?.version else { return false }
+        return !Self.isVersion(listing.version, newerThan: installedVersion)
+    }
+
+    func hasUpdate(_ listing: PaperModuleListing) -> Bool {
+        guard let installedVersion = installedByID[listing.id]?.version else { return false }
+        return Self.isVersion(listing.version, newerThan: installedVersion)
     }
 
     func installedModule(id: String) -> PaperModuleManifest? {
@@ -91,6 +97,57 @@ final class ModuleCatalog: ObservableObject {
         }
         page.moduleID = moduleID
         page.modulePageID = definition.id
+        return page
+    }
+
+    nonisolated static func updatedPage(
+        _ existing: RemotePage,
+        from definition: PaperModulePage,
+        moduleID: String
+    ) -> RemotePage {
+        var page = clonePage(definition, moduleID: moduleID)
+        page.id = existing.id
+        page.name = existing.name
+        if let controller = existing.openBuildsController,
+           page.openBuildsController != nil {
+            page.openBuildsController = controller
+        }
+
+        let actionComputerID = existing.controls.lazy.compactMap(\.action.computerID).first
+        let actionHost = existing.controls.lazy.map(\.action.host).first { !$0.isEmpty }
+        let textComputerID = existing.controls.lazy.compactMap(\.textBox?.computerID).first
+        let textHost = existing.controls.lazy.compactMap { control -> String? in
+            guard control.textBox?.source == .openBuildsPosition,
+                  let sourceText = control.textBox?.sourceText else { return nil }
+            return sourceText.split(separator: "|", omittingEmptySubsequences: false).first.map(String.init)
+        }.first
+
+        for index in page.controls.indices {
+            if let previous = existing.controls.first(where: {
+                $0.kind == page.controls[index].kind && $0.title == page.controls[index].title
+            }) {
+                page.controls[index].id = previous.id
+            }
+            if page.controls[index].action.type == .openBuilds {
+                page.controls[index].action.computerID = actionComputerID
+                if let actionHost {
+                    page.controls[index].action.host = actionHost
+                }
+            }
+            if page.controls[index].textBox?.source == .openBuildsPosition {
+                page.controls[index].textBox?.computerID = textComputerID
+                if let textHost,
+                   let sourceText = page.controls[index].textBox?.sourceText {
+                    var components = sourceText.split(
+                        separator: "|", omittingEmptySubsequences: false
+                    ).map(String.init)
+                    if !components.isEmpty {
+                        components[0] = textHost
+                        page.controls[index].textBox?.sourceText = components.joined(separator: "|")
+                    }
+                }
+            }
+        }
         return page
     }
 
@@ -114,7 +171,7 @@ final class ModuleCatalog: ObservableObject {
         }
         let data = try await download(manifestURL)
         let manifest = try JSONDecoder().decode(PaperModuleManifest.self, from: data)
-        try Self.validate(manifest, expectedID: listing.id)
+        try Self.validate(manifest, expectedID: listing.id, expectedVersion: listing.version)
         try FileManager.default.createDirectory(at: installedDirectory, withIntermediateDirectories: true)
         try data.write(
             to: installedDirectory.appendingPathComponent("\(manifest.id).json"),
@@ -127,7 +184,8 @@ final class ModuleCatalog: ObservableObject {
     private func download(_ url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
-        request.cachePolicy = .reloadRevalidatingCacheData
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
             throw ModuleCatalogError.downloadFailed
@@ -151,9 +209,14 @@ final class ModuleCatalog: ObservableObject {
         }
     }
 
-    private static func validate(_ manifest: PaperModuleManifest, expectedID: String) throws {
+    private static func validate(
+        _ manifest: PaperModuleManifest,
+        expectedID: String,
+        expectedVersion: String? = nil
+    ) throws {
         guard manifest.schemaVersion == 1,
               manifest.id == expectedID,
+              expectedVersion == nil || manifest.version == expectedVersion,
               isValidIdentifier(manifest.id),
               !manifest.name.isEmpty,
               !manifest.version.isEmpty,
@@ -179,6 +242,10 @@ final class ModuleCatalog: ObservableObject {
 
     private static func isValidIdentifier(_ value: String) -> Bool {
         value.range(of: "^[a-z0-9]+(?:-[a-z0-9]+)*$", options: .regularExpression) != nil
+    }
+
+    nonisolated static func isVersion(_ candidate: String, newerThan installed: String) -> Bool {
+        candidate.compare(installed, options: [.numeric, .caseInsensitive]) == .orderedDescending
     }
 }
 

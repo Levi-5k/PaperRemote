@@ -45,11 +45,60 @@ enum RemoteJogMode: String, Codable, Sendable {
     case continuous
 }
 
+enum RemoteOpenBuildsUnits: String, Codable, Sendable {
+    case millimeters = "mm"
+    case inches = "in"
+}
+
 struct RemoteOpenBuildsController: Codable, Equatable, Sendable {
     var host = "127.0.0.1"
     var jogSpeed = 1_000
     var jogMode: RemoteJogMode = .incremental
-    var jogDistanceTenths = 10
+    var units: RemoteOpenBuildsUnits = .millimeters
+    var jogDistanceThousandths = 1_000
+
+    var jogDistanceTenths: Int {
+        max(1, (jogDistanceThousandths + 50) / 100)
+    }
+
+    init(
+        host: String = "127.0.0.1",
+        jogSpeed: Int = 1_000,
+        jogMode: RemoteJogMode = .incremental,
+        units: RemoteOpenBuildsUnits = .millimeters,
+        jogDistanceThousandths: Int = 1_000
+    ) {
+        self.host = host
+        self.jogSpeed = jogSpeed
+        self.jogMode = jogMode
+        self.units = units
+        self.jogDistanceThousandths = jogDistanceThousandths
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case host, jogSpeed, jogMode, units, jogDistanceTenths, jogDistanceThousandths
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        host = try container.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
+        jogSpeed = try container.decodeIfPresent(Int.self, forKey: .jogSpeed) ?? 1_000
+        jogMode = try container.decodeIfPresent(RemoteJogMode.self, forKey: .jogMode) ?? .incremental
+        units = try container.decodeIfPresent(RemoteOpenBuildsUnits.self, forKey: .units) ?? .millimeters
+        jogDistanceThousandths = try container.decodeIfPresent(
+            Int.self, forKey: .jogDistanceThousandths
+        ) ?? (try container.decodeIfPresent(Int.self, forKey: .jogDistanceTenths) ?? 10) * 100
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(host, forKey: .host)
+        try container.encode(jogSpeed, forKey: .jogSpeed)
+        try container.encode(jogMode, forKey: .jogMode)
+        try container.encode(units, forKey: .units)
+        try container.encode(jogDistanceTenths, forKey: .jogDistanceTenths)
+        try container.encode(jogDistanceThousandths, forKey: .jogDistanceThousandths)
+    }
 }
 
 enum RemoteTextSource: String, Codable, CaseIterable, Identifiable, Sendable {

@@ -438,6 +438,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         startOutputVolumeObservation()
         restartServer()
         let store = controlsEditorStore()
+        Task { await refreshInstalledModules(in: store) }
         if netHomeService.isSignedIn {
             Task { await store.refreshNetHomeUnits() }
         } else {
@@ -650,6 +651,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         editorStore = store
         return store
+    }
+
+    @MainActor private func refreshInstalledModules(in store: RemoteEditorStore) async {
+        let catalog = ModuleCatalog()
+        do {
+            try await catalog.refresh()
+            for listing in catalog.availableModules where catalog.hasUpdate(listing) {
+                let module = try await catalog.install(listing)
+                store.updateModulePages(from: module)
+            }
+        } catch {
+            // Module refresh is best effort; the editor exposes errors and an explicit retry.
+        }
     }
 
     @objc private func forgetPairedDevices() {
@@ -879,15 +893,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             case "nowPlaying":
                 output = nowPlayingText()
             case "openBuildsPosition":
-                let components = item.sourceText.split(separator: "|", maxSplits: 1).map(String.init)
-                guard components.count == 2,
+                let components = item.sourceText.split(separator: "|", maxSplits: 2).map(String.init)
+                guard components.count >= 2,
                       let position = openBuildsPositions[components[0]] else {
                     output = nil
                     break
                 }
                 let axis = components[1].lowercased()
                 let value = axis == "x" ? position.x : axis == "y" ? position.y : axis == "z" ? position.z : nil
-                output = value.map { String(format: "%@ %.3f", axis.uppercased(), $0) }
+                let usesInches = components.count == 3 && components[2].lowercased() == "in"
+                output = value.map {
+                    String(
+                        format: "%@ %.3f %@",
+                        axis.uppercased(),
+                        usesInches ? $0 / 25.4 : $0,
+                        usesInches ? "in" : "mm"
+                    )
+                }
             default:
                 output = nil
             }

@@ -170,43 +170,55 @@ internal sealed class RemotePreviewPanel : Control
         var rail = ScaleFrame(screen, new RectangleF(364, 232, 152, 430));
         using var labelFont = new Font("Segoe UI Variable Text Semibold", Math.Max(6, screen.Width / 55f));
         using var detailFont = new Font("Segoe UI Variable Text", Math.Max(6, screen.Width / 58f));
-        graphics.DrawString("JOG SPEED", labelFont, Brushes.Black, rail.Left, rail.Top);
-        var speedText = $"{settings.JogSpeed} mm/min";
-        var speedSize = graphics.MeasureString(speedText, detailFont);
-        graphics.DrawString(speedText, detailFont, Brushes.Black, rail.Right - speedSize.Width, rail.Top);
+        graphics.DrawString("UNITS", labelFont, Brushes.Black, rail.Left, rail.Top);
+        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 266, 72, 42)),
+            "MM", settings.Units == OpenBuildsUnits.Mm, detailFont);
+        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 266, 72, 42)),
+            "IN", settings.Units == OpenBuildsUnits.In, detailFont);
 
-        var track = ScaleFrame(screen, new RectangleF(364, 278, 152, 42));
+        var speedLabel = ScaleFrame(screen, new RectangleF(364, 326, 152, 24));
+        graphics.DrawString("JOG SPEED", labelFont, Brushes.Black, speedLabel);
+        var speedText = $"{settings.JogSpeed} {(settings.Units == OpenBuildsUnits.In ? "in" : "mm")}/min";
+        var speedSize = graphics.MeasureString(speedText, detailFont);
+        graphics.DrawString(speedText, detailFont, Brushes.Black, rail.Right - speedSize.Width, speedLabel.Top);
+
+        var track = ScaleFrame(screen, new RectangleF(364, 356, 152, 38));
         using var trackOutline = new Pen(Color.Black, 1);
         EditorTheme.DrawRoundedRectangle(graphics, trackOutline, track, 5);
-        var progress = Math.Clamp((settings.JogSpeed - 100) / 9900f, 0, 1);
+        var minimumSpeed = settings.Units == OpenBuildsUnits.In ? 4 : 100;
+        var maximumSpeed = settings.Units == OpenBuildsUnits.In ? 400 : 10_000;
+        var progress = Math.Clamp(
+            (settings.JogSpeed - minimumSpeed) / (float)(maximumSpeed - minimumSpeed), 0, 1);
         var fill = Rectangle.Inflate(track, -3, -3);
         fill.Width = Math.Max(2, (int)(fill.Width * progress));
         EditorTheme.FillRoundedRectangle(graphics, Brushes.Black, fill, 4);
 
-        var modeLabel = ScaleFrame(screen, new RectangleF(364, 350, 152, 24));
+        var modeLabel = ScaleFrame(screen, new RectangleF(364, 414, 152, 24));
         graphics.DrawString("JOG MODE", labelFont, Brushes.Black, modeLabel);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 382, 72, 48)),
+        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 442, 72, 42)),
             "STEP", settings.JogMode == RemoteJogMode.Incremental, detailFont);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 382, 72, 48)),
+        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 442, 72, 42)),
             "HOLD", settings.JogMode == RemoteJogMode.Continuous, detailFont);
 
-        var distanceLabel = ScaleFrame(screen, new RectangleF(364, 458, 152, 24));
+        var distanceLabel = ScaleFrame(screen, new RectangleF(364, 508, 152, 24));
         graphics.DrawString(settings.JogMode == RemoteJogMode.Continuous
             ? "RELEASE TO STOP" : "STEP DISTANCE", labelFont, Brushes.Black, distanceLabel);
         if (settings.JogMode == RemoteJogMode.Continuous)
         {
-            var help = ScaleFrame(screen, new RectangleF(364, 500, 152, 70));
+            var help = ScaleFrame(screen, new RectangleF(364, 552, 152, 70));
             graphics.DrawString("Motion stops\nwhen released.", detailFont, Brushes.Black, help);
         }
         else
         {
-            var distances = new[] { (1, "0.1"), (10, "1"), (100, "10"), (1000, "100") };
+            var distances = settings.Units == OpenBuildsUnits.In
+                ? new[] { (1, ".001"), (10, ".01"), (100, ".1"), (1_000, "1") }
+                : new[] { (100, "0.1"), (1_000, "1"), (10_000, "10"), (100_000, "100") };
             for (var index = 0; index < distances.Length; index++)
             {
                 var chip = ScaleFrame(screen, new RectangleF(
-                    364 + index % 2 * 80, 490 + index / 2 * 60, 72, 48));
+                    364 + index % 2 * 80, 538 + index / 2 * 56, 72, 42));
                 DrawControllerChip(graphics, chip, distances[index].Item2,
-                    settings.JogDistanceTenths == distances[index].Item1, detailFont);
+                    settings.JogDistanceThousandths == distances[index].Item1, detailFont);
             }
         }
     }

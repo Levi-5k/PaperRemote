@@ -477,15 +477,11 @@ private struct ModulesPanel: View {
                 }
             }
         }
-        .task {
-            if catalog.availableModules.isEmpty {
-                await refresh()
-            }
-        }
     }
 
     private func moduleCard(_ module: PaperModuleListing) -> some View {
         let installed = catalog.isInstalled(module)
+        let hasOlderVersion = catalog.hasUpdate(module)
         let pageTemplates = installed ? catalog.installedModule(id: module.id)?.pages ?? [] : []
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -512,7 +508,7 @@ private struct ModulesPanel: View {
                     ProgressView().controlSize(.small)
                 } else {
                     Label(
-                        installed ? "Installed" : "Install",
+                        installed ? "Installed" : hasOlderVersion ? "Update" : "Install",
                         systemImage: installed ? "checkmark.circle" : "arrow.down.circle"
                     )
                 }
@@ -545,8 +541,20 @@ private struct ModulesPanel: View {
         status = "Loading the module catalog..."
         do {
             try await catalog.refresh()
-            status = "\(catalog.availableModules.count) module(s) available"
+            var updatedModuleCount = 0
+            var updatedPageCount = 0
+            for listing in catalog.availableModules where catalog.hasUpdate(listing) {
+                installingID = listing.id
+                let module = try await catalog.install(listing)
+                updatedPageCount += store.updateModulePages(from: module)
+                updatedModuleCount += 1
+            }
+            installingID = nil
+            status = updatedModuleCount == 0
+                ? "\(catalog.availableModules.count) module(s) available"
+                : "Updated \(updatedModuleCount) module(s) and \(updatedPageCount) linked page(s)."
         } catch {
+            installingID = nil
             status = "Catalog unavailable: \(error.localizedDescription)"
         }
     }
@@ -556,9 +564,14 @@ private struct ModulesPanel: View {
         defer { installingID = nil }
         do {
             let module = try await catalog.install(listing)
-            status = module.pages?.isEmpty == false
-                ? "Installed \(module.name). Add its page here or use individual controls."
-                : "Installed \(module.name). Its controls are now in Add Controls."
+            let updatedPageCount = store.updateModulePages(from: module)
+            if updatedPageCount > 0 {
+                status = "Updated \(updatedPageCount) \(updatedPageCount == 1 ? "page" : "pages") from \(module.name)."
+            } else {
+                status = module.pages?.isEmpty == false
+                    ? "Installed \(module.name). Add its page here or use individual controls."
+                    : "Installed \(module.name). Its controls are now in Add Controls."
+            }
         } catch {
             status = "Install failed: \(error.localizedDescription)"
         }
@@ -719,7 +732,7 @@ private struct ControlInspector: View {
             case .openBuildsPosition:
                 textSourceComputerPicker
                 LabeledContent("Target") {
-                    TextField("127.0.0.1|x", text: textBoxBinding(\.sourceText))
+                    TextField("127.0.0.1|x|mm", text: textBoxBinding(\.sourceText))
                 }
             }
 
@@ -1774,45 +1787,54 @@ private struct OpenBuildsSettingsPreview: View {
     var body: some View {
         let settings = controller ?? RemoteOpenBuildsController()
         VStack(alignment: .leading, spacing: 0) {
+            Text("UNITS")
+                .font(.system(size: 9 * scale, weight: .bold))
+            HStack(spacing: 8 * scale) {
+                modeChip("MM", selected: settings.units == .millimeters)
+                modeChip("IN", selected: settings.units == .inches)
+            }
+            .padding(.top, 8 * scale)
+
             HStack {
                 Text("JOG SPEED")
                 Spacer()
-                Text("\(settings.jogSpeed) mm/min")
+                Text("\(settings.jogSpeed) \(settings.units.rawValue)/min")
             }
             .font(.system(size: 9 * scale, weight: .bold))
+            .padding(.top, 10 * scale)
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 7 * scale).stroke(.black, lineWidth: max(1, scale))
                 RoundedRectangle(cornerRadius: 5 * scale)
                     .fill(.black)
                     .padding(4 * scale)
-                    .frame(width: max(8 * scale, 152 * scale * CGFloat(settings.jogSpeed - 100) / 9_900))
+                    .frame(width: max(8 * scale, 152 * scale * speedProgress(settings)))
             }
-            .frame(height: 42 * scale)
-            .padding(.top, 22 * scale)
+            .frame(height: 38 * scale)
+            .padding(.top, 8 * scale)
 
             Text("JOG MODE")
                 .font(.system(size: 9 * scale, weight: .bold))
-                .padding(.top, 26 * scale)
+                .padding(.top, 10 * scale)
             HStack(spacing: 8 * scale) {
                 modeChip("STEP", selected: settings.jogMode == .incremental)
                 modeChip("HOLD", selected: settings.jogMode == .continuous)
             }
-            .padding(.top, 14 * scale)
+            .padding(.top, 8 * scale)
 
             Text(settings.jogMode == .continuous ? "RELEASE TO STOP" : "STEP DISTANCE")
                 .font(.system(size: 9 * scale, weight: .bold))
-                .padding(.top, 26 * scale)
+                .padding(.top, 10 * scale)
             if settings.jogMode == .continuous {
                 Text("Motion stops\nwhen released.")
                     .font(.system(size: 12 * scale))
-                    .padding(.top, 26 * scale)
+                    .padding(.top, 12 * scale)
             } else {
                 LazyVGrid(columns: Array(repeating: GridItem(.fixed(72 * scale)), count: 2), spacing: 12 * scale) {
-                    ForEach([(1, "0.1"), (10, "1"), (100, "10"), (1000, "100")], id: \.0) { value, label in
-                        modeChip(label, selected: settings.jogDistanceTenths == value)
+                    ForEach(distances(settings), id: \.0) { value, label in
+                        modeChip(label, selected: settings.jogDistanceThousandths == value)
                     }
                 }
-                .padding(.top, 14 * scale)
+                .padding(.top, 8 * scale)
             }
         }
         .foregroundStyle(.black)
@@ -1824,10 +1846,22 @@ private struct OpenBuildsSettingsPreview: View {
         Text(title)
             .font(.system(size: 9 * scale, weight: .bold))
             .foregroundStyle(selected ? .white : .black)
-            .frame(width: 72 * scale, height: 48 * scale)
+            .frame(width: 72 * scale, height: 42 * scale)
             .background(selected ? Color.black : Color.white)
             .overlay(RoundedRectangle(cornerRadius: 7 * scale).stroke(.black, lineWidth: max(1, scale)))
             .clipShape(RoundedRectangle(cornerRadius: 7 * scale))
+    }
+
+    private func speedProgress(_ settings: RemoteOpenBuildsController) -> CGFloat {
+        let range = settings.units == .inches ? 4...400 : 100...10_000
+        return CGFloat(settings.jogSpeed - range.lowerBound) /
+            CGFloat(range.upperBound - range.lowerBound)
+    }
+
+    private func distances(_ settings: RemoteOpenBuildsController) -> [(Int, String)] {
+        settings.units == .inches
+            ? [(1, ".001"), (10, ".01"), (100, ".1"), (1_000, "1")]
+            : [(100, "0.1"), (1_000, "1"), (10_000, "10"), (100_000, "100")]
     }
 }
 

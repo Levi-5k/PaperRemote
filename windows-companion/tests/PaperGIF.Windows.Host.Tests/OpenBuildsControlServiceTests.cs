@@ -47,6 +47,20 @@ public sealed class OpenBuildsControlServiceTests
     }
 
     [Fact]
+    public void ConvertsInchJogDistanceAndFeedToMillimeters()
+    {
+        Assert.Equal(
+            new OpenBuildsEmission("jog", OpenBuildsPayloadKind.String,
+                StringValue: "X,0.0254,254"),
+            OpenBuildsCommandMapper.Create(
+                "jogXPositive", 0, modifiers: ["feed=10", "units=in", "dist=1"]));
+        Assert.Equal(
+            new OpenBuildsEmission("runCommand", OpenBuildsPayloadKind.String,
+                StringValue: "$J=G91 G21 Y1000 F508\n"),
+            OpenBuildsCommandMapper.Create("continuousJogYPositive", 20, modifiers: ["units=in"]));
+    }
+
+    [Fact]
     public void BuildsOnlyLocalNetworkTargets()
     {
         Assert.Equal(4, OpenBuildsControlService.Endpoints(string.Empty).Count);
