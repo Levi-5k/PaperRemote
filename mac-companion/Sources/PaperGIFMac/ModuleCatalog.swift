@@ -182,9 +182,14 @@ final class ModuleCatalog: ObservableObject {
     }
 
     private func download(_ url: URL) async throws -> Data {
-        var request = URLRequest(url: url)
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let queryItems = (components?.queryItems ?? []) + [
+            URLQueryItem(name: "_", value: String(Int(Date().timeIntervalSince1970 * 1_000)))
+        ]
+        components?.queryItems = queryItems
+        var request = URLRequest(url: components?.url ?? url)
         request.timeoutInterval = 15
-        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {

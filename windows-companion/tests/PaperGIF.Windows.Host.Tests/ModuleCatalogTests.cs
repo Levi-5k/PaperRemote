@@ -8,6 +8,15 @@ namespace PaperGIF.Windows.Host.Tests;
 public sealed class ModuleCatalogTests
 {
     [Fact]
+    public void ModuleVersionComparisonPreventsDowngrades()
+    {
+        Assert.True(ModuleCatalogService.IsVersion("1.5.0", newerThan: "1.4.0"));
+        Assert.True(ModuleCatalogService.IsVersion("1.10.0", newerThan: "1.9.0"));
+        Assert.False(ModuleCatalogService.IsVersion("1.4.0", newerThan: "1.4.0"));
+        Assert.False(ModuleCatalogService.IsVersion("1.3.0", newerThan: "1.4.0"));
+    }
+
+    [Fact]
     public void SharedModuleManifestCreatesControlsWithFreshIds()
     {
         var json = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "media-controls.json"));
@@ -57,5 +66,50 @@ public sealed class ModuleCatalogTests
         Assert.Equal(module.Id, page.ModuleID);
         Assert.NotEqual(definition.Page.Id, page.Id);
         Assert.All(page.Controls.Zip(definition.Page.Controls), pair => Assert.NotEqual(pair.First.Id, pair.Second.Id));
+    }
+
+    [Fact]
+    public void UpdatingModulePagePreservesIdentitySettingsAndRouting()
+    {
+        var json = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "openbuilds-control.json"));
+        var module = JsonSerializer.Deserialize<PaperModuleManifest>(json, RemoteProfileJson.Options)!;
+        var definition = Assert.Single(module.Pages);
+        var existing = ModuleCatalogService.ClonePage(definition, module.Id);
+        var pageId = existing.Id;
+        existing.Name = "Workshop CNC";
+        existing.OpenBuildsController!.JogSpeed = 2_500;
+        existing.Controls.RemoveAll(control => control.Title == "STOP");
+        var textComputerId = Guid.NewGuid();
+        foreach (var control in existing.Controls)
+        {
+            control.Action.ComputerID = "windows-computer";
+            control.Action.Host = "10.0.0.25";
+            if (control.TextBox?.Source == PaperGIF.Windows.Core.Models.RemoteTextSource.OpenBuildsPosition)
+            {
+                control.TextBox.ComputerID = textComputerId;
+                var parts = control.TextBox.SourceText.Split('|');
+                parts[0] = "10.0.0.25";
+                control.TextBox.SourceText = string.Join('|', parts);
+            }
+        }
+
+        var updated = ModuleCatalogService.UpdatedPage(existing, definition, module.Id);
+
+        Assert.Equal(pageId, updated.Id);
+        Assert.Equal("Workshop CNC", updated.Name);
+        Assert.Equal(2_500, updated.OpenBuildsController?.JogSpeed);
+        Assert.Equal(22, updated.Controls.Count);
+        Assert.All(updated.Controls.Where(control => control.Action.Type == PaperGIF.Windows.Core.Models.RemoteActionType.OpenBuilds),
+            control =>
+            {
+                Assert.Equal("windows-computer", control.Action.ComputerID);
+                Assert.Equal("10.0.0.25", control.Action.Host);
+            });
+        Assert.All(updated.Controls.Where(control => control.TextBox?.Source == PaperGIF.Windows.Core.Models.RemoteTextSource.OpenBuildsPosition),
+            control =>
+            {
+                Assert.Equal(textComputerId, control.TextBox?.ComputerID);
+                Assert.StartsWith("10.0.0.25|", control.TextBox?.SourceText);
+            });
     }
 }

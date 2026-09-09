@@ -97,11 +97,30 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
         };
         activity.ActionRecorded += HandleActionRecorded;
+        _ = RefreshInstalledModulesAsync(moduleCatalog);
         notifyIcon.ShowBalloonTip(
             3_000,
             "paperGIF",
             "Windows companion is running.",
             ToolTipIcon.Info);
+    }
+
+    private async Task RefreshInstalledModulesAsync(ModuleCatalogService moduleCatalog)
+    {
+        try
+        {
+            await moduleCatalog.RefreshAsync();
+            foreach (var listing in moduleCatalog.AvailableModules.Where(moduleCatalog.HasUpdate))
+            {
+                var module = await moduleCatalog.InstallAsync(listing);
+                editorStore.UpdateModulePages(module);
+            }
+        }
+        catch (Exception exception) when (exception is HttpRequestException or
+            TaskCanceledException or System.Text.Json.JsonException or IOException)
+        {
+            // Startup refresh is best effort; the editor keeps its explicit retry action.
+        }
     }
 
     protected override void ExitThreadCore()

@@ -52,6 +52,10 @@ internal sealed class ModuleCatalogService
     public bool IsInstalled(string id, string version) =>
         installed.TryGetValue(id, out var module) && module.Version == version;
 
+    public bool HasUpdate(PaperModuleListing listing) =>
+        installed.TryGetValue(listing.Id, out var module) &&
+        IsVersion(listing.Version, newerThan: module.Version);
+
     public PaperModuleManifest? GetInstalled(string id) =>
         installed.GetValueOrDefault(id);
 
@@ -120,9 +124,73 @@ internal sealed class ModuleCatalogService
         return clone;
     }
 
+    public static RemotePage UpdatedPage(
+        RemotePage existing,
+        PaperModulePage definition,
+        string moduleId)
+    {
+        var page = ClonePage(definition, moduleId);
+        page.Id = existing.Id;
+        page.Name = existing.Name;
+        if (existing.OpenBuildsController is not null && page.OpenBuildsController is not null)
+        {
+            page.OpenBuildsController = existing.OpenBuildsController;
+        }
+
+        var actionComputerId = existing.Controls.Select(control => control.Action.ComputerID)
+            .FirstOrDefault(value => value is not null);
+        var actionHost = existing.Controls.Select(control => control.Action.Host)
+            .FirstOrDefault(value => !string.IsNullOrEmpty(value));
+        var textComputerId = existing.Controls.Select(control => control.TextBox?.ComputerID)
+            .FirstOrDefault(value => value is not null);
+        var textHost = existing.Controls
+            .Where(control => control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition)
+            .Select(control => control.TextBox!.SourceText.Split('|')[0])
+            .FirstOrDefault();
+
+        foreach (var control in page.Controls)
+        {
+            var previous = existing.Controls.FirstOrDefault(candidate =>
+                candidate.Kind == control.Kind && candidate.Title == control.Title);
+            if (previous is not null)
+            {
+                control.Id = previous.Id;
+            }
+            if (control.Action.Type == RemoteActionType.OpenBuilds)
+            {
+                control.Action.ComputerID = actionComputerId;
+                if (actionHost is not null)
+                {
+                    control.Action.Host = actionHost;
+                }
+            }
+            if (control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition)
+            {
+                control.TextBox.ComputerID = textComputerId;
+                if (textHost is not null)
+                {
+                    var parts = control.TextBox.SourceText.Split('|');
+                    parts[0] = textHost;
+                    control.TextBox.SourceText = string.Join('|', parts);
+                }
+            }
+        }
+        return page;
+    }
+
+    internal static bool IsVersion(string candidate, string newerThan) =>
+        Version.TryParse(candidate, out var candidateVersion) &&
+        Version.TryParse(newerThan, out var installedVersion) &&
+        candidateVersion > installedVersion;
+
     private async Task<byte[]> DownloadAsync(Uri uri, CancellationToken cancellationToken)
     {
-        using var response = await httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        var separator = string.IsNullOrEmpty(uri.Query) ? "?" : "&";
+        var requestUri = new Uri($"{uri}{separator}_={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}");
+        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+        request.Headers.CacheControl = new() { NoCache = true, NoStore = true };
+        using var response = await httpClient.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
         if (response.Content.Headers.ContentLength > MaximumDownloadBytes)
         {
@@ -180,7 +248,7 @@ internal sealed class ModuleCatalogService
             !IsValidIdentifier(manifest.Id) ||
             string.IsNullOrWhiteSpace(manifest.Name) ||
             string.IsNullOrWhiteSpace(manifest.Version) ||
-            manifest.Controls.Count is < 1 or > 16 ||
+            manifest.Controls.Count is < 1 or > RemoteProfile.MaximumControlsPerPage ||
             manifest.Controls.Any(control =>
                 !IsValidIdentifier(control.Id) ||
                 string.IsNullOrWhiteSpace(control.Category) ||

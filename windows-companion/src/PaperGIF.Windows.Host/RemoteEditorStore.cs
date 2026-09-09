@@ -110,6 +110,34 @@ internal sealed class RemoteEditorStore : IDisposable
         Commit();
     }
 
+    public int UpdateModulePages(PaperModuleManifest module)
+    {
+        var definitions = module.Pages.ToDictionary(page => page.Id, StringComparer.Ordinal);
+        var updatedCount = 0;
+        for (var index = 0; index < Profile.Pages.Count; index++)
+        {
+            var existing = Profile.Pages[index];
+            if (existing.ModuleID != module.Id || existing.ModulePageID is null ||
+                !definitions.TryGetValue(existing.ModulePageID, out var definition))
+            {
+                continue;
+            }
+            Profile.Pages[index] = ModuleCatalogService.UpdatedPage(existing, definition, module.Id);
+            updatedCount++;
+        }
+        if (updatedCount == 0)
+        {
+            return 0;
+        }
+        if (SelectedControlId is not null &&
+            !Profile.Pages.SelectMany(page => page.Controls).Any(control => control.Id == SelectedControlId))
+        {
+            SelectedControlId = null;
+        }
+        Commit();
+        return updatedCount;
+    }
+
     public void DeleteSelectedPage()
     {
         var page = SelectedPage;
