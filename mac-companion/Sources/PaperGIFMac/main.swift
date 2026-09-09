@@ -254,7 +254,7 @@ private final class CompanionServer {
             guard let request = try? JSONDecoder().decode(
                 TextSourceBatchRequest.self,
                 from: data[headerEnd.upperBound...]
-            ), request.items.count <= 16 else {
+            ), request.items.count <= RemoteProfile.maximumControlsPerPage else {
                 respond(connection, status: 400, body: "{\"ok\":false}")
                 return
             }

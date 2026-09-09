@@ -4,7 +4,7 @@
   "id": "openbuilds-control",
   "name": "OpenBuilds CONTROL",
   "summary": "Local CNC jogging and run-state controls for OpenBuilds CONTROL.",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": "paperGIF",
   "controls": [
     {
@@ -83,6 +83,45 @@
         "tintHex": "197278",
         "kind": "button",
         "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogZPositive", "value": 1, "modifiers": [] }
+      }
+    },
+    {
+      "id": "zero-x",
+      "category": "OpenBuilds Coordinates",
+      "detail": "Set the current X work coordinate to zero",
+      "control": {
+        "id": "6f3ebf9b-2442-4d46-9cac-100bc58c3a01",
+        "title": "Zero X",
+        "symbol": "scope",
+        "tintHex": "D1495B",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "zeroX", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "zero-y",
+      "category": "OpenBuilds Coordinates",
+      "detail": "Set the current Y work coordinate to zero",
+      "control": {
+        "id": "6f3ebf9b-2442-4d46-9cac-100bc58c3a02",
+        "title": "Zero Y",
+        "symbol": "scope",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "zeroY", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "zero-z",
+      "category": "OpenBuilds Coordinates",
+      "detail": "Set the current Z work coordinate to zero",
+      "control": {
+        "id": "6f3ebf9b-2442-4d46-9cac-100bc58c3a03",
+        "title": "Zero Z",
+        "symbol": "scope",
+        "tintHex": "3568A8",
+        "kind": "button",
+        "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "zeroZ", "value": 0, "modifiers": [] }
       }
     },
     {
@@ -219,7 +258,7 @@
   "pages": [
     {
       "id": "motion-controller",
-      "detail": "Eight-direction XY jogging with live coordinates, MM/inch units, speed, mode, distance, and an immediate stop control.",
+      "detail": "Full CNC motion control with live coordinates, axis zeroing, XY and Z jogging, job controls, and machine safety actions.",
       "page": {
         "id": "fa557def-6f56-4939-b569-9457d0f29c65",
         "name": "Motion Control",
@@ -254,49 +293,99 @@
             "textBox": { "source": "openBuildsPosition", "sourceText": "127.0.0.1|z|mm", "placeholder": "Z --.---", "gridWidth": 1, "gridHeight": 1, "textSize": "medium", "horizontalAlignment": "center", "verticalAlignment": "center", "refreshIntervalSeconds": 1 }
           },
           {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa13",
+            "title": "Zero X", "symbol": "scope", "tintHex": "D1495B", "kind": "button", "buttonHeight": 1, "layoutSlot": 18, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "zeroX", "value": 0, "modifiers": [] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa14",
+            "title": "Zero Y", "symbol": "scope", "tintHex": "197248", "kind": "button", "buttonHeight": 1, "layoutSlot": 21, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "zeroY", "value": 0, "modifiers": [] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa15",
+            "title": "Zero Z", "symbol": "scope", "tintHex": "3568A8", "kind": "button", "buttonHeight": 1, "layoutSlot": 24, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "zeroZ", "value": 0, "modifiers": [] }
+          },
+          {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa04",
-            "title": "NW", "symbol": "arrow.up.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 18, "gridWidth": 2, "gridHeight": 2,
+            "title": "NW", "symbol": "arrow.up.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 27, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegativeYPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
           },
           {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa05",
-            "title": "Y+", "symbol": "arrow.up", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 20, "gridWidth": 2, "gridHeight": 2,
+            "title": "Y+", "symbol": "arrow.up", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 29, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogYPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
           },
           {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa06",
-            "title": "NE", "symbol": "arrow.up.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 22, "gridWidth": 2, "gridHeight": 2,
+            "title": "NE", "symbol": "arrow.up.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 31, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositiveYPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
           },
           {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa07",
-            "title": "X-", "symbol": "arrow.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 36, "gridWidth": 2, "gridHeight": 2,
+            "title": "X-", "symbol": "arrow.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 45, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
           },
           {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa12",
-            "title": "STOP", "symbol": "stop.fill", "tintHex": "A61B1B", "kind": "button", "buttonHeight": 1, "layoutSlot": 38, "gridWidth": 2, "gridHeight": 2,
+            "title": "STOP", "symbol": "stop.fill", "tintHex": "A61B1B", "kind": "button", "buttonHeight": 1, "layoutSlot": 47, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "stop", "value": 0, "modifiers": [] }
           },
           {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa08",
-            "title": "X+", "symbol": "arrow.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 40, "gridWidth": 2, "gridHeight": 2,
+            "title": "X+", "symbol": "arrow.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 49, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
           },
           {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa09",
-            "title": "SW", "symbol": "arrow.down.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 54, "gridWidth": 2, "gridHeight": 2,
+            "title": "SW", "symbol": "arrow.down.left", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 63, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXNegativeYNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
           },
           {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa10",
-            "title": "Y-", "symbol": "arrow.down", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 56, "gridWidth": 2, "gridHeight": 2,
+            "title": "Y-", "symbol": "arrow.down", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 65, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogYNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
           },
           {
             "id": "172f7dac-99c5-437f-8449-fd4f22e2aa11",
-            "title": "SE", "symbol": "arrow.down.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 58, "gridWidth": 2, "gridHeight": 2,
+            "title": "SE", "symbol": "arrow.down.right", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 67, "gridWidth": 2, "gridHeight": 2,
             "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositiveYNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=1000"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa16",
+            "title": "Z-", "symbol": "minus", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 90, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogZNegative", "value": 1, "valueTenths": 10, "modifiers": ["feed=500"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa17",
+            "title": "Z+", "symbol": "plus", "tintHex": "197278", "kind": "button", "buttonHeight": 1, "layoutSlot": 93, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogZPositive", "value": 1, "valueTenths": 10, "modifiers": ["feed=500"] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa18",
+            "title": "Home", "symbol": "house.fill", "tintHex": "3568A8", "kind": "button", "buttonHeight": 1, "layoutSlot": 99, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "home", "value": 0, "modifiers": [] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa19",
+            "title": "Unlock", "symbol": "lock.open.fill", "tintHex": "C58917", "kind": "button", "buttonHeight": 1, "layoutSlot": 102, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "unlock", "value": 0, "modifiers": [] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa20",
+            "title": "Pause", "symbol": "pause.fill", "tintHex": "C58917", "kind": "button", "buttonHeight": 1, "layoutSlot": 108, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "pause", "value": 0, "modifiers": [] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa21",
+            "title": "Resume", "symbol": "play.fill", "tintHex": "197248", "kind": "button", "buttonHeight": 1, "layoutSlot": 111, "gridWidth": 3, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "resume", "value": 0, "modifiers": [] }
+          },
+          {
+            "id": "172f7dac-99c5-437f-8449-fd4f22e2aa22",
+            "title": "ABORT / RESET", "symbol": "xmark", "tintHex": "A61B1B", "kind": "button", "buttonHeight": 1, "layoutSlot": 117, "gridWidth": 6, "gridHeight": 1,
+            "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "abort", "value": 0, "modifiers": [] }
           }
         ]
       }

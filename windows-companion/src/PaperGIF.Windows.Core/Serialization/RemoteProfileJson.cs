@@ -67,7 +67,8 @@ public static class RemoteProfileJson
         {
             if (control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition)
             {
-                var axis = control.TextBox.SourceText.Split('|').LastOrDefault()?.ToLowerInvariant();
+                var components = control.TextBox.SourceText.Split('|');
+                var axis = components.Length > 1 ? components[1].ToLowerInvariant() : "x";
                 control.LayoutSlot = axis switch { "y" => 3, "z" => 6, _ => 0 };
                 control.GridWidth = 3;
                 control.GridHeight = 2;

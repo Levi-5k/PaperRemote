@@ -73,7 +73,8 @@ internal sealed class RemoteEditorStore : IDisposable
             return "A remote needs between 1 and 8 pages.";
         }
         if (profile.Pages.Any(page =>
-            page.Controls.Count > 16 || LayoutUnits(page) > page.GridColumns * page.GridRows))
+            page.Controls.Count > RemoteProfile.MaximumControlsPerPage ||
+            LayoutUnits(page) > page.GridColumns * page.GridRows))
         {
             return "A page has more controls than fit on the display.";
         }
@@ -144,7 +145,7 @@ internal sealed class RemoteEditorStore : IDisposable
     public bool AddControl(RemoteControl control)
     {
         var page = SelectedPage;
-        if (page is null || page.Controls.Count >= 16 ||
+        if (page is null || page.Controls.Count >= RemoteProfile.MaximumControlsPerPage ||
             LayoutUnits(page) + LayoutUnits(control, page) > page.GridColumns * page.GridRows)
         {
             return false;

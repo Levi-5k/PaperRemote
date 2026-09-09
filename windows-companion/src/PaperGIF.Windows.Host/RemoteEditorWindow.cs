@@ -912,6 +912,7 @@ internal sealed class RemoteEditorWindow : Form
                 new("jogXNegative", "Jog X -"), new("jogXPositive", "Jog X +"),
                 new("jogYNegative", "Jog Y -"), new("jogYPositive", "Jog Y +"),
                 new("jogZNegative", "Jog Z -"), new("jogZPositive", "Jog Z +"),
+                new("zeroX", "Zero X"), new("zeroY", "Zero Y"), new("zeroZ", "Zero Z"),
                 new("jogXNegativeYNegative", "Jog X-/Y-"),
                 new("jogXNegativeYPositive", "Jog X-/Y+"),
                 new("jogXPositiveYNegative", "Jog X+/Y-"),

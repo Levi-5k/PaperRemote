@@ -190,6 +190,7 @@ public sealed class OpenBuildsControllerSettings
 public sealed class RemoteProfile
 {
     public const int CurrentVersion = 6;
+    public const int MaximumControlsPerPage = 24;
 
     public int Version { get; set; } = CurrentVersion;
     public string WifiSSID { get; set; } = string.Empty;

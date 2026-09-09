@@ -37,7 +37,7 @@ final class ModuleCatalogTests: XCTestCase {
         )
 
         XCTAssertEqual(module.id, "openbuilds-control")
-        XCTAssertEqual(module.controls.count, 16)
+        XCTAssertEqual(module.controls.count, 19)
         XCTAssertTrue(module.controls.allSatisfy { $0.control.action.type == .openBuilds })
         let definition = try XCTUnwrap(module.pages?.first)
         let page = ModuleCatalog.clonePage(definition, moduleID: module.id)
@@ -47,13 +47,14 @@ final class ModuleCatalogTests: XCTestCase {
         XCTAssertEqual(page.openBuildsController?.jogMode, .incremental)
         XCTAssertEqual(page.openBuildsController?.units, .millimeters)
         XCTAssertEqual(page.openBuildsController?.jogDistanceThousandths, 1_000)
-        XCTAssertEqual(page.controls.count, 12)
+        XCTAssertEqual(page.controls.count, 22)
         XCTAssertEqual(page.controls[0].gridSpan(columns: page.gridColumns, rows: page.gridRows),
                    RemoteGridSpan(width: 3, height: 2))
         XCTAssertEqual(page.controls[3].layoutSlot, 18)
         XCTAssertEqual(page.controls[3].gridSpan(columns: page.gridColumns, rows: page.gridRows),
-                   RemoteGridSpan(width: 2, height: 2))
-        XCTAssertEqual(page.controls.first(where: { $0.title == "STOP" })?.layoutSlot, 38)
+                   RemoteGridSpan(width: 3, height: 1))
+        XCTAssertEqual(page.controls.first(where: { $0.title == "STOP" })?.layoutSlot, 47)
+        XCTAssertEqual(page.controls.filter { $0.action.text.hasPrefix("zero") }.count, 3)
         XCTAssertEqual(page.moduleID, module.id)
         XCTAssertNotEqual(page.id, definition.page.id)
         XCTAssertTrue(zip(page.controls, definition.page.controls).allSatisfy { $0.id != $1.id })

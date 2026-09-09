@@ -118,7 +118,7 @@ constexpr size_t kMaximumTitleBytes = 48;
 constexpr size_t kMaximumPathBytes = 40;
 constexpr size_t kLibraryRowsPerPage = 7;
 constexpr size_t kMaximumRemotePages = 8;
-constexpr size_t kMaximumRemoteControls = 16;
+constexpr size_t kMaximumRemoteControls = 24;
 constexpr size_t kMaximumRemoteComputers = 8;
 constexpr size_t kMaximumSchedulesPerAction = 8;
 constexpr size_t kRemoteIconDimension = 64;
@@ -403,7 +403,7 @@ UploadState upload;
 RemoteProfileUploadState remoteProfileUpload;
 RemoteProfile* remoteProfile = nullptr;
 RemoteProfile* pendingRemoteProfile = nullptr;
-SliderPositionStore sliderPositionStore;
+SliderPositionStore* sliderPositionStore = nullptr;
 bool sliderPositionStoreLoaded = false;
 ToggleStateStore toggleStateStore;
 PendingRemoteAction pendingRemoteActions[kPendingRemoteActionCapacity];
@@ -652,7 +652,7 @@ void pollScheduledRemoteActions();
 uint64_t backgroundWakeIntervalUs(uint64_t defaultIntervalUs);
 
 void loadSliderPositionStore() {
-    if (sliderPositionStoreLoaded) {
+    if (sliderPositionStoreLoaded || sliderPositionStore == nullptr) {
         return;
     }
     sliderPositionStoreLoaded = true;
@@ -660,19 +660,25 @@ void loadSliderPositionStore() {
     if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK) {
         return;
     }
-    SliderPositionStore stored;
-    size_t length = sizeof(stored);
-    const esp_err_t result = nvs_get_blob(handle, kSliderPositionsKey, &stored, &length);
+    size_t length = sizeof(*sliderPositionStore);
+    const esp_err_t result = nvs_get_blob(
+        handle, kSliderPositionsKey, sliderPositionStore, &length);
     nvs_close(handle);
-    if (result == ESP_OK && length == sizeof(stored) &&
-        stored.magic == kSliderPositionsMagic && stored.version == 2 &&
-        stored.count <= kMaximumPersistedSliders) {
-        sliderPositionStore = stored;
+    if (result != ESP_OK || length != sizeof(*sliderPositionStore) ||
+        sliderPositionStore->magic != kSliderPositionsMagic ||
+        sliderPositionStore->version != 2 ||
+        sliderPositionStore->count > kMaximumPersistedSliders) {
+        memset(sliderPositionStore, 0, sizeof(*sliderPositionStore));
+        sliderPositionStore->magic = kSliderPositionsMagic;
+        sliderPositionStore->version = 2;
     }
 }
 
 void restoreRemoteSliderPositions(RemoteProfile& profile) {
     loadSliderPositionStore();
+    if (sliderPositionStore == nullptr) {
+        return;
+    }
     for (uint8_t pageIndex = 0; pageIndex < profile.pageCount; ++pageIndex) {
         RemotePage& page = profile.pages[pageIndex];
         for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
@@ -682,9 +688,9 @@ void restoreRemoteSliderPositions(RemoteProfile& profile) {
             if (!persistsValue || control.id[0] == '\0') {
                 continue;
             }
-            for (uint8_t index = 0; index < sliderPositionStore.count; ++index) {
-                if (strcmp(sliderPositionStore.positions[index].controlId, control.id) == 0) {
-                    control.action.valueTenths = sliderPositionStore.positions[index].valueTenths;
+            for (uint8_t index = 0; index < sliderPositionStore->count; ++index) {
+                if (strcmp(sliderPositionStore->positions[index].controlId, control.id) == 0) {
+                    control.action.valueTenths = sliderPositionStore->positions[index].valueTenths;
                     control.action.value = static_cast<int>(roundf(control.action.valueTenths / 10.0f));
                     break;
                 }
@@ -710,7 +716,17 @@ esp_err_t writeNvsBlob(nvs_handle_t handle, const char* key, const void* value, 
 }
 
 void persistRemoteSliderPositions(const RemoteProfile& profile) {
-    SliderPositionStore updated;
+    if (sliderPositionStore == nullptr) {
+        return;
+    }
+    SliderPositionStore* updated = static_cast<SliderPositionStore*>(heap_caps_calloc(
+        1, sizeof(SliderPositionStore), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (updated == nullptr) {
+        Serial.println("Slider position PSRAM allocation failed");
+        return;
+    }
+    updated->magic = kSliderPositionsMagic;
+    updated->version = 2;
     for (uint8_t pageIndex = 0; pageIndex < profile.pageCount; ++pageIndex) {
         const RemotePage& page = profile.pages[pageIndex];
         for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
@@ -718,10 +734,10 @@ void persistRemoteSliderPositions(const RemoteProfile& profile) {
             const bool persistsValue = control.slider ||
                 (control.kind == 2 && strcmp(control.action.type, "netHomeTemperature") == 0);
             if (!persistsValue || control.id[0] == '\0' ||
-                updated.count >= kMaximumPersistedSliders) {
+                updated->count >= kMaximumPersistedSliders) {
                 continue;
             }
-            PersistedSliderPosition& position = updated.positions[updated.count++];
+            PersistedSliderPosition& position = updated->positions[updated->count++];
             strlcpy(position.controlId, control.id, sizeof(position.controlId));
             position.valueTenths = constrain(
                 strcmp(control.action.type, "netHomeTemperature") == 0
@@ -732,22 +748,25 @@ void persistRemoteSliderPositions(const RemoteProfile& profile) {
         }
     }
     loadSliderPositionStore();
-    if (memcmp(&updated, &sliderPositionStore, sizeof(updated)) == 0) {
+    if (memcmp(updated, sliderPositionStore, sizeof(*updated)) == 0) {
+        heap_caps_free(updated);
         return;
     }
     nvs_handle_t handle;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) {
         Serial.println("Slider position NVS open failed");
+        heap_caps_free(updated);
         return;
     }
     const esp_err_t writeResult = writeNvsBlob(
-        handle, kSliderPositionsKey, &updated, sizeof(updated));
+        handle, kSliderPositionsKey, updated, sizeof(*updated));
     nvs_close(handle);
     if (writeResult == ESP_OK) {
-        sliderPositionStore = updated;
+        *sliderPositionStore = *updated;
     } else {
         Serial.printf("Slider position NVS write failed: %d\n", writeResult);
     }
+    heap_caps_free(updated);
 }
 
 __attribute__((noinline)) void migrateGeneratedThermostatPages(RemoteProfile& profile) {
@@ -4289,15 +4308,25 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
         if (!pressed) {
             M5.Display.drawRoundRect(x, y, width, height, 8, foreground);
         }
-        drawRemoteControlIcon(control.symbol,
-            control.hasIconBitmap ? control.iconBitmap : nullptr,
-            control.iconDimension,
-            x + width / 2, y + 40, control.hasIconBitmap ? 42 : 30,
-            foreground, background);
         M5.Display.setTextColor(foreground, background);
         M5.Display.setFont(&fonts::FreeSansBold9pt7b);
-        M5.Display.setTextDatum(textdatum_t::middle_center);
-        M5.Display.drawCenterString(control.title, x + width / 2, y + 76);
+        if (control.gridHeight == 1) {
+            drawRemoteControlIcon(control.symbol,
+                control.hasIconBitmap ? control.iconBitmap : nullptr,
+                control.iconDimension,
+                x + 24, y + height / 2, control.hasIconBitmap ? 28 : 18,
+                foreground, background);
+            M5.Display.setTextDatum(textdatum_t::middle_left);
+            M5.Display.drawString(control.title, x + 46, y + height / 2);
+        } else {
+            drawRemoteControlIcon(control.symbol,
+                control.hasIconBitmap ? control.iconBitmap : nullptr,
+                control.iconDimension,
+                x + width / 2, y + 40, control.hasIconBitmap ? 42 : 30,
+                foreground, background);
+            M5.Display.setTextDatum(textdatum_t::middle_center);
+            M5.Display.drawCenterString(control.title, x + width / 2, y + 76);
+        }
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
         return;
     }
@@ -4307,6 +4336,33 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
         M5.Display.fillRoundRect(x, y, width, height, radius, TFT_WHITE);
         M5.Display.drawRoundRect(x, y, width, height, radius, TFT_BLACK);
         M5.Display.setClipRect(x + 8, y + 8, width - 16, height - 16);
+        if (strcmp(control.textSource, "openBuildsPosition") == 0) {
+            char axis = 'X';
+            const char* separator = strchr(control.sourceText, '|');
+            if (separator != nullptr && separator[1] != '\0') {
+                const char candidate = separator[1];
+                if (candidate == 'x' || candidate == 'X' ||
+                    candidate == 'y' || candidate == 'Y' ||
+                    candidate == 'z' || candidate == 'Z') {
+                    axis = candidate >= 'a' ? candidate - ('a' - 'A') : candidate;
+                }
+            }
+            const char* valueText = control.resolvedText;
+            if ((valueText[0] == axis || valueText[0] == axis + ('a' - 'A')) &&
+                valueText[1] == ' ') {
+                valueText += 2;
+            }
+            char axisText[2] = {axis, '\0'};
+            M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+            M5.Display.setFont(&fonts::FreeSansBold9pt7b);
+            M5.Display.setTextDatum(textdatum_t::top_center);
+            M5.Display.drawString(axisText, x + width / 2, y + 12);
+            M5.Display.setFont(&fonts::FreeSansBold18pt7b);
+            M5.Display.setTextDatum(textdatum_t::middle_center);
+            M5.Display.drawString(valueText, x + width / 2, y + height * 2 / 3);
+            M5.Display.clearClipRect();
+            return;
+        }
         const lgfx::IFont* fonts[] = {
             &fonts::FreeSansBold9pt7b,
             &fonts::FreeSansBold12pt7b,
@@ -4615,36 +4671,36 @@ void drawRemoteIconLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
 void drawOpenBuildsControllerSettings(const RemotePage& page) {
     constexpr int32_t x = 364;
     constexpr int32_t width = 152;
-    M5.Display.fillRect(x, 232, width, 430, TFT_WHITE);
+    M5.Display.fillRect(x, 292, width, 430, TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     M5.Display.setTextDatum(textdatum_t::top_left);
     M5.Display.setFont(&fonts::FreeSansBold9pt7b);
-    M5.Display.drawString("UNITS", x, 238);
+    M5.Display.drawString("UNITS", x, 298);
     const char* unitLabels[] = {"MM", "IN"};
     for (uint8_t index = 0; index < 2; ++index) {
         const int32_t segmentX = x + index * 80;
         const bool selected = page.openBuildsUseInches == (index == 1);
-        M5.Display.fillRoundRect(segmentX, 266, 72, 42, 7,
+        M5.Display.fillRoundRect(segmentX, 326, 72, 42, 7,
             selected ? TFT_BLACK : TFT_WHITE);
         if (!selected) {
-            M5.Display.drawRoundRect(segmentX, 266, 72, 42, 7, TFT_BLACK);
+            M5.Display.drawRoundRect(segmentX, 326, 72, 42, 7, TFT_BLACK);
         }
         M5.Display.setTextColor(selected ? TFT_WHITE : TFT_BLACK,
             selected ? TFT_BLACK : TFT_WHITE);
         M5.Display.setTextDatum(textdatum_t::middle_center);
-        M5.Display.drawCenterString(unitLabels[index], segmentX + 36, 287);
+        M5.Display.drawCenterString(unitLabels[index], segmentX + 36, 347);
     }
 
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     M5.Display.setTextDatum(textdatum_t::top_left);
-    M5.Display.drawString("JOG SPEED", x, 326);
+    M5.Display.drawString("JOG SPEED", x, 386);
     char speedText[20];
     snprintf(speedText, sizeof(speedText), "%u %s/min", page.openBuildsJogSpeed,
         page.openBuildsUseInches ? "in" : "mm");
     M5.Display.setTextDatum(textdatum_t::top_right);
-    M5.Display.drawString(speedText, x + width, 326);
+    M5.Display.drawString(speedText, x + width, 386);
 
-    constexpr int32_t sliderY = 356;
+    constexpr int32_t sliderY = 416;
     M5.Display.drawRoundRect(x, sliderY, width, 38, 8, TFT_BLACK);
     const uint16_t minimumSpeed = page.openBuildsUseInches ? 4 : 100;
     const uint16_t maximumSpeed = page.openBuildsUseInches ? 400 : 10000;
@@ -4656,8 +4712,8 @@ void drawOpenBuildsControllerSettings(const RemotePage& page) {
     }
 
     M5.Display.setTextDatum(textdatum_t::top_left);
-    M5.Display.drawString("JOG MODE", x, 414);
-    const int32_t segmentY = 442;
+    M5.Display.drawString("JOG MODE", x, 474);
+    const int32_t segmentY = 502;
     const int32_t segmentWidth = 72;
     const char* modeLabels[] = {"STEP", "HOLD"};
     for (uint8_t index = 0; index < 2; ++index) {
@@ -4676,11 +4732,11 @@ void drawOpenBuildsControllerSettings(const RemotePage& page) {
 
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     M5.Display.setTextDatum(textdatum_t::top_left);
-    M5.Display.drawString(page.openBuildsContinuous ? "RELEASE TO STOP" : "STEP DISTANCE", x, 508);
+    M5.Display.drawString(page.openBuildsContinuous ? "RELEASE TO STOP" : "STEP DISTANCE", x, 568);
     if (page.openBuildsContinuous) {
         M5.Display.setFont(&fonts::FreeSans12pt7b);
-        M5.Display.drawString("Motion stops", x, 552);
-        M5.Display.drawString("when released.", x, 584);
+        M5.Display.drawString("Motion stops", x, 612);
+        M5.Display.drawString("when released.", x, 644);
     } else {
         const uint32_t metricDistances[] = {100, 1000, 10000, 100000};
         const uint32_t inchDistances[] = {1, 10, 100, 1000};
@@ -4690,7 +4746,7 @@ void drawOpenBuildsControllerSettings(const RemotePage& page) {
         const char** labels = page.openBuildsUseInches ? inchLabels : metricLabels;
         for (uint8_t index = 0; index < 4; ++index) {
             const int32_t chipX = x + (index % 2) * 80;
-            const int32_t chipY = 538 + (index / 2) * 56;
+            const int32_t chipY = 598 + (index / 2) * 56;
             const bool selected = page.openBuildsJogDistanceThousandths == distances[index];
             M5.Display.fillRoundRect(chipX, chipY, 72, 42, 7,
                 selected ? TFT_BLACK : TFT_WHITE);
@@ -4704,7 +4760,7 @@ void drawOpenBuildsControllerSettings(const RemotePage& page) {
         }
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
         M5.Display.setTextDatum(textdatum_t::top_right);
-        M5.Display.drawString(page.openBuildsUseInches ? "in" : "mm", x + width, 640);
+        M5.Display.drawString(page.openBuildsUseInches ? "in" : "mm", x + width, 700);
     }
 }
 
@@ -6838,7 +6894,7 @@ void handleTouch() {
         lastRemoteActivityAt = millis();
         RemotePage& page = remoteProfile->pages[remotePageIndex];
         if (page.openBuildsController && touch.x >= 354 && touch.x < 526 &&
-            touch.y >= 224 && touch.y < 670) {
+            touch.y >= 284 && touch.y < 730) {
             if (activeRemoteContinuousJog && activeRemoteControlIndex >= 0 &&
                 activeRemoteControlIndex < page.controlCount) {
                 if (cancelOpenBuildsContinuousJog(page.controls[activeRemoteControlIndex])) {
@@ -6847,7 +6903,7 @@ void handleTouch() {
                     activeRemoteControlVisual = false;
                 }
             }
-            if (touch.wasClicked() && touch.y >= 256 && touch.y < 318) {
+            if (touch.wasClicked() && touch.y >= 316 && touch.y < 378) {
                 const bool nextUseInches = touch.x >= 440;
                 if (nextUseInches != page.openBuildsUseInches) {
                     const uint32_t physicalTenthsMicrons = page.openBuildsUseInches
@@ -6877,7 +6933,7 @@ void handleTouch() {
                     redrawOpenBuildsControllerSettings(page);
                 }
             } else if ((touch.wasPressed() || touch.isPressed()) &&
-                touch.y >= 346 && touch.y < 406) {
+                touch.y >= 406 && touch.y < 466) {
                 const int32_t sliderPosition = constrain(
                     static_cast<int32_t>(touch.x - 364), static_cast<int32_t>(0), static_cast<int32_t>(152));
                 const int32_t minimumSpeed = page.openBuildsUseInches ? 4 : 100;
@@ -6892,16 +6948,16 @@ void handleTouch() {
                     page.openBuildsJogSpeed = nextSpeed;
                     redrawOpenBuildsControllerSettings(page);
                 }
-            } else if (touch.wasClicked() && touch.y >= 432 && touch.y < 500) {
+            } else if (touch.wasClicked() && touch.y >= 492 && touch.y < 560) {
                 const bool continuous = touch.x >= 440;
                 if (continuous != page.openBuildsContinuous) {
                     page.openBuildsContinuous = continuous;
                     redrawOpenBuildsControllerSettings(page);
                 }
             } else if (touch.wasClicked() && !page.openBuildsContinuous &&
-                touch.y >= 528 && touch.y < 650) {
+                touch.y >= 588 && touch.y < 710) {
                 const uint8_t column = touch.x >= 440 ? 1 : 0;
-                const uint8_t row = touch.y >= 587 ? 1 : 0;
+                const uint8_t row = touch.y >= 647 ? 1 : 0;
                 const uint32_t metricDistances[] = {100, 1000, 10000, 100000};
                 const uint32_t inchDistances[] = {1, 10, 100, 1000};
                 const uint32_t* distances = page.openBuildsUseInches
@@ -7663,6 +7719,14 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(36), handleTouchInterrupt, FALLING);
     Serial.printf("Display: %d x %d\n", M5.Display.width(), M5.Display.height());
 
+    sliderPositionStore = static_cast<SliderPositionStore*>(heap_caps_calloc(
+        1, sizeof(SliderPositionStore), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (sliderPositionStore == nullptr) {
+        Serial.println("Slider position PSRAM allocation failed");
+    } else {
+        sliderPositionStore->magic = kSliderPositionsMagic;
+        sliderPositionStore->version = 2;
+    }
     remoteProfile = static_cast<RemoteProfile*>(heap_caps_calloc(
         1, sizeof(RemoteProfile), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     pendingRemoteProfile = static_cast<RemoteProfile*>(heap_caps_calloc(

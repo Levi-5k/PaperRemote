@@ -145,7 +145,7 @@ internal sealed class RemotePreviewPanel : Control
         var columns = Math.Clamp(controllerPage.GridColumns, 1, 12);
         var rows = Math.Clamp(controllerPage.GridRows, 1, 16);
         var occupied = new bool[columns * rows];
-        foreach (var control in controllerPage.Controls.Take(16))
+        foreach (var control in controllerPage.Controls.Take(RemoteProfile.MaximumControlsPerPage))
         {
             var (width, height) = Span(control, columns, rows);
             var slot = FindSlot(control.LayoutSlot, width, height, occupied, columns, rows);
@@ -167,22 +167,22 @@ internal sealed class RemotePreviewPanel : Control
         }
 
         var settings = controllerPage.OpenBuildsController ?? new OpenBuildsControllerSettings();
-        var rail = ScaleFrame(screen, new RectangleF(364, 232, 152, 430));
+        var rail = ScaleFrame(screen, new RectangleF(364, 292, 152, 430));
         using var labelFont = new Font("Segoe UI Variable Text Semibold", Math.Max(6, screen.Width / 55f));
         using var detailFont = new Font("Segoe UI Variable Text", Math.Max(6, screen.Width / 58f));
         graphics.DrawString("UNITS", labelFont, Brushes.Black, rail.Left, rail.Top);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 266, 72, 42)),
+        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 326, 72, 42)),
             "MM", settings.Units == OpenBuildsUnits.Mm, detailFont);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 266, 72, 42)),
+        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 326, 72, 42)),
             "IN", settings.Units == OpenBuildsUnits.In, detailFont);
 
-        var speedLabel = ScaleFrame(screen, new RectangleF(364, 326, 152, 24));
+        var speedLabel = ScaleFrame(screen, new RectangleF(364, 386, 152, 24));
         graphics.DrawString("JOG SPEED", labelFont, Brushes.Black, speedLabel);
         var speedText = $"{settings.JogSpeed} {(settings.Units == OpenBuildsUnits.In ? "in" : "mm")}/min";
         var speedSize = graphics.MeasureString(speedText, detailFont);
         graphics.DrawString(speedText, detailFont, Brushes.Black, rail.Right - speedSize.Width, speedLabel.Top);
 
-        var track = ScaleFrame(screen, new RectangleF(364, 356, 152, 38));
+        var track = ScaleFrame(screen, new RectangleF(364, 416, 152, 38));
         using var trackOutline = new Pen(Color.Black, 1);
         EditorTheme.DrawRoundedRectangle(graphics, trackOutline, track, 5);
         var minimumSpeed = settings.Units == OpenBuildsUnits.In ? 4 : 100;
@@ -193,19 +193,19 @@ internal sealed class RemotePreviewPanel : Control
         fill.Width = Math.Max(2, (int)(fill.Width * progress));
         EditorTheme.FillRoundedRectangle(graphics, Brushes.Black, fill, 4);
 
-        var modeLabel = ScaleFrame(screen, new RectangleF(364, 414, 152, 24));
+        var modeLabel = ScaleFrame(screen, new RectangleF(364, 474, 152, 24));
         graphics.DrawString("JOG MODE", labelFont, Brushes.Black, modeLabel);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 442, 72, 42)),
+        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 502, 72, 42)),
             "STEP", settings.JogMode == RemoteJogMode.Incremental, detailFont);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 442, 72, 42)),
+        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 502, 72, 42)),
             "HOLD", settings.JogMode == RemoteJogMode.Continuous, detailFont);
 
-        var distanceLabel = ScaleFrame(screen, new RectangleF(364, 508, 152, 24));
+        var distanceLabel = ScaleFrame(screen, new RectangleF(364, 568, 152, 24));
         graphics.DrawString(settings.JogMode == RemoteJogMode.Continuous
             ? "RELEASE TO STOP" : "STEP DISTANCE", labelFont, Brushes.Black, distanceLabel);
         if (settings.JogMode == RemoteJogMode.Continuous)
         {
-            var help = ScaleFrame(screen, new RectangleF(364, 552, 152, 70));
+            var help = ScaleFrame(screen, new RectangleF(364, 612, 152, 70));
             graphics.DrawString("Motion stops\nwhen released.", detailFont, Brushes.Black, help);
         }
         else
@@ -216,7 +216,7 @@ internal sealed class RemotePreviewPanel : Control
             for (var index = 0; index < distances.Length; index++)
             {
                 var chip = ScaleFrame(screen, new RectangleF(
-                    364 + index % 2 * 80, 538 + index / 2 * 56, 72, 42));
+                    364 + index % 2 * 80, 598 + index / 2 * 56, 72, 42));
                 DrawControllerChip(graphics, chip, distances[index].Item2,
                     settings.JogDistanceThousandths == distances[index].Item1, detailFont);
             }
@@ -248,7 +248,7 @@ internal sealed class RemotePreviewPanel : Control
         var columns = Math.Clamp(remotePage.GridColumns, 1, 12);
         var rows = Math.Clamp(remotePage.GridRows, 1, 16);
         var occupied = new bool[columns * rows];
-        foreach (var control in remotePage.Controls.Take(16))
+        foreach (var control in remotePage.Controls.Take(RemoteProfile.MaximumControlsPerPage))
         {
             var (width, height) = Span(control, columns, rows);
             var slot = FindSlot(control.LayoutSlot, width, height, occupied, columns, rows);
@@ -291,10 +291,23 @@ internal sealed class RemotePreviewPanel : Control
             LineAlignment = StringAlignment.Center,
             Trimming = StringTrimming.EllipsisCharacter,
         };
+        if (control.Kind == RemoteControlKind.TextBox &&
+            control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition)
+        {
+            var components = control.TextBox.SourceText.Split('|');
+            var axis = components.Length > 1 ? components[1].ToUpperInvariant() : "X";
+            var units = components.Length > 2 ? components[2].ToLowerInvariant() : "mm";
+            var content = RectangleF.Inflate(frame, -7, -7);
+            var labelFrame = new RectangleF(content.Left, content.Top, content.Width, content.Height * 0.35f);
+            var valueFrame = new RectangleF(
+                content.Left, content.Top + content.Height * 0.28f,
+                content.Width, content.Height * 0.72f);
+            graphics.DrawString(axis, valueFont, Brushes.Black, labelFrame, format);
+            graphics.DrawString($"0.000 {units}", titleFont, Brushes.Black, valueFrame, format);
+            return;
+        }
         var text = control.Kind == RemoteControlKind.TextBox
-            ? control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition
-                ? $"{control.TextBox.SourceText.Split('|').LastOrDefault()?.ToUpperInvariant() ?? "X"} 0.000"
-                : control.TextBox?.SourceText ?? control.Title
+            ? control.TextBox?.SourceText ?? control.Title
             : control.Title;
         graphics.DrawString(text, titleFont, Brushes.Black, RectangleF.Inflate(frame, -7, -7), format);
         if (control.Kind == RemoteControlKind.Slider)

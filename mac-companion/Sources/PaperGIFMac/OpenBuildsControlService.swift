@@ -57,8 +57,15 @@ enum OpenBuildsCommandMapper {
         case "abort": OpenBuildsEmission(event: "stop", payload: .stop(stop: false, jog: false, abort: true))
         case "unlock": OpenBuildsEmission(event: "clearAlarm", payload: .integer(2))
         case "home": OpenBuildsEmission(event: "runCommand", payload: .string("$H\n"))
+        case "zeroX": zero(axis: "X")
+        case "zeroY": zero(axis: "Y")
+        case "zeroZ": zero(axis: "Z")
         default: nil
         }
+    }
+
+    private static func zero(axis: String) -> OpenBuildsEmission {
+        OpenBuildsEmission(event: "runCommand", payload: .string("G10 L20 P1 \(axis)0\n"))
     }
 
     private static func jog(axis: String, direction: Int, distance: Double, feed: Int) -> OpenBuildsEmission? {

@@ -487,8 +487,9 @@ extension PaperGIFRemotePage {
         ]
         for index in controls.indices {
             if controls[index].textBox?.source == .openBuildsPosition {
-                let axis = controls[index].textBox?.sourceText.split(separator: "|").last?.lowercased()
-                controls[index].layoutSlot = ["x": 0, "y": 3, "z": 6][axis ?? "x"] ?? 0
+                let components = controls[index].textBox?.sourceText.split(separator: "|") ?? []
+                let axis = components.indices.contains(1) ? components[1].lowercased() : "x"
+                controls[index].layoutSlot = ["x": 0, "y": 3, "z": 6][axis] ?? 0
                 controls[index].gridWidth = 3
                 controls[index].gridHeight = 2
             } else {
@@ -644,6 +645,7 @@ extension PaperGIFRemotePage {
 
 struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     static let currentVersion = 6
+    static let maximumControlsPerPage = 24
 
     var version = currentVersion
     var wifiSSID = ""

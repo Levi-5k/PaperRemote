@@ -192,7 +192,7 @@ internal sealed class ModuleCatalogService
                 !IsValidIdentifier(page.Id) ||
                 string.IsNullOrWhiteSpace(page.Detail) ||
                 string.IsNullOrWhiteSpace(page.Page.Name) ||
-                page.Page.Controls.Count > 16) ||
+                page.Page.Controls.Count > RemoteProfile.MaximumControlsPerPage) ||
             manifest.Pages.Select(page => page.Id).Distinct(StringComparer.Ordinal).Count() != manifest.Pages.Count)
         {
             throw new InvalidDataException("The module manifest is invalid.");

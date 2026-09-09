@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using PaperGIF.Windows.Core.Models;
 using PaperGIF.Windows.Host;
 using Xunit;
 
@@ -102,10 +103,10 @@ public sealed class CompanionEndpointTests
     }
 
     [Fact]
-    public async Task TextSourceRejectsMoreThanSixteenItems()
+    public async Task TextSourceRejectsMoreThanMaximumItems()
     {
         await using var host = await TestHost.StartAsync();
-        var items = Enumerable.Range(0, 17).Select(index => new
+        var items = Enumerable.Range(0, RemoteProfile.MaximumControlsPerPage + 1).Select(index => new
         {
             id = index.ToString(),
             source = "unsupported",

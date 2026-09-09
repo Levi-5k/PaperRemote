@@ -16,6 +16,18 @@ final class OpenBuildsControlServiceTests: XCTestCase {
             OpenBuildsEmission(event: "runCommand", payload: .string("$H\n"))
         )
         XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(command: "zeroX", value: 0),
+            OpenBuildsEmission(event: "runCommand", payload: .string("G10 L20 P1 X0\n"))
+        )
+        XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(command: "zeroY", value: 0),
+            OpenBuildsEmission(event: "runCommand", payload: .string("G10 L20 P1 Y0\n"))
+        )
+        XCTAssertEqual(
+            OpenBuildsCommandMapper.emission(command: "zeroZ", value: 0),
+            OpenBuildsEmission(event: "runCommand", payload: .string("G10 L20 P1 Z0\n"))
+        )
+        XCTAssertEqual(
             OpenBuildsCommandMapper.emission(command: "jogXNegativeYPositive", value: 2),
             OpenBuildsEmission(event: "jogXY", payload: .jogXY(x: -2, y: 2, feed: 1_000))
         )

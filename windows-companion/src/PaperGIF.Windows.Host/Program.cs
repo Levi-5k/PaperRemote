@@ -1,4 +1,5 @@
 using PaperGIF.Windows.Host;
+using PaperGIF.Windows.Core.Models;
 using System.Text.Json;
 
 internal static class Program
@@ -117,7 +118,7 @@ internal static class Program
             HttpContext context,
             CancellationToken cancellationToken) =>
         {
-            if (request.Items.Count > 16)
+            if (request.Items.Count > RemoteProfile.MaximumControlsPerPage)
             {
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                 await WriteJsonWithContentLengthAsync(

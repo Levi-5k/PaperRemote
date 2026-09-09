@@ -143,8 +143,8 @@ final class RemoteEditorStore: ObservableObject {
     var validationMessage: String? {
         if profile.pages.isEmpty { return "Add at least one page." }
         if profile.pages.count > 8 { return "A remote can contain at most 8 pages." }
-        if profile.pages.contains(where: { $0.controls.count > 16 }) {
-            return "Each page can contain at most 16 controls."
+        if profile.pages.contains(where: { $0.controls.count > RemoteProfile.maximumControlsPerPage }) {
+            return "Each page can contain at most \(RemoteProfile.maximumControlsPerPage) controls."
         }
         if profile.pages.contains(where: { layoutUnitsUsed(on: $0) > $0.gridColumns * $0.gridRows }) {
             return "A page has more controls than fit on the display."
@@ -219,7 +219,7 @@ final class RemoteEditorStore: ObservableObject {
 
     func addControl(_ control: RemoteControl) {
         guard let pageIndex = selectedPageIndex,
-              profile.pages[pageIndex].controls.count < 16,
+              profile.pages[pageIndex].controls.count < RemoteProfile.maximumControlsPerPage,
                             layoutUnitsUsed(on: profile.pages[pageIndex]) +
                                 layoutUnits(for: control, on: profile.pages[pageIndex]) <=
                                 profile.pages[pageIndex].gridColumns * profile.pages[pageIndex].gridRows else { return }
@@ -231,7 +231,7 @@ final class RemoteEditorStore: ObservableObject {
         guard let pageIndex = selectedPageIndex else { return false }
         let page = profile.pages[pageIndex]
         let units = kind == .slider ? 1 : 2
-        return page.controls.count < 16 &&
+        return page.controls.count < RemoteProfile.maximumControlsPerPage &&
             layoutUnitsUsed(on: page) + units <= page.gridColumns * page.gridRows
     }
 
@@ -243,7 +243,7 @@ final class RemoteEditorStore: ObservableObject {
 
     func duplicateSelectedControl() {
         guard let location = selectedControlLocation,
-              profile.pages[location.page].controls.count < 16 else { return }
+              profile.pages[location.page].controls.count < RemoteProfile.maximumControlsPerPage else { return }
         var copy = profile.pages[location.page].controls[location.control]
         guard layoutUnitsUsed(on: profile.pages[location.page]) +
             layoutUnits(for: copy, on: profile.pages[location.page]) <=
@@ -652,7 +652,7 @@ final class RemoteEditorStore: ObservableObject {
     private static func validationMessage(for profile: RemoteProfile) -> String? {
         if profile.version != RemoteProfile.currentVersion { return "The profile version is unsupported." }
         if profile.pages.isEmpty || profile.pages.count > 8 { return "The profile has an invalid page count." }
-        if profile.pages.contains(where: { $0.controls.count > 16 }) {
+        if profile.pages.contains(where: { $0.controls.count > RemoteProfile.maximumControlsPerPage }) {
             return "The profile has too many controls on a page."
         }
         return nil

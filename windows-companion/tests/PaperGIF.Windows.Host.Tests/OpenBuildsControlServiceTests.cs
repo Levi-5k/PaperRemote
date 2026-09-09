@@ -19,6 +19,15 @@ public sealed class OpenBuildsControlServiceTests
             new OpenBuildsEmission("runCommand", OpenBuildsPayloadKind.String, StringValue: "$H\n"),
             OpenBuildsCommandMapper.Create("home", 0));
         Assert.Equal(
+            new OpenBuildsEmission("runCommand", OpenBuildsPayloadKind.String, StringValue: "G10 L20 P1 X0\n"),
+            OpenBuildsCommandMapper.Create("zeroX", 0));
+        Assert.Equal(
+            new OpenBuildsEmission("runCommand", OpenBuildsPayloadKind.String, StringValue: "G10 L20 P1 Y0\n"),
+            OpenBuildsCommandMapper.Create("zeroY", 0));
+        Assert.Equal(
+            new OpenBuildsEmission("runCommand", OpenBuildsPayloadKind.String, StringValue: "G10 L20 P1 Z0\n"),
+            OpenBuildsCommandMapper.Create("zeroZ", 0));
+        Assert.Equal(
             new OpenBuildsEmission("jogXY", OpenBuildsPayloadKind.JogXY,
                 JogXYValue: new OpenBuildsJogXYPayload(-2, 2, 1_000)),
             OpenBuildsCommandMapper.Create("jogXNegativeYPositive", 2));

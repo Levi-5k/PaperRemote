@@ -220,7 +220,7 @@ final class ModuleCatalog: ObservableObject {
               isValidIdentifier(manifest.id),
               !manifest.name.isEmpty,
               !manifest.version.isEmpty,
-              (1...16).contains(manifest.controls.count),
+              (1...RemoteProfile.maximumControlsPerPage).contains(manifest.controls.count),
               Set(manifest.controls.map(\.id)).count == manifest.controls.count,
               manifest.controls.allSatisfy({
                   isValidIdentifier($0.id) &&
@@ -234,7 +234,7 @@ final class ModuleCatalog: ObservableObject {
                   isValidIdentifier($0.id) &&
                       !$0.detail.isEmpty &&
                       !$0.page.name.isEmpty &&
-                      $0.page.controls.count <= 16
+                      $0.page.controls.count <= RemoteProfile.maximumControlsPerPage
               }) else {
             throw ModuleCatalogError.invalidManifest
         }

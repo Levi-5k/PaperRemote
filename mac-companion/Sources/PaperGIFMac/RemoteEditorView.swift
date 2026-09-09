@@ -870,6 +870,9 @@ private struct ControlInspector: View {
                     Text("Jog Y +").tag("jogYPositive")
                     Text("Jog Z -").tag("jogZNegative")
                     Text("Jog Z +").tag("jogZPositive")
+                    Text("Zero X").tag("zeroX")
+                    Text("Zero Y").tag("zeroY")
+                    Text("Zero Z").tag("zeroZ")
                     Text("Jog X-/Y-").tag("jogXNegativeYNegative")
                     Text("Jog X-/Y+").tag("jogXNegativeYPositive")
                     Text("Jog X+/Y-").tag("jogXPositiveYNegative")
@@ -1731,7 +1734,7 @@ private struct DevicePreview: View {
 
                 if page.layout == .openBuildsController {
                     OpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
-                    ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
+                    ForEach(Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
                         let frame = frames[index]
                         PreviewControl(
                             control: control,
@@ -1745,7 +1748,7 @@ private struct DevicePreview: View {
                         .onTapGesture { onSelect(control.id) }
                     }
                 } else {
-                    ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
+                    ForEach(Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
                         let frame = frames[index]
                         PreviewControl(
                             control: control,
@@ -1839,7 +1842,7 @@ private struct OpenBuildsSettingsPreview: View {
         }
         .foregroundStyle(.black)
         .frame(width: 152 * scale, alignment: .topLeading)
-        .position(x: 440 * scale, y: 447 * scale)
+        .position(x: 440 * scale, y: 507 * scale)
     }
 
     private func modeChip(_ title: String, selected: Bool) -> some View {
@@ -1888,12 +1891,23 @@ private struct PreviewControl: View {
                 RoundedRectangle(cornerRadius: 9 * scale).stroke(.black, lineWidth: max(1, scale))
             }
             if control.kind == .textBox {
-                Text(textBoxPreview)
-                    .font(.system(size: textBoxSize * scale, weight: .semibold))
-                    .multilineTextAlignment(textBoxTextAlignment)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: textBoxFrameAlignment)
-                    .padding(8 * scale)
+                if control.textBox?.source == .openBuildsPosition {
+                    VStack(spacing: 4 * scale) {
+                        Text(openBuildsAxis)
+                            .font(.system(size: 10 * scale, weight: .bold))
+                        Text("0.000 \(openBuildsUnits)")
+                            .font(.system(size: 18 * scale, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
+                } else {
+                    Text(textBoxPreview)
+                        .font(.system(size: textBoxSize * scale, weight: .semibold))
+                        .multilineTextAlignment(textBoxTextAlignment)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: textBoxFrameAlignment)
+                        .padding(8 * scale)
+                        .clipped()
+                }
                 RoundedRectangle(cornerRadius: 9 * scale).stroke(.black, lineWidth: max(1, scale))
             } else if control.kind == .slider {
                 HStack(spacing: 8 * scale) {
@@ -1978,9 +1992,20 @@ private struct PreviewControl: View {
                 "128"
             }
         case .nowPlaying: "Song Title\nArtist"
-        case .openBuildsPosition:
-            "\(textBox.sourceText.split(separator: "|").last?.uppercased() ?? "X") 0.000"
+        case .openBuildsPosition: "0.000 \(openBuildsUnits)"
         }
+    }
+
+    private var openBuildsComponents: [Substring] {
+        control.textBox?.sourceText.split(separator: "|", omittingEmptySubsequences: false) ?? []
+    }
+
+    private var openBuildsAxis: String {
+        openBuildsComponents.indices.contains(1) ? openBuildsComponents[1].uppercased() : "X"
+    }
+
+    private var openBuildsUnits: String {
+        openBuildsComponents.indices.contains(2) ? openBuildsComponents[2].lowercased() : "mm"
     }
 
     private var textBoxSize: CGFloat {
@@ -2058,7 +2083,7 @@ private func remoteBitmapMaskImage(_ hex: String?) -> CGImage? {
 
 private enum RemoteLayout {
     static func frames(for page: RemotePage) -> [CGRect] {
-        let controls = Array(page.controls.prefix(16))
+        let controls = Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage))
         var occupied: Set<Int> = []
         var frames = Array(repeating: CGRect.zero, count: controls.count)
         var placed = Array(repeating: false, count: controls.count)

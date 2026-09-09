@@ -1116,7 +1116,7 @@ private struct PaperGIFRemotePageEditor: View {
                 } label: {
                     Label("Add Control", systemImage: "plus")
                 }
-                .disabled(page.controls.count >= 16 || layoutUnitsUsed >= layoutCapacity)
+                .disabled(page.controls.count >= PaperGIFRemoteProfile.maximumControlsPerPage || layoutUnitsUsed >= layoutCapacity)
             }
         }
         .navigationTitle(page.name)
@@ -1231,14 +1231,14 @@ private struct PaperGIFRemotePagePreview: View {
 
                 if page.layout == .openBuildsController {
                     PaperGIFOpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
-                    ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
+                    ForEach(Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
                         previewControl(control, frame: frames[index], scale: scale, controllerCompact: true)
                             .contentShape(Rectangle())
                             .position(center(of: frames[index]))
                             .onTapGesture { onEditControl(control.id) }
                     }
                 } else {
-                    ForEach(Array(page.controls.prefix(16).enumerated()), id: \.element.id) { index, control in
+                    ForEach(Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
                         previewControl(control, frame: frames[index], scale: scale)
                             .contentShape(Rectangle())
                             .position(
@@ -1293,17 +1293,29 @@ private struct PaperGIFRemotePagePreview: View {
             }
 
             if control.kind == .textBox {
-                Text(textBoxPreview(for: control))
-                    .font(.system(size: textBoxPreviewSize(for: control), weight: .semibold))
-                    .multilineTextAlignment(textBoxTextAlignment(for: control))
+                if control.textBox?.source == .openBuildsPosition {
+                    VStack(spacing: 4 * scale) {
+                        Text(openBuildsAxis(for: control))
+                            .font(.system(size: 10 * scale, weight: .bold))
+                        Text("0.000 \(openBuildsUnits(for: control))")
+                            .font(.system(size: 18 * scale, weight: .semibold))
+                    }
                     .foregroundStyle(.black)
-                    .frame(
-                        maxWidth: .infinity,
-                        maxHeight: .infinity,
-                        alignment: textBoxFrameAlignment(for: control)
-                    )
-                    .padding(8 * scale)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
+                } else {
+                    Text(textBoxPreview(for: control))
+                        .font(.system(size: textBoxPreviewSize(for: control), weight: .semibold))
+                        .multilineTextAlignment(textBoxTextAlignment(for: control))
+                        .foregroundStyle(.black)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: textBoxFrameAlignment(for: control)
+                        )
+                        .padding(8 * scale)
+                        .clipped()
+                }
                 RoundedRectangle(cornerRadius: 10 * scale)
                     .stroke(Color.black, lineWidth: max(1, scale))
             } else if control.kind == .slider {
@@ -1368,9 +1380,22 @@ private struct PaperGIFRemotePagePreview: View {
             }
             return "128"
         case .nowPlaying: return "Song Title - Artist"
-        case .openBuildsPosition:
-            return "\(textBox.sourceText.split(separator: "|").last?.uppercased() ?? "X") 0.000"
+        case .openBuildsPosition: return "0.000 \(openBuildsUnits(for: control))"
         }
+    }
+
+    private func openBuildsComponents(for control: PaperGIFRemoteControl) -> [Substring] {
+        control.textBox?.sourceText.split(separator: "|", omittingEmptySubsequences: false) ?? []
+    }
+
+    private func openBuildsAxis(for control: PaperGIFRemoteControl) -> String {
+        let components = openBuildsComponents(for: control)
+        return components.indices.contains(1) ? components[1].uppercased() : "X"
+    }
+
+    private func openBuildsUnits(for control: PaperGIFRemoteControl) -> String {
+        let components = openBuildsComponents(for: control)
+        return components.indices.contains(2) ? components[2].lowercased() : "mm"
     }
 
     private func textBoxPreviewSize(for control: PaperGIFRemoteControl) -> CGFloat {
@@ -1476,7 +1501,7 @@ private struct PaperGIFRemotePagePreview: View {
     }
 
     private func controlFrames(scale: CGFloat) -> [CGRect] {
-        let controls = Array(page.controls.prefix(16))
+        let controls = Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage))
         return PaperGIFRemoteGrid.placements(
             for: controls, columns: page.gridColumns, rows: page.gridRows
         ).map { placement in
@@ -1552,7 +1577,7 @@ private struct PaperGIFOpenBuildsSettingsPreview: View {
         }
         .foregroundStyle(.black)
         .frame(width: 152 * scale, alignment: .topLeading)
-        .position(x: 440 * scale, y: 447 * scale)
+        .position(x: 440 * scale, y: 507 * scale)
     }
 
     private func chip(_ title: String, selected: Bool) -> some View {
@@ -1863,6 +1888,9 @@ private struct PaperGIFRemoteControlEditor: View {
                 Text("Jog Y +").tag("jogYPositive")
                 Text("Jog Z -").tag("jogZNegative")
                 Text("Jog Z +").tag("jogZPositive")
+                Text("Zero X").tag("zeroX")
+                Text("Zero Y").tag("zeroY")
+                Text("Zero Z").tag("zeroZ")
                 Text("Jog X-/Y-").tag("jogXNegativeYNegative")
                 Text("Jog X-/Y+").tag("jogXNegativeYPositive")
                 Text("Jog X+/Y-").tag("jogXPositiveYNegative")

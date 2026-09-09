@@ -62,7 +62,7 @@ public sealed class RemoteProfileContractTests
     {
         const string json = """
             {"version":6,"pages":[{"name":"Motion","layout":"openBuildsController","controls":[
-              {"title":"X","kind":"textBox","action":{"type":"openBuilds"},"textBox":{"source":"openBuildsPosition","sourceText":"127.0.0.1|x"}},
+              {"title":"Y","kind":"textBox","action":{"type":"openBuilds"},"textBox":{"source":"openBuildsPosition","sourceText":"127.0.0.1|y|mm"}},
               {"title":"Up Left","kind":"button","action":{"type":"openBuilds","text":"jogXNegativeYPositive"}}
             ]}]}
             """;
@@ -71,7 +71,7 @@ public sealed class RemoteProfileContractTests
 
         Assert.Equal(9, page.GridColumns);
         Assert.Equal(14, page.GridRows);
-        Assert.Equal(0, page.Controls[0].LayoutSlot);
+        Assert.Equal(3, page.Controls[0].LayoutSlot);
         Assert.Equal(3, page.Controls[0].GridWidth);
         Assert.Equal(2, page.Controls[0].GridHeight);
         Assert.Equal(18, page.Controls[1].LayoutSlot);

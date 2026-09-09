@@ -82,9 +82,15 @@ internal static class OpenBuildsCommandMapper
                 StopValue: new OpenBuildsStopPayload(false, false, true)),
             "unlock" => new("clearAlarm", OpenBuildsPayloadKind.Integer, IntegerValue: 2),
             "home" => new("runCommand", OpenBuildsPayloadKind.String, StringValue: "$H\n"),
+            "zeroX" => Zero("X"),
+            "zeroY" => Zero("Y"),
+            "zeroZ" => Zero("Z"),
             _ => null,
         };
     }
+
+    private static OpenBuildsEmission Zero(string axis) =>
+        new("runCommand", OpenBuildsPayloadKind.String, StringValue: $"G10 L20 P1 {axis}0\n");
 
     private static OpenBuildsEmission? Jog(string axis, int direction, double distance, int feed) =>
         distance is >= 0.001 and <= 100 && feed is >= 100 and <= 10_000

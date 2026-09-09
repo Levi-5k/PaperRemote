@@ -83,13 +83,13 @@ final class RemoteProfileModelTests: XCTestCase {
     }
 
     func testLegacyOpenBuildsPageMigratesToFlexibleGrid() throws {
-        let data = Data(#"{"version":6,"pages":[{"id":"00000000-0000-0000-0000-000000000001","name":"Motion","layout":"openBuildsController","controls":[{"id":"00000000-0000-0000-0000-000000000002","title":"X","symbol":"","tintHex":"202020","kind":"textBox","action":{"type":"openBuilds","host":"127.0.0.1","text":"","value":0,"modifiers":[]},"textBox":{"source":"openBuildsPosition","sourceText":"127.0.0.1|x"}},{"id":"00000000-0000-0000-0000-000000000003","title":"Up Left","symbol":"arrow.up.left","tintHex":"202020","kind":"button","action":{"type":"openBuilds","host":"127.0.0.1","text":"jogXNegativeYPositive","value":1,"modifiers":[]}}]}]}"#.utf8)
+        let data = Data(#"{"version":6,"pages":[{"id":"00000000-0000-0000-0000-000000000001","name":"Motion","layout":"openBuildsController","controls":[{"id":"00000000-0000-0000-0000-000000000002","title":"Y","symbol":"","tintHex":"202020","kind":"textBox","action":{"type":"openBuilds","host":"127.0.0.1","text":"","value":0,"modifiers":[]},"textBox":{"source":"openBuildsPosition","sourceText":"127.0.0.1|y|mm"}},{"id":"00000000-0000-0000-0000-000000000003","title":"Up Left","symbol":"arrow.up.left","tintHex":"202020","kind":"button","action":{"type":"openBuilds","host":"127.0.0.1","text":"jogXNegativeYPositive","value":1,"modifiers":[]}}]}]}"#.utf8)
 
         let page = try XCTUnwrap(JSONDecoder().decode(RemoteProfile.self, from: data).pages.first)
 
         XCTAssertEqual(page.gridColumns, 9)
         XCTAssertEqual(page.gridRows, 14)
-        XCTAssertEqual(page.controls[0].layoutSlot, 0)
+        XCTAssertEqual(page.controls[0].layoutSlot, 3)
         XCTAssertEqual(page.controls[0].gridSpan(columns: 9, rows: 14), .init(width: 3, height: 2))
         XCTAssertEqual(page.controls[1].layoutSlot, 18)
         XCTAssertEqual(page.controls[1].gridSpan(columns: 9, rows: 14), .init(width: 2, height: 2))
