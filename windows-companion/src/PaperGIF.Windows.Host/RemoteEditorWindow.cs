@@ -423,7 +423,10 @@ internal sealed class RemoteEditorWindow : Form
         try
         {
             await moduleCatalog.RefreshAsync();
-            moduleStatus.Text = $"{moduleCatalog.AvailableModules.Count} module(s) available";
+            var updateCount = moduleCatalog.AvailableUpdates.Count;
+            moduleStatus.Text = updateCount == 0
+                ? $"{moduleCatalog.AvailableModules.Count} module(s) available. Everything is current."
+                : $"{updateCount} module update{(updateCount == 1 ? "" : "s")} available.";
             RenderModules();
         }
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException or InvalidDataException)
@@ -461,9 +464,8 @@ internal sealed class RemoteEditorWindow : Form
     private Control BuildModuleCard(PaperModuleListing module)
     {
         var installed = moduleCatalog.IsInstalled(module.Id, module.Version);
-        var pageTemplate = installed
-            ? moduleCatalog.GetInstalled(module.Id)?.Pages.FirstOrDefault()
-            : null;
+        var hasUpdate = moduleCatalog.HasUpdate(module);
+        var pageTemplate = moduleCatalog.GetInstalled(module.Id)?.Pages.FirstOrDefault();
         var card = new Panel
         {
             Height = pageTemplate is null ? 112 : 150,
@@ -500,11 +502,11 @@ internal sealed class RemoteEditorWindow : Form
             Location = new Point(14, 82),
             Text = $"v{module.Version}  ·  {module.Author}",
         };
-        var action = Button(installed ? "Installed" : "Install", async (_, _) =>
+        var action = Button(hasUpdate ? "Update" : installed ? "Installed" : "Install", async (_, _) =>
         {
             await InstallModuleAsync(module);
         }, installed ? 88 : 76);
-        action.Enabled = !installed;
+        action.Enabled = !installed || hasUpdate;
         action.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
         action.Location = new Point(220, pageTemplate is null ? 74 : 112);
         Button? addPage = null;
@@ -539,9 +541,12 @@ internal sealed class RemoteEditorWindow : Form
         try
         {
             var module = await moduleCatalog.InstallAsync(listing);
-            moduleStatus.Text = module.Pages.Count > 0
-                ? $"Installed {module.Name}. Add its page here or use individual controls."
-                : $"Installed {module.Name}. Its controls are now in Add Controls.";
+            var updatedPageCount = store.UpdateModulePages(module);
+            moduleStatus.Text = updatedPageCount > 0
+                ? $"Updated {updatedPageCount} linked page{(updatedPageCount == 1 ? "" : "s")} from {module.Name}."
+                : module.Pages.Count > 0
+                    ? $"Installed {module.Name}. Add its page here or use individual controls."
+                    : $"Installed {module.Name}. Its controls are now in Add Controls.";
             RefreshCatalog();
             RenderModules();
         }
@@ -801,7 +806,7 @@ internal sealed class RemoteEditorWindow : Form
         pageCount.Text = store.SelectedPage is { } page ? $"{page.Controls.Count} / 16" : string.Empty;
         preview.Page = store.SelectedPage;
         preview.PageIndex = Math.Max(0, store.Profile.Pages.FindIndex(page => page.Id == store.SelectedPageId));
-        preview.PageCount = store.Profile.Pages.Count;
+        preview.PageNames = store.Profile.Pages.Select(page => page.Name).ToArray();
         preview.SelectedControlId = store.SelectedControlId;
         var selectedControl = store.SelectedControl;
         controlProperties.SelectedObject = selectedControl is { } control && store.SelectedPage is { } selectedPage

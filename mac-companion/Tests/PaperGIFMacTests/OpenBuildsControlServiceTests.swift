@@ -94,4 +94,29 @@ final class OpenBuildsControlServiceTests: XCTestCase {
         XCTAssertEqual(position, OpenBuildsPosition(x: 12.5, y: -3.25, z: 0))
         XCTAssertNil(OpenBuildsControlService.position(from: ["machine": [:]]))
     }
+
+    func testParsesGRBLRunStatusFromStatusPayload() {
+        XCTAssertEqual(
+            OpenBuildsControlService.runStatus(from: ["comms": ["runStatus": "Hold:0"]]),
+            "Hold:0"
+        )
+        XCTAssertNil(OpenBuildsControlService.runStatus(from: ["comms": [:]]))
+    }
+
+    func testAllowsCommandsOnlyInCompatibleGRBLStates() {
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "jogXPositive", runStatus: "Idle"))
+        XCTAssertFalse(OpenBuildsCommandPolicy.allows(command: "jogXPositive", runStatus: "Run"))
+        XCTAssertFalse(OpenBuildsCommandPolicy.allows(command: "zeroX", runStatus: "Hold:0"))
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "home", runStatus: "Alarm"))
+        XCTAssertFalse(OpenBuildsCommandPolicy.allows(command: "home", runStatus: "Run"))
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "unlock", runStatus: "Alarm"))
+        XCTAssertFalse(OpenBuildsCommandPolicy.allows(command: "unlock", runStatus: "Idle"))
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "pause", runStatus: "Run"))
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "resume", runStatus: "Hold:0"))
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "resume", runStatus: "Door:0"))
+        XCTAssertFalse(OpenBuildsCommandPolicy.allows(command: "resume", runStatus: "Run"))
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "stop", runStatus: nil))
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "abort", runStatus: "Run"))
+        XCTAssertTrue(OpenBuildsCommandPolicy.allows(command: "cancelJog", runStatus: "Jog"))
+    }
 }

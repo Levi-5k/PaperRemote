@@ -52,6 +52,8 @@ public sealed class RemoteProfileContractTests
         var profile = RemoteProfileJson.Deserialize(json);
 
         Assert.Equal(RemoteProfile.CurrentVersion, profile.Version);
+        Assert.Equal(10, profile.ButtonQualityRefreshInterval);
+        Assert.Equal(20, profile.ElementRefreshDelayMilliseconds);
         var computer = Assert.Single(profile.Computers);
         Assert.Equal("legacy.local", computer.Host);
         Assert.Equal("legacy-token", computer.Token);

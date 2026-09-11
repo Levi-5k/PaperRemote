@@ -10,6 +10,28 @@ final class ModuleCatalogTests: XCTestCase {
         XCTAssertFalse(ModuleCatalog.isVersion("1.4.0", newerThan: "1.4.0"))
     }
 
+    @MainActor
+    func testCatalogDetectsAnInstalledModuleUpdate() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(contentsOf: moduleFixture("media-controls.json"))
+            .write(to: directory.appendingPathComponent("media-controls.json"))
+
+        let catalog = ModuleCatalog(installedDirectory: directory)
+        let listing = PaperModuleListing(
+            id: "media-controls",
+            name: "Media Controls",
+            summary: "Playback and volume controls for your computer.",
+            version: "1.4.0",
+            author: "paperGIF",
+            manifest: "media-controls.json"
+        )
+
+        XCTAssertTrue(catalog.hasUpdate(listing))
+    }
+
     func testSharedModuleManifestCreatesControlsWithFreshIDs() throws {
         let module = try JSONDecoder().decode(
             PaperModuleManifest.self,
@@ -18,7 +40,31 @@ final class ModuleCatalogTests: XCTestCase {
 
         XCTAssertEqual(module.schemaVersion, 1)
         XCTAssertEqual(module.id, "media-controls")
-        XCTAssertEqual(module.controls.count, 6)
+        XCTAssertEqual(module.controls.count, 8)
+        let seek = try XCTUnwrap(module.controls.first { $0.id == "playback-position" }?.control)
+        XCTAssertEqual(seek.action.text, "seek")
+        XCTAssertEqual(seek.sliderOutlineInsetPixels, 3)
+        XCTAssertEqual(seek.textBox?.source, .nowPlaying)
+        XCTAssertEqual(seek.textBox?.textSize, .autoFit)
+        XCTAssertEqual(seek.textBox?.horizontalAlignment, .center)
+        XCTAssertEqual(seek.textBox?.verticalAlignment, .center)
+        XCTAssertEqual(seek.gridWidth, 2)
+
+        let pageDefinition = try XCTUnwrap(module.pages?.first)
+        let page = ModuleCatalog.clonePage(pageDefinition, moduleID: module.id)
+        XCTAssertEqual(pageDefinition.id, "media")
+        XCTAssertEqual(page.name, "Media")
+        XCTAssertEqual(page.gridColumns, 3)
+        XCTAssertEqual(page.gridRows, 8)
+        XCTAssertEqual(page.controls.count, 8)
+        XCTAssertTrue(page.controls.allSatisfy { $0.action.type == .macMedia })
+        XCTAssertEqual(page.controls.first { $0.action.text == "seek" }?.layoutSlot, 0)
+        XCTAssertEqual(page.controls.first { $0.action.text == "playPause" }?.layoutSlot, 7)
+        XCTAssertEqual(page.controls.first { $0.action.text == "volume" }?.layoutSlot, 15)
+        XCTAssertEqual(page.controls.first { $0.action.text == "mute" }?.layoutSlot, 19)
+        XCTAssertEqual(page.moduleID, module.id)
+        XCTAssertNotEqual(page.id, pageDefinition.page.id)
+        XCTAssertTrue(zip(page.controls, pageDefinition.page.controls).allSatisfy { $0.id != $1.id })
 
         let definition = try XCTUnwrap(module.controls.first)
         let template = RemoteControlTemplate.module(module, control: definition)
@@ -57,6 +103,44 @@ final class ModuleCatalogTests: XCTestCase {
         XCTAssertEqual(page.controls.filter { $0.action.text.hasPrefix("zero") }.count, 3)
         XCTAssertEqual(page.moduleID, module.id)
         XCTAssertNotEqual(page.id, definition.page.id)
+        XCTAssertTrue(zip(page.controls, definition.page.controls).allSatisfy { $0.id != $1.id })
+    }
+
+    func testPresentationModuleProvidesCrossPlatformPage() throws {
+        let module = try JSONDecoder().decode(
+            PaperModuleManifest.self,
+            from: Data(contentsOf: moduleFixture("presentation-controls.json"))
+        )
+
+        XCTAssertEqual(module.controls.count, 7)
+        XCTAssertTrue(module.controls.allSatisfy { $0.control.action.type == .macKey })
+        let definition = try XCTUnwrap(module.pages?.first)
+        let page = ModuleCatalog.clonePage(definition, moduleID: module.id)
+        XCTAssertEqual(page.name, "Presentation")
+        XCTAssertEqual(page.gridColumns, 3)
+        XCTAssertEqual(page.gridRows, 8)
+        XCTAssertEqual(page.controls.map(\.action.text), ["f5", "left", "b", "right", "home", "escape", "end"])
+        XCTAssertEqual(page.controls.map(\.layoutSlot), [0, 6, 7, 8, 15, 16, 17])
+        XCTAssertEqual(page.moduleID, module.id)
+        XCTAssertTrue(zip(page.controls, definition.page.controls).allSatisfy { $0.id != $1.id })
+    }
+
+    func testWLEDScenesModuleProvidesPresetDashboard() throws {
+        let module = try JSONDecoder().decode(
+            PaperModuleManifest.self,
+            from: Data(contentsOf: moduleFixture("wled-scenes.json"))
+        )
+
+        XCTAssertEqual(module.controls.count, 8)
+        let definition = try XCTUnwrap(module.pages?.first)
+        let page = ModuleCatalog.clonePage(definition, moduleID: module.id)
+        XCTAssertEqual(page.name, "WLED Scenes")
+        XCTAssertEqual(page.gridColumns, 3)
+        XCTAssertEqual(page.gridRows, 8)
+        XCTAssertEqual(page.controls.filter { $0.action.type == .wledPreset }.map(\.action.value), [1, 2, 3, 4, 5, 6])
+        XCTAssertTrue(page.controls.allSatisfy { $0.action.host == "wled.local" })
+        XCTAssertEqual(page.controls.first { $0.action.type == .wledBrightness }?.layoutSlot, 1)
+        XCTAssertEqual(page.moduleID, module.id)
         XCTAssertTrue(zip(page.controls, definition.page.controls).allSatisfy { $0.id != $1.id })
     }
 

@@ -74,6 +74,20 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
         set { control.LayoutSlot = value < 0 ? null : Math.Clamp(value, 0, page.GridColumns * page.GridRows - 1); store.Commit(); }
     }
 
+    [Category("Slider"), DisplayName("Outline")]
+    public bool SliderOutlineEnabled
+    {
+        get => control.SliderOutlineInsetPixels.HasValue;
+        set { control.SliderOutlineInsetPixels = value ? control.SliderOutlineInsetPixels ?? 3 : null; store.Commit(); }
+    }
+
+    [Category("Slider"), DisplayName("Outline inset (pixels)")]
+    public int SliderOutlineInsetPixels
+    {
+        get => control.SliderOutlineInsetPixels ?? 3;
+        set { control.SliderOutlineInsetPixels = Math.Clamp(value, 1, 32); store.Commit(); }
+    }
+
     [Category("Action"), DisplayName("Type")]
     public RemoteActionType ActionType { get => control.Action.Type; set { control.Action.Type = value; store.Commit(); } }
 
@@ -218,6 +232,20 @@ internal sealed class ProfileProperties(RemoteEditorStore store)
     {
         get => store.Profile.ScreensaverDelaySeconds;
         set { store.Profile.ScreensaverDelaySeconds = Math.Clamp(value, 10, 3600); store.Commit(); }
+    }
+
+    [Category("Display"), DisplayName("Quality refresh every N presses")]
+    public int ButtonQualityRefreshInterval
+    {
+        get => store.Profile.ButtonQualityRefreshInterval;
+        set { store.Profile.ButtonQualityRefreshInterval = Math.Clamp(value, 1, 100); store.Commit(); }
+    }
+
+    [Category("Display"), DisplayName("Element spacing (milliseconds)")]
+    public int ElementRefreshDelayMilliseconds
+    {
+        get => store.Profile.ElementRefreshDelayMilliseconds;
+        set { store.Profile.ElementRefreshDelayMilliseconds = Math.Clamp(value, 0, 500); store.Commit(); }
     }
 
     [Category("Display"), DisplayName("Temperature units")]

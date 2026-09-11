@@ -13,3 +13,10 @@ The macOS and Windows companions discover modules from [`index.json`](index.json
 Nothing is installed automatically. Each module has its own **Install** button. Installing downloads the manifest over HTTPS and saves it locally; its controls then become available individually under **Add Controls** without changing any page. If the manifest includes page templates, the installed module also shows an explicit **Add Page** button. Added pages and controls receive fresh IDs, so the same template can be added more than once.
 
 Changing a module's `version` makes installed companions offer the updated download. Keep manifests below 512 KB and no larger than 24 controls.
+
+## Included modules
+
+- **Media Controls** provides now-playing, seek, transport, mute, and volume controls.
+- **Presentation Controls** provides cross-platform slide navigation and presentation-mode controls.
+- **WLED Scenes** provides power, brightness, and six preset controls. Its templates target `wled.local` by default; choose another WLED device in the control editor when needed.
+- **OpenBuilds CONTROL** provides a full CNC motion-control page with live coordinates.

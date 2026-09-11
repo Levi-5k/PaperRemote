@@ -35,6 +35,10 @@ internal sealed class ModuleCatalogService
 
     public IReadOnlyList<PaperModuleListing> AvailableModules { get; private set; } = [];
 
+    public IReadOnlyList<PaperModuleListing> AvailableUpdates => AvailableModules
+        .Where(HasUpdate)
+        .ToArray();
+
     public IReadOnlyList<PaperModuleManifest> InstalledModules => installed.Values
         .OrderBy(module => module.Name, StringComparer.OrdinalIgnoreCase)
         .ToArray();

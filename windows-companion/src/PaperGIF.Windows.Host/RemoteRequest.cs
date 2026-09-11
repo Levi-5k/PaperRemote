@@ -36,4 +36,7 @@ internal sealed record TextSourceResponse(
     string Id,
     string Text,
     bool Available,
-    int? Value = null);
+    int? Value = null,
+    long? ElapsedMilliseconds = null,
+    long? DurationMilliseconds = null,
+    bool? Playing = null);

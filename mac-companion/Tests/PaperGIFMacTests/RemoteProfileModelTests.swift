@@ -79,6 +79,8 @@ final class RemoteProfileModelTests: XCTestCase {
         let profile = try JSONDecoder().decode(RemoteProfile.self, from: data)
 
         XCTAssertEqual(profile.version, RemoteProfile.currentVersion)
+        XCTAssertEqual(profile.buttonQualityRefreshInterval, 10)
+        XCTAssertEqual(profile.elementRefreshDelayMilliseconds, 20)
         XCTAssertEqual(profile.temperatureUnit, .celsius)
     }
 
@@ -274,12 +276,16 @@ final class RemoteProfileModelTests: XCTestCase {
 
     func testFahrenheitPreferenceRoundTripsWithoutChangingStoredCelsius() throws {
         var profile = RemoteProfile(pages: [])
+        profile.buttonQualityRefreshInterval = 17
+        profile.elementRefreshDelayMilliseconds = 35
         profile.temperatureUnit = .fahrenheit
         let decoded = try JSONDecoder().decode(
             RemoteProfile.self,
             from: JSONEncoder().encode(profile)
         )
 
+    XCTAssertEqual(decoded.buttonQualityRefreshInterval, 17)
+    XCTAssertEqual(decoded.elementRefreshDelayMilliseconds, 35)
         XCTAssertEqual(decoded.temperatureUnit, .fahrenheit)
         XCTAssertEqual(decoded.temperatureUnit.displayValue(celsius: 22), 72)
         XCTAssertEqual(decoded.temperatureUnit.celsiusValue(displayValue: 72), 22)

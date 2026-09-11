@@ -78,6 +78,8 @@ struct paperGIFTests {
             )
         )
         let profile = PaperGIFRemoteProfile(
+            buttonQualityRefreshInterval: 17,
+            elementRefreshDelayMilliseconds: 35,
             timeZoneOffsetMinutes: -240,
             pages: [.init(name: "Main", controls: [control])]
         )
@@ -86,6 +88,8 @@ struct paperGIFTests {
         let decoded = try JSONDecoder().decode(PaperGIFRemoteProfile.self, from: encoded)
 
         #expect(decoded == profile)
+        #expect(decoded.buttonQualityRefreshInterval == 17)
+        #expect(decoded.elementRefreshDelayMilliseconds == 35)
     }
 
     @Test func remoteTextBoxWithoutAlignmentUsesTopLeadingDefaults() throws {
@@ -466,6 +470,29 @@ struct paperGIFTests {
         #expect(PaperGIFBluetoothManager.isDeviceWiFiReachable(device: "paperGIF", ready: false))
     }
 
+    @Test func decodesOpenBuildsMotionControllerModulePage() throws {
+        let page = try PaperGIFModuleCatalog.decodeMotionControllerPage(
+            from: Data(contentsOf: moduleFixture("openbuilds-control.json"))
+        )
+
+        #expect(page.name == "Motion Control")
+        #expect(page.layout == .openBuildsController)
+        #expect(page.controls.count == 22)
+        #expect(page.moduleID == PaperGIFModuleCatalog.openBuildsModuleID)
+        #expect(page.modulePageID == PaperGIFModuleCatalog.motionControllerPageID)
+        #expect(Set(page.controls.map(\.id)).count == page.controls.count)
+    }
+
+    @Test func remoteTabLayoutMatchesFirmwareGeometry() throws {
+        let frames = PaperGIFRemoteTabLayout.frames(pageCount: 8, selectedIndex: 3)
+
+        #expect(frames.count == 8)
+        #expect(frames[0] == PaperGIFRemoteTabFrame(x: 24, y: 858, width: 61, height: 60))
+        #expect(frames[3] == PaperGIFRemoteTabFrame(x: 208, y: 850, width: 62, height: 68))
+        #expect(frames[7] == PaperGIFRemoteTabFrame(x: 454, y: 858, width: 62, height: 60))
+        #expect(frames.reduce(0) { $0 + $1.width } == 492)
+    }
+
 }
 
 private func protocolFixture(_ name: String) -> URL {
@@ -475,3 +502,11 @@ private func protocolFixture(_ name: String) -> URL {
         .appendingPathComponent("protocol/fixtures")
         .appendingPathComponent(name)
 }
+
+    private func moduleFixture(_ name: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("modules")
+        .appendingPathComponent(name)
+    }

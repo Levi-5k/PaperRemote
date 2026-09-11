@@ -137,6 +137,31 @@ internal static class OpenBuildsCommandMapper
         (int)Math.Round(feed * scale, MidpointRounding.AwayFromZero);
 }
 
+internal static class OpenBuildsCommandPolicy
+{
+    public static bool Allows(string command, string? runStatus)
+    {
+        if (command is "cancelJog" or "stop" or "abort")
+        {
+            return true;
+        }
+        var normalized = runStatus?.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(normalized))
+        {
+            return false;
+        }
+        var state = normalized.Split(':', 2)[0];
+        return command switch
+        {
+            "pause" => state == "run",
+            "resume" => state == "hold" || normalized == "door:0",
+            "home" => state is "idle" or "alarm",
+            "unlock" => state == "alarm",
+            _ => state == "idle",
+        };
+    }
+}
+
 internal sealed class OpenBuildsControlService : IDisposable
 {
     private static readonly int[] DefaultPorts = [3_000, 3_020, 3_200, 3_220];
@@ -161,6 +186,17 @@ internal sealed class OpenBuildsControlService : IDisposable
         {
             if (await IsOpenBuildsControlAsync(endpoint))
             {
+                if (!OpenBuildsCommandPolicy.Allows(request.Text, null))
+                {
+                    var session = positionSessions.GetOrAdd(
+                        endpoint.AbsoluteUri,
+                        _ => new OpenBuildsPositionSession(endpoint));
+                    var runStatus = await session.RunStatusAsync(CancellationToken.None);
+                    if (!OpenBuildsCommandPolicy.Allows(request.Text, runStatus))
+                    {
+                        return false;
+                    }
+                }
                 return await EmitAsync(endpoint, emission);
             }
         }
@@ -303,6 +339,9 @@ internal sealed class OpenBuildsControlService : IDisposable
         private OpenBuildsPosition? latestPosition;
         private DateTimeOffset latestPositionAt = DateTimeOffset.MinValue;
         private TaskCompletionSource<OpenBuildsPosition> nextPosition = NewPositionCompletion();
+        private string? latestRunStatus;
+        private DateTimeOffset latestRunStatusAt = DateTimeOffset.MinValue;
+        private TaskCompletionSource<string> nextRunStatus = NewRunStatusCompletion();
 
         public OpenBuildsPositionSession(Uri endpoint)
         {
@@ -315,7 +354,9 @@ internal sealed class OpenBuildsControlService : IDisposable
             {
                 try
                 {
-                    Publish(ParsePosition(response.GetValue<JsonElement>()));
+                    var status = response.GetValue<JsonElement>();
+                    Publish(ParsePosition(status));
+                    PublishRunStatus(ParseRunStatus(status));
                 }
                 catch (JsonException)
                 {
@@ -336,6 +377,31 @@ internal sealed class OpenBuildsControlService : IDisposable
                         return latestPosition;
                     }
                     next = nextPosition.Task;
+                }
+
+                await EnsureConnectedAsync(cancellationToken);
+                return await next.WaitAsync(TimeSpan.FromSeconds(3), cancellationToken);
+            }
+            catch (Exception exception) when (
+                exception is HttpRequestException or TaskCanceledException or TimeoutException or WebSocketException)
+            {
+                return null;
+            }
+        }
+
+        public async Task<string?> RunStatusAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                Task<string> next;
+                lock (positionLock)
+                {
+                    if (latestRunStatus is not null &&
+                        DateTimeOffset.UtcNow - latestRunStatusAt <= Freshness)
+                    {
+                        return latestRunStatus;
+                    }
+                    next = nextRunStatus.Task;
                 }
 
                 await EnsureConnectedAsync(cancellationToken);
@@ -388,6 +454,26 @@ internal sealed class OpenBuildsControlService : IDisposable
         private static TaskCompletionSource<OpenBuildsPosition> NewPositionCompletion() =>
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        private void PublishRunStatus(string? runStatus)
+        {
+            if (runStatus is null)
+            {
+                return;
+            }
+            TaskCompletionSource<string> completion;
+            lock (positionLock)
+            {
+                latestRunStatus = runStatus;
+                latestRunStatusAt = DateTimeOffset.UtcNow;
+                completion = nextRunStatus;
+                nextRunStatus = NewRunStatusCompletion();
+            }
+            completion.TrySetResult(runStatus);
+        }
+
+        private static TaskCompletionSource<string> NewRunStatusCompletion() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public void Dispose()
         {
             if (client.Connected)
@@ -411,6 +497,18 @@ internal sealed class OpenBuildsControlService : IDisposable
             return null;
         }
         return new OpenBuildsPosition(x, y, z);
+    }
+
+    internal static string? ParseRunStatus(JsonElement status)
+    {
+        if (!status.TryGetProperty("comms", out var comms) ||
+            !comms.TryGetProperty("runStatus", out var runStatus) ||
+            runStatus.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+        var normalized = runStatus.GetString()?.Trim();
+        return string.IsNullOrEmpty(normalized) ? null : normalized;
     }
 
     private static bool TryNumber(JsonElement parent, string name, out double value)

@@ -57,6 +57,8 @@ struct PaperGIFRemoteView: View {
     @State private var selectedPanel = PaperGIFRemoteEditorPanel.layout
     @State private var liveSyncTask: Task<Void, Never>?
     @State private var liveSyncStatus: String?
+    @State private var isAddingMotionControl = false
+    @State private var moduleStatus: String?
 
     var body: some View {
         NavigationStack {
@@ -73,6 +75,7 @@ struct PaperGIFRemoteView: View {
                 List {
                     if selectedPanel == .layout {
                         pagesSection
+                        modulesSection
                         screensaverSection
                         saveSection
                     } else {
@@ -359,12 +362,23 @@ struct PaperGIFRemoteView: View {
     }
 
     private var screensaverSection: some View {
-        Section("Screen Saver") {
+        Section("Display") {
             Stepper(
                 "Start after \(profile.screensaverDelaySeconds) seconds",
                 value: screensaverDelayBinding,
                 in: 10...3_600,
                 step: 10
+            )
+            Stepper(
+                "Quality refresh every \(profile.buttonQualityRefreshInterval) presses",
+                value: $profile.buttonQualityRefreshInterval,
+                in: 1...100
+            )
+            Stepper(
+                "Element spacing: \(profile.elementRefreshDelayMilliseconds) ms",
+                value: $profile.elementRefreshDelayMilliseconds,
+                in: 0...500,
+                step: 5
             )
         }
     }
@@ -570,6 +584,65 @@ struct PaperGIFRemoteView: View {
                 Label("Add Page", systemImage: "plus")
             }
             .disabled(profile.pages.count >= 8)
+        }
+    }
+
+    private var modulesSection: some View {
+        Section {
+            if hasMotionControlPage {
+                Label("Motion Control Added", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else {
+                Button {
+                    Task { await addMotionControlPage() }
+                } label: {
+                    if isAddingMotionControl {
+                        HStack {
+                            ProgressView()
+                            Text("Adding Motion Control…")
+                        }
+                    } else {
+                        Label("Add Motion Control Page", systemImage: "plus.rectangle.on.rectangle")
+                    }
+                }
+                .disabled(isAddingMotionControl || profile.pages.count >= 8)
+            }
+
+            if let moduleStatus {
+                Text(moduleStatus)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Modules")
+        } footer: {
+            Text("Motion Control adds the OpenBuilds coordinate, jogging, zeroing, and machine controls from the paperGIF module catalog.")
+        }
+    }
+
+    private var hasMotionControlPage: Bool {
+        profile.pages.contains {
+            ($0.moduleID == PaperGIFModuleCatalog.openBuildsModuleID &&
+                $0.modulePageID == PaperGIFModuleCatalog.motionControllerPageID) ||
+                $0.layout == .openBuildsController
+        }
+    }
+
+    @MainActor
+    private func addMotionControlPage() async {
+        guard !hasMotionControlPage, profile.pages.count < 8 else { return }
+        isAddingMotionControl = true
+        moduleStatus = nil
+        defer { isAddingMotionControl = false }
+
+        do {
+            let page = try await PaperGIFModuleCatalog.downloadMotionControllerPage()
+            guard !hasMotionControlPage else { return }
+            var updatedProfile = profile
+            updatedProfile.pages.append(page)
+            applyLiveProfile(updatedProfile)
+            moduleStatus = "Added Motion Control."
+        } catch {
+            moduleStatus = "Couldn’t add Motion Control: \(error.localizedDescription)"
         }
     }
 
@@ -1045,7 +1118,7 @@ private struct PaperGIFRemotePageEditor: View {
                 PaperGIFRemotePagePreview(
                     page: $page,
                     pageIndex: pages.firstIndex { $0.id == page.id } ?? 0,
-                    pageCount: pages.count,
+                    pageNames: pages.map(\.name),
                     temperatureUnit: temperatureUnit,
                     onEditControl: { selectedControlID = $0 }
                 )
@@ -1192,7 +1265,7 @@ private struct PaperGIFRemotePageThumbnail: View {
 private struct PaperGIFRemotePagePreview: View {
     @Binding var page: PaperGIFRemotePage
     let pageIndex: Int
-    let pageCount: Int
+    let pageNames: [String]
     let temperatureUnit: PaperGIFTemperatureUnit
     let onEditControl: (UUID) -> Void
     @State private var draggedControlID: UUID?
@@ -1252,9 +1325,11 @@ private struct PaperGIFRemotePagePreview: View {
                     }
                 }
 
-                Text("<  \(pageIndex + 1) / \(max(pageCount, 1))  >")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.black)
+                PaperGIFRemoteTabsPreview(
+                    pageNames: pageNames,
+                    selectedPageIndex: pageIndex,
+                    scale: scale
+                )
                     .position(x: 270 * scale, y: 884 * scale)
             }
             .overlay {
@@ -1267,6 +1342,61 @@ private struct PaperGIFRemotePagePreview: View {
         .accessibilityLabel("Preview of \(page.name)")
     }
 
+
+private struct PaperGIFRemoteTabsPreview: View {
+    let pageNames: [String]
+    let selectedPageIndex: Int
+    let scale: CGFloat
+
+    var body: some View {
+        let visibleNames = Array(pageNames.prefix(8))
+        let frames = PaperGIFRemoteTabLayout.frames(
+            pageCount: visibleNames.count,
+            selectedIndex: selectedPageIndex
+        )
+
+        ZStack(alignment: .topLeading) {
+            Color.white
+            ForEach(frames.indices, id: \.self) { index in
+                let frame = frames[index]
+                let selected = index == selectedPageIndex
+                let width = CGFloat(frame.width) * scale
+                let height = CGFloat(frame.height) * scale
+
+                RoundedRectangle(cornerRadius: 7 * scale)
+                    .fill(selected ? Color.black : Color.white)
+                    .overlay {
+                        Text(visibleNames[index])
+                            .font(.system(size: max(5, 12 * scale), weight: .bold))
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.45)
+                            .allowsTightening(false)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(selected ? Color.white : Color.black)
+                            .frame(
+                                width: max(1, CGFloat(frame.width - 8) * scale),
+                                height: max(1, CGFloat(frame.height - 4) * scale)
+                            )
+                            .clipped()
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7 * scale)
+                            .strokeBorder(Color.black, lineWidth: max(1, scale))
+                    }
+                    .frame(width: width, height: height)
+                    .position(
+                        x: CGFloat(frame.x - PaperGIFRemoteTabLayout.left) * scale + width / 2,
+                        y: CGFloat(frame.y - PaperGIFRemoteTabLayout.top) * scale + height / 2
+                    )
+            }
+        }
+        .frame(
+            width: CGFloat(PaperGIFRemoteTabLayout.width) * scale,
+            height: CGFloat(PaperGIFRemoteTabLayout.height) * scale
+        )
+        .clipped()
+    }
+}
     private func previewControl(
         _ control: PaperGIFRemoteControl,
         frame: CGRect,
@@ -1284,7 +1414,12 @@ private struct PaperGIFRemotePagePreview: View {
                         .fill(.black)
                         .frame(width: geometry.size.width * progress)
                 }
-                .padding(3 * scale)
+                .padding((control.sliderOutlineInsetPixels == nil ? 3 : 1) * scale)
+                if let inset = control.sliderOutlineInsetPixels {
+                    RoundedRectangle(cornerRadius: max(2, 10 * scale - CGFloat(inset) * scale / 2))
+                        .fill(Color.white)
+                        .padding(CGFloat(inset) * scale)
+                }
                 RoundedRectangle(cornerRadius: 10 * scale)
                     .stroke(Color.black, lineWidth: max(1, scale))
             } else if control.kind != .textBox {
@@ -1297,8 +1432,10 @@ private struct PaperGIFRemotePagePreview: View {
                     VStack(spacing: 4 * scale) {
                         Text(openBuildsAxis(for: control))
                             .font(.system(size: 10 * scale, weight: .bold))
-                        Text("0.000 \(openBuildsUnits(for: control))")
+                        Text("-123.456 \(openBuildsUnits(for: control))")
                             .font(.system(size: 18 * scale, weight: .semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.55)
                     }
                     .foregroundStyle(.black)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1319,16 +1456,31 @@ private struct PaperGIFRemotePagePreview: View {
                 RoundedRectangle(cornerRadius: 10 * scale)
                     .stroke(Color.black, lineWidth: max(1, scale))
             } else if control.kind == .slider {
-                HStack(spacing: 8 * scale) {
-                    PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                        .frame(width: 28, height: 28)
-                    Text(control.title)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.65)
+                if control.action.type == .macMedia && control.action.text == "seek" {
+                    Text(textBoxPreview(for: control))
+                        .font(.system(size: textBoxPreviewSize(for: control), weight: .semibold))
+                        .multilineTextAlignment(textBoxTextAlignment(for: control))
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: textBoxFrameAlignment(for: control)
+                        )
+                        .padding(8 * scale)
+                        .clipped()
+                        .foregroundStyle(control.sliderOutlineInsetPixels == nil && progress >= 0.5
+                            ? Color.white : Color.black)
+                } else {
+                    HStack(spacing: 8 * scale) {
+                        PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
+                            .frame(width: 28, height: 28)
+                        Text(control.title)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(control.sliderOutlineInsetPixels == nil && progress >= 0.5
+                        ? Color.white : Color.black)
                 }
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(progress >= 0.5 ? .white : .black)
-                .padding(.horizontal, 10 * scale)
             } else if controllerCompact && control.kind == .button {
                 VStack(spacing: 5 * scale) {
                     PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
@@ -1613,7 +1765,7 @@ private struct PaperGIFRemoteControlEditor: View {
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     @StateObject private var applicationCatalog = PaperGIFMacApplicationCatalog()
 
-    private let mediaCommands = ["playPause", "previous", "next", "volumeUp", "volumeDown", "volume", "mute"]
+    private let mediaCommands = ["playPause", "previous", "next", "seek", "volumeUp", "volumeDown", "volume", "mute"]
     private let modifierNames = ["command", "option", "control", "shift"]
 
     var body: some View {
@@ -1659,6 +1811,16 @@ private struct PaperGIFRemoteControlEditor: View {
                 )
                 Toggle("Toggle button", isOn: toggleButtonBinding)
                     .disabled(control.kind != .button)
+                if control.kind == .slider {
+                    Toggle("Outline", isOn: sliderOutlineEnabledBinding)
+                    if control.sliderOutlineInsetPixels != nil {
+                        Stepper(
+                            "Outline inset: \(sliderOutlineInsetBinding.wrappedValue) pixels",
+                            value: sliderOutlineInsetBinding,
+                            in: 1...32
+                        )
+                    }
+                }
             }
 
             if control.kind == .textBox {
@@ -2482,6 +2644,20 @@ private struct PaperGIFRemoteControlEditor: View {
         Binding(
             get: { Double(control.action.value) },
             set: { control.action.value = Int($0.rounded()) }
+        )
+    }
+
+    private var sliderOutlineEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { control.sliderOutlineInsetPixels != nil },
+            set: { control.sliderOutlineInsetPixels = $0 ? 3 : nil }
+        )
+    }
+
+    private var sliderOutlineInsetBinding: Binding<Int> {
+        Binding(
+            get: { control.sliderOutlineInsetPixels ?? 3 },
+            set: { control.sliderOutlineInsetPixels = min(max($0, 1), 32) }
         )
     }
 

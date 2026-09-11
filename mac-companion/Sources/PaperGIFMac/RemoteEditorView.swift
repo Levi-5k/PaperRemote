@@ -5,9 +5,9 @@ import SwiftUI
 final class RemoteEditorWindowController: NSWindowController {
     private let store: RemoteEditorStore
 
-    init(store: RemoteEditorStore) {
+    init(store: RemoteEditorStore, moduleCatalog: ModuleCatalog) {
         self.store = store
-        let content = RemoteEditorView(store: store)
+        let content = RemoteEditorView(store: store, moduleCatalog: moduleCatalog)
         let window = NSWindow(contentViewController: NSHostingController(rootView: content))
         window.title = "paperGIF Controls"
         window.setContentSize(NSSize(width: 1_180, height: 780))
@@ -28,10 +28,10 @@ final class RemoteEditorWindowController: NSWindowController {
 
 private struct RemoteEditorView: View {
     @ObservedObject var store: RemoteEditorStore
+    @ObservedObject var moduleCatalog: ModuleCatalog
     @StateObject private var discovery = WLEDDiscovery()
     @StateObject private var computerDiscovery = ComputerDiscovery()
     @StateObject private var deviceDiscovery = DeviceDiscovery()
-    @StateObject private var moduleCatalog = ModuleCatalog()
     @State private var inspectorTab = InspectorTab.catalog
 
     private enum InspectorTab: String, CaseIterable, Identifiable {
@@ -206,6 +206,17 @@ private struct RemoteEditorView: View {
                     in: 10...3_600,
                     step: 10
                 )
+                Stepper(
+                    "Quality refresh every \(store.profile.buttonQualityRefreshInterval) presses",
+                    value: $store.profile.buttonQualityRefreshInterval,
+                    in: 1...100
+                )
+                Stepper(
+                    "Element spacing: \(store.profile.elementRefreshDelayMilliseconds) ms",
+                    value: $store.profile.elementRefreshDelayMilliseconds,
+                    in: 0...500,
+                    step: 5
+                )
             }
             .font(.caption)
             .padding(12)
@@ -246,7 +257,7 @@ private struct RemoteEditorView: View {
                 DevicePreview(
                     page: page,
                     pageIndex: store.selectedPageIndex ?? 0,
-                    pageCount: store.profile.pages.count,
+                    pageNames: store.profile.pages.map(\.name),
                     temperatureUnit: store.profile.temperatureUnit,
                     selectedControlID: store.selectedControlID,
                     onSelect: { id in
@@ -477,12 +488,23 @@ private struct ModulesPanel: View {
                 }
             }
         }
+        .onReceive(catalog.$availableModules) { modules in
+            guard !modules.isEmpty else { return }
+            status = availabilityStatus(for: modules)
+        }
+    }
+
+    private func availabilityStatus(for modules: [PaperModuleListing]) -> String {
+        let updateCount = modules.filter(catalog.hasUpdate).count
+        return updateCount == 0
+            ? "\(modules.count) module(s) available. Everything is current."
+            : "\(updateCount) module update\(updateCount == 1 ? "" : "s") available."
     }
 
     private func moduleCard(_ module: PaperModuleListing) -> some View {
         let installed = catalog.isInstalled(module)
         let hasOlderVersion = catalog.hasUpdate(module)
-        let pageTemplates = installed ? catalog.installedModule(id: module.id)?.pages ?? [] : []
+        let pageTemplates = catalog.installedModule(id: module.id)?.pages ?? []
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -541,20 +563,8 @@ private struct ModulesPanel: View {
         status = "Loading the module catalog..."
         do {
             try await catalog.refresh()
-            var updatedModuleCount = 0
-            var updatedPageCount = 0
-            for listing in catalog.availableModules where catalog.hasUpdate(listing) {
-                installingID = listing.id
-                let module = try await catalog.install(listing)
-                updatedPageCount += store.updateModulePages(from: module)
-                updatedModuleCount += 1
-            }
-            installingID = nil
-            status = updatedModuleCount == 0
-                ? "\(catalog.availableModules.count) module(s) available"
-                : "Updated \(updatedModuleCount) module(s) and \(updatedPageCount) linked page(s)."
+            status = availabilityStatus(for: catalog.availableModules)
         } catch {
-            installingID = nil
             status = "Catalog unavailable: \(error.localizedDescription)"
         }
     }
@@ -596,7 +606,7 @@ private struct ControlInspector: View {
     let onDelete: () -> Void
 
     private let mediaCommands = [
-        ("playPause", "Play / Pause"), ("previous", "Previous"), ("next", "Next"),
+        ("playPause", "Play / Pause"), ("previous", "Previous"), ("next", "Next"), ("seek", "Seek"),
         ("volumeDown", "Volume Down"), ("volume", "Volume"),
         ("mute", "Mute"), ("volumeUp", "Volume Up"),
     ]
@@ -642,6 +652,16 @@ private struct ControlInspector: View {
                     }
                     Toggle("Toggle button", isOn: toggleButtonBinding)
                         .disabled(control.kind != .button)
+                    if control.kind == .slider {
+                        Toggle("Outline", isOn: sliderOutlineEnabledBinding)
+                        if control.sliderOutlineInsetPixels != nil {
+                            Stepper(
+                                "Outline inset: \(sliderOutlineInsetBinding.wrappedValue) pixels",
+                                value: sliderOutlineInsetBinding,
+                                in: 1...32
+                            )
+                        }
+                    }
                 }
 
                 if control.kind == .textBox {
@@ -1464,6 +1484,20 @@ private struct ControlInspector: View {
         )
     }
 
+    private var sliderOutlineEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { control.sliderOutlineInsetPixels != nil },
+            set: { control.sliderOutlineInsetPixels = $0 ? 3 : nil }
+        )
+    }
+
+    private var sliderOutlineInsetBinding: Binding<Int> {
+        Binding(
+            get: { control.sliderOutlineInsetPixels ?? 3 },
+            set: { control.sliderOutlineInsetPixels = min(max($0, 1), 32) }
+        )
+    }
+
     private var volumePercentageBinding: Binding<Double> {
         Binding(
             get: { Double(volumePercentage) },
@@ -1708,7 +1742,7 @@ private extension Comparable {
 private struct DevicePreview: View {
     let page: RemotePage
     let pageIndex: Int
-    let pageCount: Int
+    let pageNames: [String]
     let temperatureUnit: RemoteTemperatureUnit
     let selectedControlID: UUID?
     let onSelect: (UUID) -> Void
@@ -1770,9 +1804,26 @@ private struct DevicePreview: View {
                     }
                 }
 
-                Text("<  \(pageIndex + 1) / \(max(pageCount, 1))  >")
-                    .font(.system(size: 14 * scale, weight: .semibold, design: .monospaced))
-                    .position(x: 270 * scale, y: 902 * scale)
+                HStack(alignment: .bottom, spacing: 0) {
+                    ForEach(pageNames.indices, id: \.self) { index in
+                        Text(pageNames[index])
+                            .font(.system(size: max(6, 11 * scale), weight: .bold, design: .rounded))
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.5)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(index == pageIndex ? .white : .black)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(index == pageIndex ? Color.black : Color.white)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 7 * scale)
+                                    .stroke(Color.black, lineWidth: max(1, scale))
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 7 * scale))
+                            .frame(height: (index == pageIndex ? 68 : 60) * scale)
+                    }
+                }
+                .frame(width: 492 * scale, height: 68 * scale, alignment: .bottom)
+                .position(x: 270 * scale, y: 884 * scale)
             }
             .frame(width: width, height: height)
             .overlay(Rectangle().stroke(.black, lineWidth: 1))
@@ -1884,7 +1935,12 @@ private struct PreviewControl: View {
                         .fill(.black)
                         .frame(width: geometry.size.width * CGFloat(min(max(control.action.value, 0), 255)) / 255)
                 }
-                .padding(3 * scale)
+                .padding((control.sliderOutlineInsetPixels == nil ? 3 : 1) * scale)
+                if let inset = control.sliderOutlineInsetPixels {
+                    RoundedRectangle(cornerRadius: max(2, 9 * scale - CGFloat(inset) * scale / 2))
+                        .fill(Color.white)
+                        .padding(CGFloat(inset) * scale)
+                }
                 RoundedRectangle(cornerRadius: 9 * scale).stroke(.black, lineWidth: max(1, scale))
             } else if control.kind != .textBox {
                 RoundedRectangle(cornerRadius: 9 * scale).fill(.white.opacity(0.28))
@@ -1895,8 +1951,10 @@ private struct PreviewControl: View {
                     VStack(spacing: 4 * scale) {
                         Text(openBuildsAxis)
                             .font(.system(size: 10 * scale, weight: .bold))
-                        Text("0.000 \(openBuildsUnits)")
+                        Text("-123.456 \(openBuildsUnits)")
                             .font(.system(size: 18 * scale, weight: .semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.55)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
@@ -1910,12 +1968,21 @@ private struct PreviewControl: View {
                 }
                 RoundedRectangle(cornerRadius: 9 * scale).stroke(.black, lineWidth: max(1, scale))
             } else if control.kind == .slider {
-                HStack(spacing: 8 * scale) {
-                    RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                        .frame(width: 28 * scale, height: 28 * scale)
-                    Text(control.title).lineLimit(1)
+                if control.action.type == .macMedia && control.action.text == "seek" {
+                    Text(textBoxPreview)
+                        .font(.system(size: textBoxSize * scale, weight: .semibold))
+                        .multilineTextAlignment(textBoxTextAlignment)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: textBoxFrameAlignment)
+                        .padding(8 * scale)
+                        .clipped()
+                } else {
+                    HStack(spacing: 8 * scale) {
+                        RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
+                            .frame(width: 28 * scale, height: 28 * scale)
+                        Text(control.title).lineLimit(1)
+                    }
+                    .font(.system(size: 15 * scale, weight: .semibold))
                 }
-                .font(.system(size: 15 * scale, weight: .semibold))
             } else if controllerCompact {
                 VStack(spacing: 5 * scale) {
                     RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)

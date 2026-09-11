@@ -4,7 +4,7 @@
   "id": "media-controls",
   "name": "Media Controls",
   "summary": "Playback and volume controls for your computer.",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "author": "paperGIF",
   "controls": [
     {
@@ -42,6 +42,36 @@
           "text": "playPause",
           "value": 0,
           "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "playback-position",
+      "category": "Media Controls",
+      "detail": "Show the current track and seek through playback",
+      "control": {
+        "id": "c6d5e63b-e8aa-4bf4-9229-1e3bb7a86729",
+        "title": "Now Playing",
+        "symbol": "music.note",
+        "tintHex": "197248",
+        "kind": "slider",
+        "gridWidth": 2,
+        "sliderOutlineInsetPixels": 3,
+        "action": {
+          "type": "macMedia",
+          "host": "",
+          "text": "seek",
+          "value": 0,
+          "modifiers": []
+        },
+        "textBox": {
+          "source": "nowPlaying",
+          "sourceText": "",
+          "placeholder": "Nothing Playing",
+          "textSize": "autoFit",
+          "horizontalAlignment": "center",
+          "verticalAlignment": "center",
+          "refreshIntervalSeconds": 60
         }
       }
     },
@@ -119,6 +149,185 @@
           "value": 0,
           "modifiers": []
         }
+      }
+    },
+    {
+      "id": "mute",
+      "category": "Media Controls",
+      "detail": "Toggle computer audio mute",
+      "control": {
+        "id": "ac72919e-92d1-4c4c-8988-9c6a342bbec1",
+        "title": "Mute",
+        "symbol": "speaker.slash.fill",
+        "tintHex": "A61B1B",
+        "kind": "button",
+        "action": {
+          "type": "macMedia",
+          "host": "",
+          "text": "mute",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    }
+  ],
+  "pages": [
+    {
+      "id": "media",
+      "detail": "Now playing, seek, transport, and volume controls arranged for quick access.",
+      "page": {
+        "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a100",
+        "name": "Media",
+        "gridColumns": 3,
+        "gridRows": 8,
+        "controls": [
+          {
+            "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a101",
+            "title": "Now Playing",
+            "symbol": "music.note",
+            "tintHex": "2F4858",
+            "kind": "slider",
+            "layoutSlot": 0,
+            "gridWidth": 3,
+            "gridHeight": 2,
+            "sliderOutlineInsetPixels": 3,
+            "action": {
+              "type": "macMedia",
+              "host": "",
+              "text": "seek",
+              "value": 0,
+              "modifiers": []
+            },
+            "textBox": {
+              "source": "nowPlaying",
+              "sourceText": "",
+              "placeholder": "Nothing Playing",
+              "textSize": "autoFit",
+              "horizontalAlignment": "center",
+              "verticalAlignment": "center",
+              "refreshIntervalSeconds": 60
+            }
+          },
+          {
+            "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a102",
+            "title": "Previous",
+            "symbol": "backward.fill",
+            "tintHex": "3568A8",
+            "kind": "button",
+            "layoutSlot": 6,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macMedia",
+              "host": "",
+              "text": "previous",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a103",
+            "title": "Play / Pause",
+            "symbol": "playpause.fill",
+            "tintHex": "197248",
+            "kind": "button",
+            "layoutSlot": 7,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macMedia",
+              "host": "",
+              "text": "playPause",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a104",
+            "title": "Next",
+            "symbol": "forward.fill",
+            "tintHex": "3568A8",
+            "kind": "button",
+            "layoutSlot": 8,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macMedia",
+              "host": "",
+              "text": "next",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a105",
+            "title": "Volume",
+            "symbol": "speaker.wave.2.fill",
+            "tintHex": "C58917",
+            "kind": "slider",
+            "layoutSlot": 15,
+            "gridWidth": 3,
+            "gridHeight": 1,
+            "action": {
+              "type": "macMedia",
+              "host": "",
+              "text": "volume",
+              "value": 128,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a106",
+            "title": "Volume Down",
+            "symbol": "speaker.fill",
+            "tintHex": "6B7280",
+            "kind": "button",
+            "layoutSlot": 18,
+            "gridWidth": 1,
+            "gridHeight": 2,
+            "action": {
+              "type": "macMedia",
+              "host": "",
+              "text": "volumeDown",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a107",
+            "title": "Volume Up",
+            "symbol": "speaker.wave.2.fill",
+            "tintHex": "C58917",
+            "kind": "button",
+            "layoutSlot": 20,
+            "gridWidth": 1,
+            "gridHeight": 2,
+            "action": {
+              "type": "macMedia",
+              "host": "",
+              "text": "volumeUp",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "3efda80f-bc30-4aa9-bf13-33f9c1f0a108",
+            "title": "Mute",
+            "symbol": "speaker.slash.fill",
+            "tintHex": "A61B1B",
+            "kind": "button",
+            "layoutSlot": 19,
+            "gridWidth": 1,
+            "gridHeight": 2,
+            "action": {
+              "type": "macMedia",
+              "host": "",
+              "text": "mute",
+              "value": 0,
+              "modifiers": []
+            }
+          }
+        ]
       }
     }
   ]

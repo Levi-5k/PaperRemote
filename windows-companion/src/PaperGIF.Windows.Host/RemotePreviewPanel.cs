@@ -29,7 +29,7 @@ internal sealed class RemotePreviewPanel : Control
 
     public Guid? SelectedControlId { get; set; }
     public int PageIndex { get; set; }
-    public int PageCount { get; set; }
+    public IReadOnlyList<string> PageNames { get; set; } = [];
     public event EventHandler<Guid>? ControlSelected;
     public event EventHandler<ControlMoveEventArgs>? ControlMoved;
 
@@ -111,14 +111,9 @@ internal sealed class RemotePreviewPanel : Control
         var headerHeight = Math.Max(30, screen.Height / 15);
         var footerHeight = Math.Max(24, screen.Height / 18);
         using var headerFont = new Font("Segoe UI Variable Display Semibold", Math.Max(8, screen.Width / 32f));
-        using var smallFont = new Font("Segoe UI Variable Text", Math.Max(7, screen.Width / 42f));
         graphics.DrawString(page?.Name ?? "Select a page", headerFont, Brushes.Black,
             new RectangleF(screen.Left + 12, screen.Top + 8, screen.Width - 24, headerHeight));
-        graphics.DrawString(
-            PageCount == 0 ? string.Empty : $"{PageIndex + 1} / {PageCount}",
-            smallFont,
-            Brushes.DimGray,
-            new RectangleF(screen.Left + 12, screen.Bottom - footerHeight, screen.Width - 24, footerHeight));
+        DrawPageTabs(graphics, screen);
 
         controlFrames.Clear();
         if (page is null)
@@ -138,6 +133,36 @@ internal sealed class RemotePreviewPanel : Control
             screen.Height - headerHeight - footerHeight);
         gridFrame = grid;
         DrawControls(graphics, grid, page);
+    }
+
+    private void DrawPageTabs(Graphics graphics, Rectangle screen)
+    {
+        if (PageNames.Count == 0)
+        {
+            return;
+        }
+        using var font = new Font("Segoe UI Variable Text Semibold", Math.Max(6, screen.Width / 49f));
+        using var outline = new Pen(Color.Black, Math.Max(1, screen.Width / 540f));
+        using var centered = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisWord,
+            FormatFlags = StringFormatFlags.LineLimit,
+        };
+        for (var index = 0; index < PageNames.Count; index++)
+        {
+            var left = 24f + index * 492f / PageNames.Count;
+            var right = 24f + (index + 1) * 492f / PageNames.Count;
+            var top = index == PageIndex ? 850 : 858;
+            var frame = ScaleFrame(screen, new RectangleF(left, top, right - left, 918 - top));
+            EditorTheme.FillRoundedRectangle(
+                graphics, index == PageIndex ? Brushes.Black : Brushes.White, frame, 4);
+            EditorTheme.DrawRoundedRectangle(graphics, outline, frame, 4);
+            graphics.DrawString(
+                PageNames[index], font, index == PageIndex ? Brushes.White : Brushes.Black,
+                Rectangle.Inflate(frame, -4, -2), centered);
+        }
     }
 
     private void DrawOpenBuildsController(Graphics graphics, Rectangle screen, RemotePage controllerPage)
@@ -309,15 +334,28 @@ internal sealed class RemotePreviewPanel : Control
         var text = control.Kind == RemoteControlKind.TextBox
             ? control.TextBox?.SourceText ?? control.Title
             : control.Title;
-        graphics.DrawString(text, titleFont, Brushes.Black, RectangleF.Inflate(frame, -7, -7), format);
         if (control.Kind == RemoteControlKind.Slider)
         {
-            var trackY = frame.Bottom - Math.Max(8, frame.Height / 4);
-            graphics.DrawLine(Pens.DimGray, frame.Left + 10, trackY, frame.Right - 10, trackY);
-            var thumbX = frame.Left + 10 + (frame.Width - 20) * Math.Clamp(control.Action.Value, 0, 255) / 255;
-            graphics.FillEllipse(Brushes.Black, thumbX - 4, trackY - 4, 8, 8);
-            graphics.DrawString(control.Action.Value.ToString(), valueFont, Brushes.DimGray, frame.Left + 5, frame.Top + 4);
+            var progress = Math.Clamp(control.Action.Value, 0, 255) / 255f;
+            var sliderFill = Rectangle.Inflate(
+                frame,
+                control.SliderOutlineInsetPixels.HasValue ? -1 : -3,
+                control.SliderOutlineInsetPixels.HasValue ? -1 : -3);
+            sliderFill.Width = Math.Max(1, (int)(sliderFill.Width * progress));
+            EditorTheme.FillRoundedRectangle(graphics, Brushes.Black, sliderFill, 4);
+            if (control.SliderOutlineInsetPixels is int outlineInset)
+            {
+                var inset = Math.Clamp(outlineInset, 1, Math.Max(1, Math.Min(frame.Width, frame.Height) / 2 - 2));
+                var outlineFrame = Rectangle.Inflate(frame, -inset, -inset);
+                EditorTheme.FillRoundedRectangle(graphics, Brushes.White, outlineFrame, Math.Max(2, 5 - inset / 2));
+            }
+            var textBrush = control.SliderOutlineInsetPixels.HasValue || progress < 0.5f
+                ? Brushes.Black : Brushes.White;
+            var contentFrame = RectangleF.Inflate(frame, -10, -7);
+            graphics.DrawString(text, titleFont, textBrush, contentFrame, format);
+            return;
         }
+        graphics.DrawString(text, titleFont, Brushes.Black, RectangleF.Inflate(frame, -7, -7), format);
     }
 
     private static (int Width, int Height) Span(RemoteControl control, int columns, int rows)

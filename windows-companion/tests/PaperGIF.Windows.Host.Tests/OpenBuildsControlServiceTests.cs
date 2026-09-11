@@ -89,4 +89,33 @@ public sealed class OpenBuildsControlServiceTests
             new OpenBuildsPosition(12.5, -3.25, 0),
             OpenBuildsControlService.ParsePosition(document.RootElement));
     }
+
+    [Fact]
+    public void ParsesGrblRunStatusFromStatusPayload()
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(
+            """{"comms":{"runStatus":"Hold:0"}}""");
+
+        Assert.Equal("Hold:0", OpenBuildsControlService.ParseRunStatus(document.RootElement));
+    }
+
+    [Theory]
+    [InlineData("jogXPositive", "Idle", true)]
+    [InlineData("jogXPositive", "Run", false)]
+    [InlineData("zeroX", "Hold:0", false)]
+    [InlineData("home", "Alarm", true)]
+    [InlineData("home", "Run", false)]
+    [InlineData("unlock", "Alarm", true)]
+    [InlineData("unlock", "Idle", false)]
+    [InlineData("pause", "Run", true)]
+    [InlineData("resume", "Hold:0", true)]
+    [InlineData("resume", "Door:0", true)]
+    [InlineData("resume", "Run", false)]
+    [InlineData("stop", null, true)]
+    [InlineData("abort", "Run", true)]
+    [InlineData("cancelJog", "Jog", true)]
+    public void AllowsCommandsOnlyInCompatibleGrblStates(string command, string? runStatus, bool expected)
+    {
+        Assert.Equal(expected, OpenBuildsCommandPolicy.Allows(command, runStatus));
+    }
 }

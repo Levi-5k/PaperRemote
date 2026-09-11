@@ -24,5 +24,11 @@
     <Content Include="../../../modules/openbuilds-control.json" Link="openbuilds-control.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="../../../modules/presentation-controls.json" Link="presentation-controls.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="../../../modules/wled-scenes.json" Link="wled-scenes.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

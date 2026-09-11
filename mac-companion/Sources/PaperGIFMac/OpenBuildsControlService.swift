@@ -119,6 +119,27 @@ enum OpenBuildsCommandMapper {
     }
 }
 
+enum OpenBuildsCommandPolicy {
+    static func allows(command: String, runStatus: String?) -> Bool {
+        if ["cancelJog", "stop", "abort"].contains(command) {
+            return true
+        }
+        guard let normalized = runStatus?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(), !normalized.isEmpty else {
+            return false
+        }
+        let state = normalized.split(separator: ":", maxSplits: 1).first.map(String.init) ?? normalized
+        return switch command {
+        case "pause": state == "run"
+        case "resume": state == "hold" || normalized == "door:0"
+        case "home": state == "idle" || state == "alarm"
+        case "unlock": state == "alarm"
+        default: state == "idle"
+        }
+    }
+}
+
 final class OpenBuildsControlService {
     private static let defaultPorts = [3_000, 3_020, 3_200, 3_220]
     private let positionSessionsLock = NSLock()
@@ -134,6 +155,12 @@ final class OpenBuildsControlService {
             return false
         }
         for endpoint in Self.endpoints(host: host ?? "") where isOpenBuildsControl(endpoint) {
+            if !OpenBuildsCommandPolicy.allows(command: command, runStatus: nil) {
+                let runStatus = positionSession(for: endpoint).runStatus()
+                guard OpenBuildsCommandPolicy.allows(command: command, runStatus: runStatus) else {
+                    return false
+                }
+            }
             return emit(emission, to: endpoint)
         }
         return false
@@ -271,6 +298,13 @@ final class OpenBuildsControlService {
         return OpenBuildsPosition(x: x, y: y, z: z)
     }
 
+    static func runStatus(from status: [String: Any]) -> String? {
+        guard let comms = status["comms"] as? [String: Any],
+              let runStatus = comms["runStatus"] as? String else { return nil }
+        let normalized = runStatus.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
     private static func number(_ value: Any?) -> Double? {
         if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return Double(string) }
@@ -286,6 +320,8 @@ private final class OpenBuildsPositionSession {
     private var connectionActive = false
     private var latestPosition: OpenBuildsPosition?
     private var latestPositionAt = Date.distantPast
+    private var latestRunStatus: String?
+    private var latestRunStatusAt = Date.distantPast
 
     init(endpoint: URL) {
         let callbackQueue = DispatchQueue(label: "paperGIF.openbuilds.status.\(endpoint.port ?? 0)")
@@ -298,9 +334,11 @@ private final class OpenBuildsPositionSession {
         ])
         socket = manager.defaultSocket
         socket.on("status") { [weak self] data, _ in
-            guard let payload = data.first as? [String: Any],
-                  let position = OpenBuildsControlService.position(from: payload) else { return }
-            self?.publish(position)
+            guard let payload = data.first as? [String: Any] else { return }
+            self?.publish(
+                position: OpenBuildsControlService.position(from: payload),
+                runStatus: OpenBuildsControlService.runStatus(from: payload)
+            )
         }
         socket.on(clientEvent: .connect) { [weak self] _, _ in
             self?.setConnectionActive(true)
@@ -346,10 +384,46 @@ private final class OpenBuildsPositionSession {
         return result
     }
 
-    private func publish(_ position: OpenBuildsPosition) {
+    func runStatus() -> String? {
         condition.lock()
-        latestPosition = position
-        latestPositionAt = Date()
+        if let latestRunStatus, Date().timeIntervalSince(latestRunStatusAt) <= Self.freshness {
+            condition.unlock()
+            return latestRunStatus
+        }
+        let shouldConnect = !connectionActive
+        if shouldConnect {
+            connectionActive = true
+        }
+        condition.unlock()
+
+        if shouldConnect {
+            socket.connect(withPayload: nil, timeoutAfter: 3) { [weak self] in
+                self?.setConnectionActive(false)
+            }
+        }
+
+        condition.lock()
+        let deadline = Date().addingTimeInterval(3.5)
+        while Date().timeIntervalSince(latestRunStatusAt) > Self.freshness &&
+            connectionActive && condition.wait(until: deadline) {}
+        let result = Date().timeIntervalSince(latestRunStatusAt) <= Self.freshness
+            ? latestRunStatus : nil
+        condition.unlock()
+        return result
+    }
+
+    private func publish(position: OpenBuildsPosition?, runStatus: String?) {
+        guard position != nil || runStatus != nil else { return }
+        condition.lock()
+        let now = Date()
+        if let position {
+            latestPosition = position
+            latestPositionAt = now
+        }
+        if let runStatus {
+            latestRunStatus = runStatus
+            latestRunStatusAt = now
+        }
         condition.broadcast()
         condition.unlock()
     }

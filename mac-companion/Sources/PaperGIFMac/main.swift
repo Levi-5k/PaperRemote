@@ -42,13 +42,33 @@ private struct TextSourceResponse: Encodable {
     let text: String
     let available: Bool
     let value: Int?
+    let elapsedMilliseconds: Int?
+    let durationMilliseconds: Int?
+    let playing: Bool?
 
-    init(id: String, text: String, available: Bool, value: Int? = nil) {
+    init(
+        id: String,
+        text: String,
+        available: Bool,
+        value: Int? = nil,
+        elapsedMilliseconds: Int? = nil,
+        durationMilliseconds: Int? = nil,
+        playing: Bool? = nil
+    ) {
         self.id = id
         self.text = text
         self.available = available
         self.value = value
+        self.elapsedMilliseconds = elapsedMilliseconds
+        self.durationMilliseconds = durationMilliseconds
+        self.playing = playing
     }
+}
+
+private struct MediaTimelineSnapshot {
+    let elapsedMilliseconds: Int
+    let durationMilliseconds: Int
+    let isPlaying: Bool
 }
 
 private struct InstalledApplication: Encodable {
@@ -413,6 +433,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let openBuildsService = OpenBuildsControlService()
     private var configuration = CompanionConfiguration.initial
     private var editorStore: RemoteEditorStore?
+    private var moduleCatalog: ModuleCatalog?
     private var editorWindowController: RemoteEditorWindowController?
     private var nowPlayingSubscriptions: [String: Set<String>] = [:]
     private var playbackStateSubscriptions: [String: Set<String>] = [:]
@@ -438,7 +459,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         startOutputVolumeObservation()
         restartServer()
         let store = controlsEditorStore()
-        Task { await refreshInstalledModules(in: store) }
+        let catalog = controlsModuleCatalog()
+        Task { await checkForModuleUpdates(in: catalog) }
         if netHomeService.isSignedIn {
             Task { await store.refreshNetHomeUnits() }
         } else {
@@ -630,7 +652,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func showControlsEditor() {
         if editorWindowController == nil {
-            editorWindowController = RemoteEditorWindowController(store: controlsEditorStore())
+            editorWindowController = RemoteEditorWindowController(
+                store: controlsEditorStore(),
+                moduleCatalog: controlsModuleCatalog()
+            )
         }
         editorWindowController?.showWindow(nil)
         editorWindowController?.window?.makeKeyAndOrderFront(nil)
@@ -653,14 +678,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return store
     }
 
-    @MainActor private func refreshInstalledModules(in store: RemoteEditorStore) async {
+    @MainActor private func controlsModuleCatalog() -> ModuleCatalog {
+        if let moduleCatalog {
+            return moduleCatalog
+        }
         let catalog = ModuleCatalog()
+        moduleCatalog = catalog
+        return catalog
+    }
+
+    @MainActor private func checkForModuleUpdates(in catalog: ModuleCatalog) async {
         do {
             try await catalog.refresh()
-            for listing in catalog.availableModules where catalog.hasUpdate(listing) {
-                let module = try await catalog.install(listing)
-                store.updateModulePages(from: module)
-            }
         } catch {
             // Module refresh is best effort; the editor exposes errors and an explicit retry.
         }
@@ -766,8 +795,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let result: RemoteActionResult
         switch request.type {
         case "macMedia":
-            let succeeded = request.text == "volume"
-                ? setOutputVolume(request.value)
+            let succeeded = request.text == "volume" ? setOutputVolume(request.value)
+                : request.text == "seek" ? seekMedia(to: request.value)
                 : sendMediaCommand(request.text)
             result = (succeeded, succeeded)
         case "macKey":
@@ -815,7 +844,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 systemSymbolName: result.succeeded ? "checkmark.rectangle" : "exclamationmark.rectangle",
                 accessibilityDescription: result.succeeded ? "Last action succeeded" : "Last action failed"
             )
-            if result.succeeded && request.type == "macMedia" && request.text == "playPause" {
+            if result.succeeded && request.type == "macMedia" &&
+                ["playPause", "previous", "next", "seek"].contains(request.text) {
                 refreshPlaybackStateAfterCommand()
             }
         }
@@ -865,12 +895,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         })
         let items = request.items.map { item -> TextSourceResponse in
             if item.source == "playbackState" {
-                let isPlaying = playbackIsPlaying()
+                let timeline = applicationMediaTimeline() ?? mediaRemoteTimeline()
+                let isPlaying = timeline?.isPlaying ?? playbackIsPlaying()
                 return TextSourceResponse(
                     id: String(item.id.prefix(40)),
                     text: "",
                     available: isPlaying != nil,
-                    value: isPlaying.map { $0 ? 1 : 0 }
+                    value: isPlaying.map { $0 ? 1 : 0 },
+                    elapsedMilliseconds: timeline?.elapsedMilliseconds,
+                    durationMilliseconds: timeline?.durationMilliseconds,
+                    playing: timeline?.isPlaying
                 )
             }
             if item.source == "outputVolume" {
@@ -882,6 +916,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     value: value
                 )
             }
+            if item.source == "nowPlaying" {
+                let timeline = applicationMediaTimeline() ?? mediaRemoteTimeline()
+                let output = nowPlayingText()?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let available = output?.isEmpty == false
+                return TextSourceResponse(
+                    id: String(item.id.prefix(40)),
+                    text: boundedUTF8(available ? output! : item.placeholder, maximumBytes: 192),
+                    available: available,
+                    value: timeline.map {
+                        Int(($0.elapsedMilliseconds * 255) / max(1, $0.durationMilliseconds))
+                    },
+                    elapsedMilliseconds: timeline?.elapsedMilliseconds,
+                    durationMilliseconds: timeline?.durationMilliseconds,
+                    playing: timeline?.isPlaying
+                )
+            }
             let output: String?
             switch item.source {
             case "macScript":
@@ -890,8 +940,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     : nil
             case "macShortcut":
                 output = commandOutput("/usr/bin/shortcuts", arguments: ["run", item.sourceText])
-            case "nowPlaying":
-                output = nowPlayingText()
             case "openBuildsPosition":
                 let components = item.sourceText.split(separator: "|", maxSplits: 2).map(String.init)
                 guard components.count >= 2,
@@ -986,6 +1034,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let text = normalized?.isEmpty == false ? boundedUTF8(normalized!, maximumBytes: 192) : nil
         guard text != lastPushedNowPlayingText else { return }
         lastPushedNowPlayingText = text
+        let timeline = applicationMediaTimeline() ?? mediaRemoteTimeline()
 
         for (host, controlIDs) in nowPlayingSubscriptions where !controlIDs.isEmpty {
             var components = URLComponents()
@@ -995,7 +1044,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             components.path = "/text-source/update"
             guard let url = components.url else { continue }
             let body = TextSourceBatchResponse(items: controlIDs.map {
-                TextSourceResponse(id: $0, text: text ?? "", available: text != nil)
+                TextSourceResponse(
+                    id: $0,
+                    text: text ?? "",
+                    available: text != nil,
+                    value: timeline.map {
+                        Int(($0.elapsedMilliseconds * 255) / max(1, $0.durationMilliseconds))
+                    },
+                    elapsedMilliseconds: timeline?.elapsedMilliseconds,
+                    durationMilliseconds: timeline?.durationMilliseconds,
+                    playing: timeline?.isPlaying
+                )
             })
             guard let payload = try? JSONEncoder().encode(body) else { continue }
             var request = URLRequest(url: url, timeoutInterval: 3)
@@ -1008,7 +1067,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pushPlaybackStateIfChanged() {
-        let playbackState = playbackIsPlaying()
+        let timeline = applicationMediaTimeline() ?? mediaRemoteTimeline()
+        let playbackState = timeline?.isPlaying ?? playbackIsPlaying()
         guard !hasPushedPlaybackState || playbackState != lastPushedPlaybackState else { return }
         hasPushedPlaybackState = true
         lastPushedPlaybackState = playbackState
@@ -1024,7 +1084,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     id: $0,
                     text: "",
                     available: playbackState != nil,
-                    value: playbackState.map { $0 ? 1 : 0 }
+                    value: playbackState.map { $0 ? 1 : 0 },
+                    elapsedMilliseconds: timeline?.elapsedMilliseconds,
+                    durationMilliseconds: timeline?.durationMilliseconds,
+                    playing: timeline?.isPlaying
                 )
             })
             guard let payload = try? JSONEncoder().encode(body) else { continue }
@@ -1312,6 +1375,92 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return result
     }
 
+    private func applicationMediaTimeline() -> MediaTimelineSnapshot? {
+        let applications = [
+            (name: "Music", bundleID: "com.apple.Music", durationIsMilliseconds: false),
+            (name: "Spotify", bundleID: "com.spotify.client", durationIsMilliseconds: true),
+        ]
+        for application in applications where
+            !NSRunningApplication.runningApplications(withBundleIdentifier: application.bundleID).isEmpty {
+            guard requestAutomationPermission(for: application.bundleID) else { continue }
+            let durationExpression = application.durationIsMilliseconds
+                ? "duration of current track"
+                : "(duration of current track) * 1000"
+            let script = """
+            if application "\(application.name)" is running then
+                tell application "\(application.name)"
+                    set currentState to player state
+                    if currentState is playing or currentState is paused then
+                        set elapsedMilliseconds to ((player position) * 1000) as integer
+                        set durationMilliseconds to (\(durationExpression)) as integer
+                        set playingText to "false"
+                        if currentState is playing then set playingText to "true"
+                        return (elapsedMilliseconds as text) & "|" & ¬
+                            (durationMilliseconds as text) & "|" & playingText
+                    end if
+                end tell
+            end if
+            """
+            guard let output = appleScriptOutput(script) else { continue }
+            let components = output.split(separator: "|", omittingEmptySubsequences: false)
+            guard components.count == 3,
+                  let elapsedMilliseconds = Int(components[0]),
+                  let durationMilliseconds = Int(components[1]),
+                  durationMilliseconds > 0 else {
+                continue
+            }
+            return MediaTimelineSnapshot(
+                elapsedMilliseconds: min(max(0, elapsedMilliseconds), durationMilliseconds),
+                durationMilliseconds: durationMilliseconds,
+                isPlaying: components[2] == "true"
+            )
+        }
+        return nil
+    }
+
+    private func mediaRemoteTimeline() -> MediaTimelineSnapshot? {
+        let path = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+        guard let handle = dlopen(path, RTLD_LAZY),
+              let symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingInfo") else {
+            return nil
+        }
+        defer { dlclose(handle) }
+
+        typealias Callback = @convention(block) (CFDictionary?) -> Void
+        typealias GetNowPlayingInfo = @convention(c) (DispatchQueue, Callback) -> Void
+        let getNowPlayingInfo = unsafeBitCast(symbol, to: GetNowPlayingInfo.self)
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: MediaTimelineSnapshot?
+        let callback: Callback = { information in
+            defer { semaphore.signal() }
+            guard let values = information as? [String: Any] else { return }
+            let elapsed = values["kMRMediaRemoteNowPlayingInfoElapsedTime"] as? NSNumber
+            let duration = values["kMRMediaRemoteNowPlayingInfoDuration"] as? NSNumber
+            let playbackRate = values["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? NSNumber
+            guard values["kMRMediaRemoteNowPlayingInfoTitle"] != nil,
+                  let elapsed,
+                  let duration,
+                  let playbackRate,
+                  elapsed.doubleValue.isFinite,
+                  duration.doubleValue.isFinite,
+                  duration.doubleValue > 0 else {
+                return
+            }
+            let durationMilliseconds = max(0, Int((duration.doubleValue * 1_000).rounded()))
+            let elapsedMilliseconds = min(
+                durationMilliseconds,
+                max(0, Int((elapsed.doubleValue * 1_000).rounded())))
+            result = MediaTimelineSnapshot(
+                elapsedMilliseconds: elapsedMilliseconds,
+                durationMilliseconds: durationMilliseconds,
+                isPlaying: playbackRate.doubleValue > 0
+            )
+        }
+        getNowPlayingInfo(DispatchQueue.global(qos: .utility), callback)
+        guard semaphore.wait(timeout: .now() + 1) == .success else { return nil }
+        return result
+    }
+
     private func appleScriptOutput(_ source: String) -> String? {
         var error: NSDictionary?
         guard let result = NSAppleScript(source: source)?.executeAndReturnError(&error) else {
@@ -1387,6 +1536,28 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             return false
         }
+    }
+
+    private func seekMedia(to value: Int) -> Bool {
+        let fraction = Double(value.clamped(to: 0...255)) / 255
+        let applications = [
+            (name: "Music", bundleID: "com.apple.Music", durationIsMilliseconds: false),
+            (name: "Spotify", bundleID: "com.spotify.client", durationIsMilliseconds: true),
+        ]
+        for application in applications where
+            !NSRunningApplication.runningApplications(withBundleIdentifier: application.bundleID).isEmpty {
+            guard requestAutomationPermission(for: application.bundleID) else { continue }
+            let divisor = application.durationIsMilliseconds ? " / 1000" : ""
+            let script = """
+            tell application "\(application.name)"
+                set player position to ((duration of current track)\(divisor)) * \(fraction)
+            end tell
+            """
+            if appleScriptOutput(script) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     private func sendKey(_ key: String, modifiers: [String]) -> Bool {

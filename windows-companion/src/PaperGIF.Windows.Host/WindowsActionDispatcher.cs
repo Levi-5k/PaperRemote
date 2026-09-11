@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Windows.Media.Control;
 
 namespace PaperGIF.Windows.Host;
 
@@ -58,6 +59,10 @@ internal sealed class WindowsActionDispatcher(
         {
             return WindowsTextSourceResolver.AudioEndpointVolume.TryToggleMute();
         }
+        if (request.Text == "seek")
+        {
+            return TrySeek(request.Value);
+        }
 
         byte virtualKey = request.Text switch
         {
@@ -73,6 +78,46 @@ internal sealed class WindowsActionDispatcher(
 
         PressAndRelease(virtualKey);
         return true;
+    }
+
+    private static bool TrySeek(int value)
+    {
+        try
+        {
+            var manager = GlobalSystemMediaTransportControlsSessionManager
+                .RequestAsync()
+                .AsTask()
+                .GetAwaiter()
+                .GetResult();
+            var sessions = manager.GetSessions();
+            var session = manager.GetCurrentSession()
+                ?? sessions.FirstOrDefault(candidate =>
+                    candidate.GetPlaybackInfo().PlaybackStatus ==
+                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                ?? sessions.FirstOrDefault();
+            if (session is null)
+            {
+                return false;
+            }
+            var timeline = session.GetTimelineProperties();
+            var duration = timeline.EndTime - timeline.StartTime;
+            if (duration <= TimeSpan.Zero)
+            {
+                return false;
+            }
+            var fraction = Math.Clamp(value, 0, 255) / 255d;
+            var position = timeline.StartTime + TimeSpan.FromTicks(
+                (long)(duration.Ticks * fraction));
+            return session.TryChangePlaybackPositionAsync(position.Ticks)
+                .AsTask()
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception exception) when (
+            exception is COMException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static bool SendKey(string key, IReadOnlyCollection<string> modifiers)

@@ -1,0 +1,277 @@
+{
+  "$schema": "../protocol/module-manifest-v1.schema.json",
+  "schemaVersion": 1,
+  "id": "presentation-controls",
+  "name": "Presentation Controls",
+  "summary": "Cross-platform slide controls for presenting from your computer.",
+  "version": "1.0.0",
+  "author": "paperGIF",
+  "controls": [
+    {
+      "id": "start-presentation",
+      "category": "Presentation",
+      "detail": "Start the presentation from the beginning",
+      "control": {
+        "id": "8c817d12-0013-47da-9130-41a1cc35e001",
+        "title": "Start",
+        "symbol": "play.fill",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": {
+          "type": "macKey",
+          "host": "",
+          "text": "f5",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "previous-slide",
+      "category": "Presentation",
+      "detail": "Go to the previous slide",
+      "control": {
+        "id": "8c817d12-0013-47da-9130-41a1cc35e002",
+        "title": "Previous",
+        "symbol": "arrow.left",
+        "tintHex": "3568A8",
+        "kind": "button",
+        "action": {
+          "type": "macKey",
+          "host": "",
+          "text": "left",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "blank-screen",
+      "category": "Presentation",
+      "detail": "Toggle a black presentation screen",
+      "control": {
+        "id": "8c817d12-0013-47da-9130-41a1cc35e003",
+        "title": "Blank",
+        "symbol": "stop.fill",
+        "tintHex": "2F4858",
+        "kind": "button",
+        "action": {
+          "type": "macKey",
+          "host": "",
+          "text": "b",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "next-slide",
+      "category": "Presentation",
+      "detail": "Go to the next slide",
+      "control": {
+        "id": "8c817d12-0013-47da-9130-41a1cc35e004",
+        "title": "Next",
+        "symbol": "arrow.right",
+        "tintHex": "3568A8",
+        "kind": "button",
+        "action": {
+          "type": "macKey",
+          "host": "",
+          "text": "right",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "first-slide",
+      "category": "Presentation",
+      "detail": "Jump to the first slide",
+      "control": {
+        "id": "8c817d12-0013-47da-9130-41a1cc35e005",
+        "title": "First",
+        "symbol": "backward.fill",
+        "tintHex": "6B7280",
+        "kind": "button",
+        "action": {
+          "type": "macKey",
+          "host": "",
+          "text": "home",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "exit-presentation",
+      "category": "Presentation",
+      "detail": "Exit presentation mode",
+      "control": {
+        "id": "8c817d12-0013-47da-9130-41a1cc35e006",
+        "title": "Exit",
+        "symbol": "xmark",
+        "tintHex": "A61B1B",
+        "kind": "button",
+        "action": {
+          "type": "macKey",
+          "host": "",
+          "text": "escape",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "last-slide",
+      "category": "Presentation",
+      "detail": "Jump to the last slide",
+      "control": {
+        "id": "8c817d12-0013-47da-9130-41a1cc35e007",
+        "title": "Last",
+        "symbol": "forward.fill",
+        "tintHex": "6B7280",
+        "kind": "button",
+        "action": {
+          "type": "macKey",
+          "host": "",
+          "text": "end",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    }
+  ],
+  "pages": [
+    {
+      "id": "presentation",
+      "detail": "A complete presentation deck with start, navigation, blank-screen, and exit controls.",
+      "page": {
+        "id": "8c817d12-0013-47da-9130-41a1cc35e100",
+        "name": "Presentation",
+        "gridColumns": 3,
+        "gridRows": 8,
+        "controls": [
+          {
+            "id": "8c817d12-0013-47da-9130-41a1cc35e101",
+            "title": "Start Presentation",
+            "symbol": "play.fill",
+            "tintHex": "197248",
+            "kind": "button",
+            "layoutSlot": 0,
+            "gridWidth": 3,
+            "gridHeight": 2,
+            "action": {
+              "type": "macKey",
+              "host": "",
+              "text": "f5",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "8c817d12-0013-47da-9130-41a1cc35e102",
+            "title": "Previous",
+            "symbol": "arrow.left",
+            "tintHex": "3568A8",
+            "kind": "button",
+            "layoutSlot": 6,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macKey",
+              "host": "",
+              "text": "left",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "8c817d12-0013-47da-9130-41a1cc35e103",
+            "title": "Blank",
+            "symbol": "stop.fill",
+            "tintHex": "2F4858",
+            "kind": "button",
+            "layoutSlot": 7,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macKey",
+              "host": "",
+              "text": "b",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "8c817d12-0013-47da-9130-41a1cc35e104",
+            "title": "Next",
+            "symbol": "arrow.right",
+            "tintHex": "3568A8",
+            "kind": "button",
+            "layoutSlot": 8,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macKey",
+              "host": "",
+              "text": "right",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "8c817d12-0013-47da-9130-41a1cc35e105",
+            "title": "First",
+            "symbol": "backward.fill",
+            "tintHex": "6B7280",
+            "kind": "button",
+            "layoutSlot": 15,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macKey",
+              "host": "",
+              "text": "home",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "8c817d12-0013-47da-9130-41a1cc35e106",
+            "title": "Exit",
+            "symbol": "xmark",
+            "tintHex": "A61B1B",
+            "kind": "button",
+            "layoutSlot": 16,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macKey",
+              "host": "",
+              "text": "escape",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "8c817d12-0013-47da-9130-41a1cc35e107",
+            "title": "Last",
+            "symbol": "forward.fill",
+            "tintHex": "6B7280",
+            "kind": "button",
+            "layoutSlot": 17,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "macKey",
+              "host": "",
+              "text": "end",
+              "value": 0,
+              "modifiers": []
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -73,6 +73,10 @@ final class ModuleCatalog: ObservableObject {
         }
     }
 
+    var availableUpdates: [PaperModuleListing] {
+        availableModules.filter(hasUpdate)
+    }
+
     func isInstalled(_ listing: PaperModuleListing) -> Bool {
         guard let installedVersion = installedByID[listing.id]?.version else { return false }
         return !Self.isVersion(listing.version, newerThan: installedVersion)

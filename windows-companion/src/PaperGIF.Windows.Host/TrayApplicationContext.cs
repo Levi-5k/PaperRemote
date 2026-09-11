@@ -97,7 +97,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
         };
         activity.ActionRecorded += HandleActionRecorded;
-        _ = RefreshInstalledModulesAsync(moduleCatalog);
+        _ = CheckForModuleUpdatesAsync(moduleCatalog);
         notifyIcon.ShowBalloonTip(
             3_000,
             "paperGIF",
@@ -105,16 +105,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ToolTipIcon.Info);
     }
 
-    private async Task RefreshInstalledModulesAsync(ModuleCatalogService moduleCatalog)
+    private static async Task CheckForModuleUpdatesAsync(ModuleCatalogService moduleCatalog)
     {
         try
         {
             await moduleCatalog.RefreshAsync();
-            foreach (var listing in moduleCatalog.AvailableModules.Where(moduleCatalog.HasUpdate))
-            {
-                var module = await moduleCatalog.InstallAsync(listing);
-                editorStore.UpdateModulePages(module);
-            }
         }
         catch (Exception exception) when (exception is HttpRequestException or
             TaskCanceledException or System.Text.Json.JsonException or IOException)

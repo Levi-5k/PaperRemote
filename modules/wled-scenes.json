@@ -1,0 +1,314 @@
+{
+  "$schema": "../protocol/module-manifest-v1.schema.json",
+  "schemaVersion": 1,
+  "id": "wled-scenes",
+  "name": "WLED Scenes",
+  "summary": "Power, brightness, and preset scenes for a WLED light.",
+  "version": "1.0.0",
+  "author": "paperGIF",
+  "controls": [
+    {
+      "id": "power",
+      "category": "WLED Scenes",
+      "detail": "Toggle the WLED light at wled.local",
+      "control": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4001",
+        "title": "Power",
+        "symbol": "power",
+        "tintHex": "F2C14E",
+        "kind": "button",
+        "action": {
+          "type": "wledPower",
+          "host": "wled.local",
+          "text": "toggle",
+          "value": 0,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "brightness",
+      "category": "WLED Scenes",
+      "detail": "Set the WLED brightness level",
+      "control": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4002",
+        "title": "Brightness",
+        "symbol": "sun.max.fill",
+        "tintHex": "C58917",
+        "kind": "slider",
+        "gridWidth": 2,
+        "action": {
+          "type": "wledBrightness",
+          "host": "wled.local",
+          "text": "",
+          "value": 128,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "scene-1",
+      "category": "WLED Scenes",
+      "detail": "Recall WLED preset 1",
+      "control": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4003",
+        "title": "Scene 1",
+        "symbol": "sparkles",
+        "tintHex": "D1495B",
+        "kind": "button",
+        "action": {
+          "type": "wledPreset",
+          "host": "wled.local",
+          "text": "",
+          "value": 1,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "scene-2",
+      "category": "WLED Scenes",
+      "detail": "Recall WLED preset 2",
+      "control": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4004",
+        "title": "Scene 2",
+        "symbol": "sparkles",
+        "tintHex": "3568A8",
+        "kind": "button",
+        "action": {
+          "type": "wledPreset",
+          "host": "wled.local",
+          "text": "",
+          "value": 2,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "scene-3",
+      "category": "WLED Scenes",
+      "detail": "Recall WLED preset 3",
+      "control": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4005",
+        "title": "Scene 3",
+        "symbol": "sparkles",
+        "tintHex": "197248",
+        "kind": "button",
+        "action": {
+          "type": "wledPreset",
+          "host": "wled.local",
+          "text": "",
+          "value": 3,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "scene-4",
+      "category": "WLED Scenes",
+      "detail": "Recall WLED preset 4",
+      "control": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4006",
+        "title": "Scene 4",
+        "symbol": "sparkles",
+        "tintHex": "7A5195",
+        "kind": "button",
+        "action": {
+          "type": "wledPreset",
+          "host": "wled.local",
+          "text": "",
+          "value": 4,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "scene-5",
+      "category": "WLED Scenes",
+      "detail": "Recall WLED preset 5",
+      "control": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4007",
+        "title": "Scene 5",
+        "symbol": "sparkles",
+        "tintHex": "2F4858",
+        "kind": "button",
+        "action": {
+          "type": "wledPreset",
+          "host": "wled.local",
+          "text": "",
+          "value": 5,
+          "modifiers": []
+        }
+      }
+    },
+    {
+      "id": "scene-6",
+      "category": "WLED Scenes",
+      "detail": "Recall WLED preset 6",
+      "control": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4008",
+        "title": "Scene 6",
+        "symbol": "sparkles",
+        "tintHex": "C58917",
+        "kind": "button",
+        "action": {
+          "type": "wledPreset",
+          "host": "wled.local",
+          "text": "",
+          "value": 6,
+          "modifiers": []
+        }
+      }
+    }
+  ],
+  "pages": [
+    {
+      "id": "wled-scenes",
+      "detail": "A complete WLED dashboard with power, brightness, and six preset scenes.",
+      "page": {
+        "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4100",
+        "name": "WLED Scenes",
+        "gridColumns": 3,
+        "gridRows": 8,
+        "controls": [
+          {
+            "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4101",
+            "title": "Power",
+            "symbol": "power",
+            "tintHex": "F2C14E",
+            "kind": "button",
+            "layoutSlot": 0,
+            "gridWidth": 1,
+            "gridHeight": 2,
+            "action": {
+              "type": "wledPower",
+              "host": "wled.local",
+              "text": "toggle",
+              "value": 0,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4102",
+            "title": "Brightness",
+            "symbol": "sun.max.fill",
+            "tintHex": "C58917",
+            "kind": "slider",
+            "layoutSlot": 1,
+            "gridWidth": 2,
+            "gridHeight": 2,
+            "action": {
+              "type": "wledBrightness",
+              "host": "wled.local",
+              "text": "",
+              "value": 128,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4103",
+            "title": "Scene 1",
+            "symbol": "sparkles",
+            "tintHex": "D1495B",
+            "kind": "button",
+            "layoutSlot": 6,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "wledPreset",
+              "host": "wled.local",
+              "text": "",
+              "value": 1,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4104",
+            "title": "Scene 2",
+            "symbol": "sparkles",
+            "tintHex": "3568A8",
+            "kind": "button",
+            "layoutSlot": 7,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "wledPreset",
+              "host": "wled.local",
+              "text": "",
+              "value": 2,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4105",
+            "title": "Scene 3",
+            "symbol": "sparkles",
+            "tintHex": "197248",
+            "kind": "button",
+            "layoutSlot": 8,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "wledPreset",
+              "host": "wled.local",
+              "text": "",
+              "value": 3,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4106",
+            "title": "Scene 4",
+            "symbol": "sparkles",
+            "tintHex": "7A5195",
+            "kind": "button",
+            "layoutSlot": 15,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "wledPreset",
+              "host": "wled.local",
+              "text": "",
+              "value": 4,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4107",
+            "title": "Scene 5",
+            "symbol": "sparkles",
+            "tintHex": "2F4858",
+            "kind": "button",
+            "layoutSlot": 16,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "wledPreset",
+              "host": "wled.local",
+              "text": "",
+              "value": 5,
+              "modifiers": []
+            }
+          },
+          {
+            "id": "4ae8a28e-1524-4ecb-843c-ffb0862b4108",
+            "title": "Scene 6",
+            "symbol": "sparkles",
+            "tintHex": "C58917",
+            "kind": "button",
+            "layoutSlot": 17,
+            "gridWidth": 1,
+            "gridHeight": 3,
+            "action": {
+              "type": "wledPreset",
+              "host": "wled.local",
+              "text": "",
+              "value": 6,
+              "modifiers": []
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

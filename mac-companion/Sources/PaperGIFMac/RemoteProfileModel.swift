@@ -299,6 +299,7 @@ struct RemoteControl: Codable, Equatable, Identifiable, Sendable {
     var buttonHeight: Int? = nil
     var gridWidth: Int? = nil
     var gridHeight: Int? = nil
+    var sliderOutlineInsetPixels: Int? = nil
     var action: RemoteAction
     var layoutSlot: Int?
     var textBox: RemoteTextBox? = nil
@@ -608,6 +609,8 @@ struct RemoteProfile: Codable, Equatable, Sendable {
     var macToken = ""
     var computers: [RemoteComputer] = []
     var screensaverDelaySeconds = 30
+    var buttonQualityRefreshInterval = 10
+    var elementRefreshDelayMilliseconds = 20
     var temperatureUnit: RemoteTemperatureUnit = .celsius
     var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
     var pages: [RemotePage]
@@ -634,6 +637,12 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         macToken = try container.decodeIfPresent(String.self, forKey: .macToken) ?? ""
         computers = try container.decodeIfPresent([RemoteComputer].self, forKey: .computers) ?? []
         screensaverDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .screensaverDelaySeconds) ?? 30
+        buttonQualityRefreshInterval = try container.decodeIfPresent(
+            Int.self, forKey: .buttonQualityRefreshInterval
+        ) ?? 10
+        elementRefreshDelayMilliseconds = try container.decodeIfPresent(
+            Int.self, forKey: .elementRefreshDelayMilliseconds
+        ) ?? 20
         temperatureUnit = try container.decodeIfPresent(RemoteTemperatureUnit.self, forKey: .temperatureUnit) ?? .celsius
         timeZoneOffsetMinutes = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutes)
             ?? TimeZone.current.secondsFromGMT() / 60

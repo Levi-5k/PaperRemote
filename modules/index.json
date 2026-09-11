@@ -5,9 +5,25 @@
       "id": "media-controls",
       "name": "Media Controls",
       "summary": "Playback and volume controls for your computer.",
-      "version": "1.0.0",
+      "version": "1.3.0",
       "author": "paperGIF",
       "manifest": "media-controls.json"
+    },
+    {
+      "id": "presentation-controls",
+      "name": "Presentation Controls",
+      "summary": "Cross-platform slide controls for presenting from your computer.",
+      "version": "1.0.0",
+      "author": "paperGIF",
+      "manifest": "presentation-controls.json"
+    },
+    {
+      "id": "wled-scenes",
+      "name": "WLED Scenes",
+      "summary": "Power, brightness, and preset scenes for a WLED light.",
+      "version": "1.0.0",
+      "author": "paperGIF",
+      "manifest": "wled-scenes.json"
     },
     {
       "id": "openbuilds-control",

@@ -331,6 +331,7 @@ struct PaperGIFRemoteControl: Codable, Equatable, Identifiable, Sendable {
     var buttonHeight: Int? = nil
     var gridWidth: Int? = nil
     var gridHeight: Int? = nil
+    var sliderOutlineInsetPixels: Int? = nil
     var action: PaperGIFRemoteAction
     var layoutSlot: Int? = nil
     var textBox: PaperGIFRemoteTextBox? = nil
@@ -456,6 +457,35 @@ struct PaperGIFRemotePage: Codable, Equatable, Identifiable, Sendable {
     var openBuildsController: PaperGIFOpenBuildsController? = nil
     var moduleID: String? = nil
     var modulePageID: String? = nil
+}
+
+struct PaperGIFRemoteTabFrame: Equatable, Sendable {
+    let x: Int
+    let y: Int
+    let width: Int
+    let height: Int
+}
+
+enum PaperGIFRemoteTabLayout {
+    static let left = 24
+    static let top = 850
+    static let width = 492
+    static let height = 68
+
+    static func frames(pageCount: Int, selectedIndex: Int) -> [PaperGIFRemoteTabFrame] {
+        guard (1...8).contains(pageCount) else { return [] }
+        return (0..<pageCount).map { index in
+            let tabLeft = left + index * width / pageCount
+            let tabRight = left + (index + 1) * width / pageCount
+            let tabTop = index == selectedIndex ? top : top + 8
+            return PaperGIFRemoteTabFrame(
+                x: tabLeft,
+                y: tabTop,
+                width: tabRight - tabLeft,
+                height: top + height - tabTop
+            )
+        }
+    }
 }
 
 extension PaperGIFRemotePage {
@@ -655,6 +685,8 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     var macToken = ""
     var computers: [PaperGIFRemoteComputer]
     var screensaverDelaySeconds = 30
+    var buttonQualityRefreshInterval = 10
+    var elementRefreshDelayMilliseconds = 20
     var temperatureUnit: PaperGIFTemperatureUnit = .celsius
     var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
     var pages: [PaperGIFRemotePage]
@@ -668,6 +700,8 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         macToken: String = "",
         computers: [PaperGIFRemoteComputer] = [],
         screensaverDelaySeconds: Int = 30,
+        buttonQualityRefreshInterval: Int = 10,
+        elementRefreshDelayMilliseconds: Int = 20,
         timeZoneOffsetMinutes: Int = TimeZone.current.secondsFromGMT() / 60,
         pages: [PaperGIFRemotePage]
     ) {
@@ -679,6 +713,8 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         self.macToken = macToken
         self.computers = computers
         self.screensaverDelaySeconds = screensaverDelaySeconds
+        self.buttonQualityRefreshInterval = buttonQualityRefreshInterval
+        self.elementRefreshDelayMilliseconds = elementRefreshDelayMilliseconds
         self.timeZoneOffsetMinutes = timeZoneOffsetMinutes
         self.pages = pages
     }
@@ -701,6 +737,12 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         macToken = try container.decodeIfPresent(String.self, forKey: .macToken) ?? ""
         computers = try container.decodeIfPresent([PaperGIFRemoteComputer].self, forKey: .computers) ?? []
         screensaverDelaySeconds = try container.decodeIfPresent(Int.self, forKey: .screensaverDelaySeconds) ?? 30
+        buttonQualityRefreshInterval = try container.decodeIfPresent(
+            Int.self, forKey: .buttonQualityRefreshInterval
+        ) ?? 10
+        elementRefreshDelayMilliseconds = try container.decodeIfPresent(
+            Int.self, forKey: .elementRefreshDelayMilliseconds
+        ) ?? 20
         temperatureUnit = try container.decodeIfPresent(PaperGIFTemperatureUnit.self, forKey: .temperatureUnit) ?? .celsius
         timeZoneOffsetMinutes = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutes)
             ?? TimeZone.current.secondsFromGMT() / 60

@@ -53,17 +53,34 @@ internal sealed class WindowsTextSourceResolver(
                 id,
                 string.Empty,
                 media is not null,
-                media is null ? null : media.IsPlaying ? 1 : 0);
+                media is null ? null : media.IsPlaying ? 1 : 0,
+                media?.ElapsedMilliseconds,
+                media?.DurationMilliseconds,
+                media?.IsPlaying);
         }
         if (request.Source == "outputVolume")
         {
             var value = AudioEndpointVolume.TryGetPercent();
             return new TextSourceResponse(id, string.Empty, value.HasValue, value);
         }
+        if (request.Source == "nowPlaying")
+        {
+            var mediaText = media?.Description.Trim();
+            var mediaAvailable = !string.IsNullOrEmpty(mediaText);
+            return new TextSourceResponse(
+                id,
+                BoundUtf8(mediaAvailable ? mediaText! : request.Placeholder, MaximumTextBytes),
+                mediaAvailable,
+                media is null || media.DurationMilliseconds == 0
+                    ? null
+                    : (int)(media.ElapsedMilliseconds * 255 / media.DurationMilliseconds),
+                media?.ElapsedMilliseconds,
+                media?.DurationMilliseconds,
+                media?.IsPlaying);
+        }
 
         string? text = request.Source switch
         {
-            "nowPlaying" => media?.Description,
             "openBuildsPosition" => FormatOpenBuildsPosition(request.SourceText, openBuildsPositions),
             "macScript" when configuration.AllowedScripts.Contains(
                 request.SourceText,
@@ -139,7 +156,19 @@ internal sealed class WindowsTextSourceResolver(
                     .Where(value => !string.IsNullOrWhiteSpace(value)));
             var isPlaying = session.GetPlaybackInfo().PlaybackStatus ==
                 GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
-            return new MediaSessionState(description, isPlaying);
+            var timeline = session.GetTimelineProperties();
+            var duration = timeline.EndTime - timeline.StartTime;
+            var elapsed = timeline.Position - timeline.StartTime;
+            var durationMilliseconds = Math.Max(0, (long)duration.TotalMilliseconds);
+            var elapsedMilliseconds = Math.Clamp(
+                (long)elapsed.TotalMilliseconds,
+                0,
+                durationMilliseconds);
+            return new MediaSessionState(
+                description,
+                isPlaying,
+                elapsedMilliseconds,
+                durationMilliseconds);
         }
         catch (Exception exception) when (
             exception is COMException or InvalidOperationException or UnauthorizedAccessException)
@@ -191,7 +220,11 @@ internal sealed class WindowsTextSourceResolver(
         return characters.ToString();
     }
 
-    private sealed record MediaSessionState(string Description, bool IsPlaying);
+    private sealed record MediaSessionState(
+        string Description,
+        bool IsPlaying,
+        long ElapsedMilliseconds,
+        long DurationMilliseconds);
 
     internal static class AudioEndpointVolume
     {

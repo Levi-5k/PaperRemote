@@ -159,6 +159,7 @@ public sealed class RemoteControl
     public int? ButtonHeight { get; set; }
     public int? GridWidth { get; set; }
     public int? GridHeight { get; set; }
+    public int? SliderOutlineInsetPixels { get; set; }
     public RemoteAction Action { get; set; } = new();
     public int? LayoutSlot { get; set; }
     public RemoteTextBox? TextBox { get; set; }
@@ -200,6 +201,8 @@ public sealed class RemoteProfile
     public string MacToken { get; set; } = string.Empty;
     public List<RemoteComputer> Computers { get; set; } = [];
     public int ScreensaverDelaySeconds { get; set; } = 30;
+    public int ButtonQualityRefreshInterval { get; set; } = 10;
+    public int ElementRefreshDelayMilliseconds { get; set; } = 20;
     public TemperatureUnit TemperatureUnit { get; set; } = TemperatureUnit.Celsius;
     public int TimeZoneOffsetMinutes { get; set; } = (int)TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.Now).TotalMinutes;
     public List<RemotePage> Pages { get; set; } = [];

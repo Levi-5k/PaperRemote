@@ -22,6 +22,16 @@
       "minimum": 0,
       "maximum": 4294967
     },
+    "buttonQualityRefreshInterval": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "elementRefreshDelayMilliseconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500
+    },
     "temperatureUnit": {
       "enum": ["celsius", "fahrenheit"]
     },
@@ -119,6 +129,11 @@
           "type": ["integer", "null"],
           "minimum": 1,
           "maximum": 16
+        },
+        "sliderOutlineInsetPixels": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 32
         },
         "action": { "$ref": "#/$defs/action" },
         "layoutSlot": {
