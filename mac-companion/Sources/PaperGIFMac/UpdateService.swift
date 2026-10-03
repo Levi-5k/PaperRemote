@@ -202,7 +202,10 @@ enum FirmwareInstaller {
         let error: String?
     }
 
-    /// Returns nil when the device is unreachable; firmware without version reporting reads as 0.0.0.
+    /// Firmware without version reporting predates the /firmware endpoint and can only be updated over USB.
+    static let usbOnlyVersion = "0.0.0"
+
+    /// Returns nil when the device is unreachable.
     static func installedVersion(at address: String) async -> String? {
         guard let url = try? RemoteEditorStore.deviceURL(from: address, path: "/status") else { return nil }
         var request = URLRequest(url: url)
@@ -211,7 +214,7 @@ enum FirmwareInstaller {
               (response as? HTTPURLResponse)?.statusCode == 200,
               let status = try? JSONDecoder().decode(DeviceStatus.self, from: data),
               status.device == "paperGIF" else { return nil }
-        return status.firmware ?? "0.0.0"
+        return status.firmware ?? usbOnlyVersion
     }
 
     static func multipartBody(firmware: Data, boundary: String) -> Data {
@@ -326,7 +329,14 @@ final class UpdateService {
         if let target, let deviceVersion, let asset = release.manifest.firmware,
            SoftwareVersion.isNewer(release.version, than: deviceVersion) {
             offeredUpdate = true
-            if confirm(
+            if deviceVersion == FirmwareInstaller.usbOnlyVersion {
+                if userInitiated {
+                    inform(
+                        title: "M5Paper Needs a One-Time USB Update",
+                        message: "This M5Paper's firmware is too old to update over Wi-Fi. Flash firmware \(release.version) over USB once; later updates install from here."
+                    )
+                }
+            } else if confirm(
                 title: "M5Paper Firmware \(release.version) Is Available",
                 message: "The M5Paper has \(deviceVersion). Keep it awake and nearby; it restarts when the update finishes.",
                 action: "Update M5Paper"

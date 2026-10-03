@@ -237,7 +237,10 @@ internal sealed class UpdateService : IDisposable
         exit();
     }
 
-    // Returns null when unreachable; firmware without version reporting reads as 0.0.0.
+    // Firmware without version reporting predates the /firmware endpoint and can only be updated over USB.
+    public const string UsbOnlyFirmwareVersion = "0.0.0";
+
+    // Returns null when unreachable.
     public async Task<string?> DeviceFirmwareVersionAsync(string address, CancellationToken cancellationToken = default)
     {
         try
@@ -255,7 +258,9 @@ internal sealed class UpdateService : IDisposable
             {
                 return null;
             }
-            return root.TryGetProperty("firmware", out var firmware) ? firmware.GetString() ?? "0.0.0" : "0.0.0";
+            return root.TryGetProperty("firmware", out var firmware)
+                ? firmware.GetString() ?? UsbOnlyFirmwareVersion
+                : UsbOnlyFirmwareVersion;
         }
         catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or
             JsonException or InvalidOperationException)

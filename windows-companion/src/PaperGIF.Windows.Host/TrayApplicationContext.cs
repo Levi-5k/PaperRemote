@@ -173,7 +173,18 @@ internal sealed class TrayApplicationContext : ApplicationContext
                 SoftwareVersion.IsNewer(release.Version, deviceVersion))
             {
                 offeredUpdate = true;
-                if (Confirm(
+                if (deviceVersion == UpdateService.UsbOnlyFirmwareVersion)
+                {
+                    if (userInitiated)
+                    {
+                        MessageBox.Show(
+                            $"This M5Paper's firmware is too old to update over Wi-Fi. Flash firmware {release.Version} over USB once; later updates install from here.",
+                            "M5Paper needs a one-time USB update",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Information);
+                    }
+                }
+                else if (Confirm(
                     $"M5Paper firmware {release.Version} is available",
                     $"The M5Paper has {deviceVersion}. Keep it awake and nearby; it restarts when the update finishes.",
                     "Update the M5Paper now?"))

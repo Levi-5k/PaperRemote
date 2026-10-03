@@ -1152,6 +1152,11 @@ bool wifiRequestFromAccessPoint() {
     return wifiActive && wifiServer.client().localIP() == WiFi.softAPIP();
 }
 
+// WebServer also calls upload callbacks for raw bodies, when upload() would dereference a null object.
+bool wifiRequestIsMultipart() {
+    return wifiServer.header("Content-Type").startsWith("multipart/form-data");
+}
+
 void failFirmwareUpdate(const char* error) {
     firmwareUpdate->accepting = false;
     if (firmwareUpdate->error == nullptr) {
@@ -2752,8 +2757,9 @@ void configureWifiServer() {
         "X-PGIF-Final",
         "Authorization",
         "X-PGIF-MD5",
+        "Content-Type",
     };
-    wifiServer.collectHeaders(headerKeys, 6);
+    wifiServer.collectHeaders(headerKeys, 7);
     wifiServer.on("/status", HTTP_GET, []() {
         char response[192];
         snprintf(response, sizeof(response),
@@ -3091,6 +3097,9 @@ void configureWifiServer() {
         releaseFirmwareUpdate();
         wifiServer.send(400, "application/json", response);
     }, []() {
+        if (!wifiRequestIsMultipart()) {
+            return;
+        }
         HTTPUpload& part = wifiServer.upload();
         if (part.status == UPLOAD_FILE_START) {
             releaseFirmwareUpdate();
@@ -3169,6 +3178,9 @@ void configureWifiServer() {
             wifiServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_upload\"}");
         }
     }, []() {
+        if (!wifiRequestIsMultipart()) {
+            return;
+        }
         HTTPUpload& webUpload = wifiServer.upload();
         if (webUpload.status == UPLOAD_FILE_START) {
             resetWifiUploadState();
