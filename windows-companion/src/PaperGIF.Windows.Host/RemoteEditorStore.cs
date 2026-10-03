@@ -295,7 +295,7 @@ internal sealed class RemoteEditorStore : IDisposable
             var json = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
             {
-                throw new InvalidOperationException($"M5Paper returned {(int)response.StatusCode}.");
+                throw new InvalidOperationException(DeviceFailureMessage(response.StatusCode));
             }
             var loadedProfile = RemoteProfileJson.Deserialize(json);
             if (Profile.UpdatedAtMilliseconds > loadedProfile.UpdatedAtMilliseconds)
@@ -356,12 +356,16 @@ internal sealed class RemoteEditorStore : IDisposable
             using var response = await httpClient.SendAsync(request);
             if (!response.IsSuccessStatusCode)
             {
-                throw new InvalidOperationException($"M5Paper returned {(int)response.StatusCode}.");
+                throw new InvalidOperationException(DeviceFailureMessage(response.StatusCode));
             }
             Save();
             return "Remote installed on M5Paper";
         });
     }
+
+    internal static string DeviceFailureMessage(HttpStatusCode status) => status == HttpStatusCode.Unauthorized
+        ? $"M5Paper doesn't recognize {Environment.MachineName} yet. Pair this PC from a computer the M5Paper already trusts (Connections > Find Computers)."
+        : $"M5Paper returned {(int)status}.";
 
     public async Task<string> PairComputerAsync(string name, string host, int port)
     {

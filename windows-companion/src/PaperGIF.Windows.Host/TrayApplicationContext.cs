@@ -106,6 +106,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
         };
         activity.ActionRecorded += HandleActionRecorded;
+        pairingApprovalService.ApprovalRequested += HandleApprovalRequested;
         _ = CheckForModuleUpdatesAsync(moduleCatalog);
         updateTimer.Tick += async (_, _) => await CheckForUpdatesAsync(userInitiated: false);
         updateTimer.Start();
@@ -243,6 +244,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     protected override void ExitThreadCore()
     {
         activity.ActionRecorded -= HandleActionRecorded;
+        pairingApprovalService.ApprovalRequested -= HandleApprovalRequested;
         updateTimer.Dispose();
         updateService.Dispose();
         window.CloseForExit();
@@ -251,6 +253,20 @@ internal sealed class TrayApplicationContext : ApplicationContext
         notifyIcon.Dispose();
         icon.Dispose();
         base.ExitThreadCore();
+    }
+
+    private void HandleApprovalRequested(object? sender, string requester)
+    {
+        if (activityItem.Owner?.InvokeRequired == true)
+        {
+            activityItem.Owner.BeginInvoke(() => HandleApprovalRequested(sender, requester));
+            return;
+        }
+        notifyIcon.ShowBalloonTip(
+            10_000,
+            "paperGIF pairing request",
+            $"{requester} wants to pair with this PC. Approve or decline in the paperGIF dialog.",
+            ToolTipIcon.Info);
     }
 
     private void HandleActionRecorded(object? sender, ActionSnapshot action)
