@@ -6,6 +6,38 @@ import UIKit
 
 @MainActor
 final class PaperGIFBluetoothManager: NSObject, ObservableObject {
+    enum LocalMediaCommand: Equatable, Sendable {
+        case playPause
+        case previous
+        case next
+        case volumeUp
+        case volumeDown
+        case mute
+        case seek(Double)
+        case volume(Double)
+    }
+
+    struct LocalMediaCommandEvent: Identifiable, Equatable, Sendable {
+        let id = UUID()
+        let command: LocalMediaCommand
+    }
+
+    struct LocalHomePowerCommandEvent: Identifiable, Equatable, Sendable {
+        let id = UUID()
+        let command: String
+        let accessoryID: String
+        let serviceID: String
+    }
+
+    struct LocalMediaState: Equatable, Sendable {
+        let title: String
+        let isAvailable: Bool
+        let isPlaying: Bool
+        let volume: Double
+        let elapsed: TimeInterval
+        let duration: TimeInterval
+    }
+
     struct DeviceMedia: Identifiable, Equatable, Sendable {
         let index: UInt8
         let packageID: String?
@@ -174,6 +206,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     @Published private(set) var wifiScanError: String?
     @Published private(set) var remoteSyncStatus: String?
     @Published private(set) var remoteProfileFromDevice: PaperGIFRemoteProfile?
+    @Published private(set) var localMediaCommandEvent: LocalMediaCommandEvent?
+    @Published private(set) var localHomePowerCommandEvent: LocalHomePowerCommandEvent?
     @Published private(set) var isTransferring = false {
         didSet {
             UIApplication.shared.isIdleTimerDisabled = isTransferring
@@ -184,6 +218,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private static let controlUUID = CBUUID(string: "7A230002-7D2A-4C7B-9C42-504749460001")
     private static let dataUUID = CBUUID(string: "7A230003-7D2A-4C7B-9C42-504749460001")
     private static let savedPeripheralKey = "bluetooth.savedPeripheralIdentifier"
+    private static let centralRestorationIdentifier = "human-programs.paperGIF.bluetoothCentral"
     private static let maximumUnacknowledgedUploadBytes = 64 * 1024
     private static let wifiUploadChunkBytes = 8 * 1024 * 1024
     private static let wifiDeviceURL = URL(string: "http://192.168.4.1")!
@@ -217,11 +252,21 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private var remoteProfilePullTask: Task<Void, Never>?
     private var isAwaitingRemoteProfilePull = false
     private var isBluetoothSuspendedForWiFiTransfer = false
+    private var pendingLocalMediaState: LocalMediaState?
+    private var lastSentLocalMediaState: LocalMediaState?
+    private var lastLocalMediaStateSentAt = 0.0
+    private var localMediaStateSendTask: Task<Void, Never>?
 
     override init() {
         super.init()
         wifiSSID = UserDefaults.standard.string(forKey: Self.savedWiFiSSIDKey)
-        centralManager = CBCentralManager(delegate: self, queue: .main)
+        centralManager = CBCentralManager(
+            delegate: self,
+            queue: .main,
+            options: [
+                CBCentralManagerOptionRestoreIdentifierKey: Self.centralRestorationIdentifier,
+            ]
+        )
     }
 
     var canSend: Bool {
@@ -230,6 +275,74 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     var canAccessDeviceLibrary: Bool {
         connectionState == .connected || wifiConnectionState == .connected
+    }
+
+    func syncLocalMediaState(_ state: LocalMediaState, immediately: Bool = false) {
+        pendingLocalMediaState = state
+        let previous = lastSentLocalMediaState
+        let importantChange = immediately || previous == nil ||
+            previous?.title != state.title ||
+            previous?.isAvailable != state.isAvailable ||
+            previous?.isPlaying != state.isPlaying ||
+            previous?.volume != state.volume ||
+            previous?.duration != state.duration
+        if importantChange {
+            localMediaStateSendTask?.cancel()
+            localMediaStateSendTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(80))
+                guard !Task.isCancelled else { return }
+                self?.sendPendingLocalMediaState()
+            }
+        } else if localMediaStateSendTask == nil {
+            let elapsedSinceLastSend = ProcessInfo.processInfo.systemUptime - lastLocalMediaStateSentAt
+            let delay = max(0, 5 - elapsedSinceLastSend)
+            localMediaStateSendTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                self?.sendPendingLocalMediaState()
+            }
+        }
+    }
+
+    private func sendPendingLocalMediaState() {
+        localMediaStateSendTask = nil
+        guard connectionState == .connected,
+              !isTransferring,
+              let state = pendingLocalMediaState,
+              let peripheral,
+              let controlCharacteristic else { return }
+        let titleData = Self.truncatedUTF8(state.title, maximumBytes: 52)
+        let elapsedMilliseconds = UInt32(clamping: Int64(max(0, state.elapsed) * 1_000))
+        let durationMilliseconds = UInt32(clamping: Int64(max(0, state.duration) * 1_000))
+        var packet = Data([
+            0x61,
+            (state.isAvailable ? 0x01 : 0) | (state.isPlaying ? 0x02 : 0),
+            UInt8(clamping: Int((min(max(state.volume, 0), 1) * 255).rounded())),
+        ])
+        packet.appendLittleEndian(elapsedMilliseconds)
+        packet.appendLittleEndian(durationMilliseconds)
+        packet.append(UInt8(titleData.count))
+        packet.append(titleData)
+        peripheral.writeValue(packet, for: controlCharacteristic, type: .withResponse)
+        lastSentLocalMediaState = state
+        lastLocalMediaStateSentAt = ProcessInfo.processInfo.systemUptime
+    }
+
+    private static func truncatedUTF8(_ text: String, maximumBytes: Int) -> Data {
+        var result = text
+        while result.utf8.count > maximumBytes {
+            result.removeLast()
+        }
+        return Data(result.utf8)
+    }
+
+    func sendHomePowerStatus(_ status: UInt8, message: String = "") {
+        guard connectionState == .connected,
+              let peripheral,
+              let controlCharacteristic else { return }
+        var packet = Data([0x63, status])
+        packet.append(Self.truncatedUTF8(message, maximumBytes: 52))
+        peripheral.writeValue(packet, for: controlCharacteristic, type: .withResponse)
     }
 
     func scanForWiFiNetworks() {
@@ -1054,6 +1167,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             uploadData = nil
             bluetoothTransferKind = nil
             refreshDeviceLibrary()
+            sendPendingLocalMediaState()
         case 0x43:
             preparationTimeout?.cancel()
             chunkTimeout?.cancel()
@@ -1065,6 +1179,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             uploadData = nil
             bluetoothTransferKind = nil
             syncPendingRemoteProfile()
+            sendPendingLocalMediaState()
         case 0x7F:
             if isTransferring {
                 failTransfer("The M5Paper rejected the transfer")
@@ -1104,9 +1219,50 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             handleWiFiNetwork(data)
         case 0x36:
             handleHomeWiFiStatus(data)
+        case 0x60:
+            handleLocalMediaCommand(data)
+        case 0x61:
+            handleLocalHomePowerCommand(data)
         default:
             break
         }
+    }
+
+    private func handleLocalMediaCommand(_ data: Data) {
+        guard data.count >= 2 else { return }
+        let command: LocalMediaCommand
+        switch data[1] {
+        case 0x01: command = .playPause
+        case 0x02: command = .previous
+        case 0x03: command = .next
+        case 0x04: command = .volumeUp
+        case 0x05: command = .volumeDown
+        case 0x06: command = .mute
+        case 0x07 where data.count >= 3: command = .seek(Double(data[2]) / 255)
+        case 0x08 where data.count >= 3: command = .volume(Double(data[2]) / 255)
+        default: return
+        }
+        localMediaCommandEvent = LocalMediaCommandEvent(command: command)
+    }
+
+    private func handleLocalHomePowerCommand(_ data: Data) {
+        guard data.count == 74,
+              let accessoryID = String(bytes: data[2..<38], encoding: .utf8),
+              let serviceID = String(bytes: data[38..<74], encoding: .utf8),
+              UUID(uuidString: accessoryID) != nil,
+              UUID(uuidString: serviceID) != nil else { return }
+        let command: String
+        switch data[1] {
+        case 0x01: command = "toggle"
+        case 0x02: command = "on"
+        case 0x03: command = "off"
+        default: return
+        }
+        localHomePowerCommandEvent = LocalHomePowerCommandEvent(
+            command: command,
+            accessoryID: accessoryID,
+            serviceID: serviceID
+        )
     }
 
     private func handleHomeWiFiStatus(_ data: Data) {
@@ -1395,6 +1551,35 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 }
 
 extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
+    nonisolated func centralManager(
+        _ central: CBCentralManager,
+        willRestoreState dict: [String: Any]
+    ) {
+        MainActor.assumeIsolated {
+            guard let restoredPeripherals = dict[CBCentralManagerRestoredStatePeripheralsKey]
+                as? [CBPeripheral],
+                  !restoredPeripherals.isEmpty else { return }
+            let savedIdentifier = UserDefaults.standard.string(forKey: Self.savedPeripheralKey)
+            let restoredPeripheral = restoredPeripherals.first {
+                $0.identifier.uuidString == savedIdentifier
+            } ?? restoredPeripherals[0]
+            peripheral = restoredPeripheral
+            restoredPeripheral.delegate = self
+            connectionState = .connecting
+            startConnectionTimeout(for: restoredPeripheral, forgetSavedDevice: false)
+            switch restoredPeripheral.state {
+            case .connected:
+                restoredPeripheral.discoverServices([Self.serviceUUID])
+            case .disconnected:
+                central.connect(restoredPeripheral)
+            case .connecting, .disconnecting:
+                break
+            @unknown default:
+                central.connect(restoredPeripheral)
+            }
+        }
+    }
+
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
         MainActor.assumeIsolated {
             if central.state == .poweredOn {
@@ -1528,8 +1713,22 @@ extension PaperGIFBluetoothManager: CBPeripheralDelegate {
             isAwaitingRemoteProfilePull = true
             wifiEnabled = false
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
+            if UIDevice.current.userInterfaceIdiom == .phone {
+                peripheral.writeValue(Data([0x62]), for: characteristic, type: .withResponse)
+            }
             peripheral.writeValue(Data([0x37]), for: characteristic, type: .withResponse)
             refreshDeviceLibrary()
+            syncLocalMediaState(
+                pendingLocalMediaState ?? LocalMediaState(
+                    title: "",
+                    isAvailable: false,
+                    isPlaying: false,
+                    volume: 1,
+                    elapsed: 0,
+                    duration: 0
+                ),
+                immediately: true
+            )
         }
     }
 

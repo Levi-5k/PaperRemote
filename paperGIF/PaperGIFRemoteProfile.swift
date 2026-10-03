@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum PaperGIFTemperatureUnit: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -199,6 +200,8 @@ struct PaperGIFRemoteIcon: Identifiable, Sendable {
 }
 
 enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
+    case iPhoneMedia
+    case iPhoneHomePower
     case macMedia
     case macKey
     case macOpen
@@ -208,18 +211,23 @@ enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Send
     case wledPower
     case wledPreset
     case wledBrightness
+    case eWeLinkPower
+    case localHTTP
     case netHomePower
     case netHomeTemperature
     case netHomeTemperatureStep
     case netHomeMode
     case netHomeFan
     case netHomeAuto
+    case module
     case page
 
     var id: Self { self }
 
     var title: String {
         switch self {
+        case .iPhoneMedia: "iPhone media"
+        case .iPhoneHomePower: "Apple Home power"
         case .macMedia: "Media"
         case .macKey: "Mac keyboard shortcut"
         case .macOpen: "Open app or URL"
@@ -229,12 +237,15 @@ enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Send
         case .wledPower: "WLED power"
         case .wledPreset: "WLED preset"
         case .wledBrightness: "WLED brightness"
+        case .eWeLinkPower: "eWeLink power"
+        case .localHTTP: "Local HTTP request"
         case .netHomePower: "NetHome power"
         case .netHomeTemperature: "NetHome temperature"
         case .netHomeTemperatureStep: "NetHome temperature step"
         case .netHomeMode: "NetHome mode"
         case .netHomeFan: "NetHome fan"
         case .netHomeAuto: "Sensor auto mode"
+        case .module: "Module action"
         case .page: "Open remote page"
         }
     }
@@ -248,6 +259,10 @@ struct PaperGIFRemoteAction: Codable, Equatable, Sendable {
     var valueTenths: Int?
     var modifiers: [String] = []
     var computerID: String?
+    var httpMethod: String?
+    var httpBody: String?
+    var deviceID: String?
+    var deviceKey: String?
     var deadbandTenths: Int?
     var humidityThreshold: Int?
     var minimumCycleMinutes: Int?
@@ -336,6 +351,96 @@ struct PaperGIFRemoteControl: Codable, Equatable, Identifiable, Sendable {
     var layoutSlot: Int? = nil
     var textBox: PaperGIFRemoteTextBox? = nil
 
+    mutating func applyEditorActionDefaults(previousType: PaperGIFRemoteActionType) {
+        action.scheduleEnabled = nil
+        action.scheduleHour = nil
+        action.scheduleMinute = nil
+        action.schedules = nil
+        if action.type != .macOpen {
+            iconBitmap = nil
+        }
+        switch action.type {
+        case .iPhoneMedia, .macMedia:
+            let wasMedia = previousType == .iPhoneMedia || previousType == .macMedia
+            let command: String
+            if wasMedia && (kind != .slider || ["seek", "volume"].contains(action.text)) {
+                command = action.text
+            } else if kind == .slider {
+                command = textBox?.source == .nowPlaying ? "seek" : "volume"
+            } else {
+                command = "playPause"
+            }
+            setEditorMediaCommand(command)
+        case .iPhoneHomePower:
+            action.text = "toggle"
+            isToggle = true
+        case .openBuilds:
+            action.host = "127.0.0.1"
+            action.text = "jogXPositive"
+            action.value = 1
+        case .localHTTP:
+            action.text = action.text.isEmpty ? "/" : action.text
+            action.httpMethod = "GET"
+            action.httpBody = nil
+        case .eWeLinkPower:
+            action.text = "toggle"
+            isToggle = true
+        case .netHomePower:
+            action.text = "toggle"
+        case .netHomeTemperature:
+            action.value = 22
+            action.valueTenths = 220
+        case .netHomeTemperatureStep:
+            action.value = 1
+        case .netHomeAuto:
+            action.text = "cool"
+            action.value = 22
+            action.deadbandTenths = 10
+            action.humidityThreshold = 65
+            action.minimumCycleMinutes = 10
+            isToggle = true
+        case .netHomeMode:
+            action.text = "auto"
+        case .netHomeFan:
+            action.value = 40
+        default:
+            break
+        }
+        guard kind != .textBox else { return }
+        if [.wledBrightness, .netHomeTemperature, .netHomeFan].contains(action.type) {
+            kind = .slider
+            isToggle = nil
+        } else if ![.macMedia, .iPhoneMedia].contains(action.type), kind == .slider {
+            kind = .button
+        }
+    }
+
+    mutating func setEditorMediaCommand(_ command: String) {
+        action.text = command
+        if command == "playPause" {
+            title = "Play/Pause"
+            symbol = "playpause.fill"
+            iconBitmap = nil
+            isToggle = nil
+        }
+        // Text boxes can have media tap actions without becoming seek controls.
+        guard kind != .textBox else { return }
+        kind = command == "seek" || command == "volume" ? .slider : .button
+        isToggle = nil
+        if command == "seek" {
+            var text = textBox ?? PaperGIFRemoteTextBox(
+                source: .nowPlaying,
+                sourceText: "",
+                placeholder: "Nothing Playing",
+                horizontalAlignment: .center,
+                verticalAlignment: .center
+            )
+            text.source = .nowPlaying
+            text.computerID = action.computerID.flatMap(UUID.init(uuidString:))
+            textBox = text
+        }
+    }
+
     static func button(
         title: String,
         symbol: String,
@@ -386,6 +491,35 @@ struct PaperGIFRemoteGridPlacement: Equatable, Sendable {
 enum PaperGIFRemoteGrid {
     static let columnCount = 2
     static let rowCount = 8
+
+    static func translatedSlot(
+        from sourceSlot: Int,
+        columnOffset: Int,
+        rowOffset: Int,
+        columns: Int,
+        rows: Int
+    ) -> Int? {
+        let column = sourceSlot % columns + columnOffset
+        let row = sourceSlot / columns + rowOffset
+        guard (0..<columns).contains(column), (0..<rows).contains(row) else { return nil }
+        return row * columns + column
+    }
+
+    static func overlapsOpenBuildsSettings(
+        _ placement: PaperGIFRemoteGridPlacement,
+        columns: Int,
+        rows: Int
+    ) -> Bool {
+        let row = placement.slot / columns
+        let column = placement.slot % columns
+        let frame = CGRect(
+            x: 24 + CGFloat(column) * 504 / CGFloat(columns),
+            y: 142 + CGFloat(row) * 712 / CGFloat(rows),
+            width: CGFloat(placement.span.width) * 504 / CGFloat(columns) - 12,
+            height: CGFloat(placement.span.height) * 712 / CGFloat(rows) - 12
+        )
+        return frame.intersects(CGRect(x: 364, y: 292, width: 152, height: 430))
+    }
 
     static func placements(
         for controls: [PaperGIFRemoteControl],
@@ -678,6 +812,7 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     static let maximumControlsPerPage = 24
 
     var version = currentVersion
+    var updatedAtMilliseconds: Int64 = 0
     var wifiSSID = ""
     var wifiPassword = ""
     var macHost = ""
@@ -693,6 +828,7 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
 
     init(
         version: Int = currentVersion,
+        updatedAtMilliseconds: Int64 = 0,
         wifiSSID: String = "",
         wifiPassword: String = "",
         macHost: String = "",
@@ -706,6 +842,7 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         pages: [PaperGIFRemotePage]
     ) {
         self.version = version
+        self.updatedAtMilliseconds = updatedAtMilliseconds
         self.wifiSSID = wifiSSID
         self.wifiPassword = wifiPassword
         self.macHost = macHost
@@ -730,6 +867,9 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
             )
         }
         version = Self.currentVersion
+        updatedAtMilliseconds = try container.decodeIfPresent(
+            Int64.self, forKey: .updatedAtMilliseconds
+        ) ?? 0
         wifiSSID = try container.decodeIfPresent(String.self, forKey: .wifiSSID) ?? ""
         wifiPassword = try container.decodeIfPresent(String.self, forKey: .wifiPassword) ?? ""
         macHost = try container.decodeIfPresent(String.self, forKey: .macHost) ?? ""
@@ -761,6 +901,40 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         }
     }
 
+    mutating func preserveNumericComputerHosts(from localProfile: Self) -> Bool {
+        var changed = false
+        for index in computers.indices {
+            guard computers[index].host.lowercased().hasSuffix(".local"),
+                  let localComputer = localProfile.computers.first(where: {
+                      $0.id == computers[index].id && !$0.host.lowercased().hasSuffix(".local")
+                  }),
+                  !localComputer.host.isEmpty else { continue }
+            computers[index].host = localComputer.host
+            changed = true
+        }
+        if macHost.lowercased().hasSuffix(".local"),
+           !localProfile.macHost.isEmpty,
+           !localProfile.macHost.lowercased().hasSuffix(".local") {
+            macHost = localProfile.macHost
+            changed = true
+        }
+        if let defaultComputer = computers.first,
+           defaultComputer.token == macToken,
+           macHost != defaultComputer.host {
+            macHost = defaultComputer.host
+            macPort = defaultComputer.port
+            changed = true
+        }
+        return changed
+    }
+
+    mutating func markUpdated(now: Date = Date()) {
+        let currentMilliseconds = Int64(now.timeIntervalSince1970 * 1_000)
+        let nextRevision = updatedAtMilliseconds == .max
+            ? Int64.max : updatedAtMilliseconds + 1
+        updatedAtMilliseconds = max(nextRevision, currentMilliseconds)
+    }
+
     static let starter = PaperGIFRemoteProfile(pages: [
         PaperGIFRemotePage(name: "Main", controls: [
             .button(title: "Previous", symbol: "backward.fill", action: .init(type: .macMedia, text: "previous")),
@@ -769,6 +943,16 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
             .button(title: "WLED", symbol: "lightbulb.fill", tintHex: "F2C14E", action: .init(type: .wledPower, text: "toggle")),
         ])
     ])
+
+    var usesStarterLayout: Bool {
+        guard pages.count == 1, pages[0].name == "Main" else { return false }
+        return pages[0].controls.map { ($0.action.type, $0.action.text) }.elementsEqual([
+            (.macMedia, "previous"),
+            (.macMedia, "playPause"),
+            (.macMedia, "next"),
+            (.wledPower, "toggle"),
+        ], by: ==)
+    }
 
     var devicePayload: Data? {
         let encoder = JSONEncoder()

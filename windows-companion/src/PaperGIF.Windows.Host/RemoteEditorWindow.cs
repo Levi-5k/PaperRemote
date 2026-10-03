@@ -34,6 +34,9 @@ internal sealed class RemoteEditorWindow : Form
     private readonly ComboBox textComputer = new();
     private readonly Label emptyControlHint = new();
     private readonly TextBox actionHost = new();
+    private readonly ComboBox actionHttpMethod = new();
+    private readonly TextBox actionPath = new();
+    private readonly TextBox actionHttpBody = new();
     private readonly NumericUpDown actionValue = new();
     private readonly Label actionChoiceLabel = new();
     private readonly Label actionValueLabel = new();
@@ -46,6 +49,9 @@ internal sealed class RemoteEditorWindow : Form
     private readonly Control keyCommandRow;
     private readonly Control modifierRow;
     private readonly Control actionHostRow;
+    private readonly Control actionHttpMethodRow;
+    private readonly Control actionPathRow;
+    private readonly Control actionHttpBodyRow;
     private readonly Control actionChoiceRow;
     private readonly Control actionValueRow;
     private readonly Control targetPageRow;
@@ -55,7 +61,8 @@ internal sealed class RemoteEditorWindow : Form
     private readonly ListBox computersList = new();
     private readonly ListBox discoveredList = new();
     private readonly ComboBox wifiNetworks = new();
-    private readonly TextBox deviceAddress = new();
+    private readonly ComboBox devicePicker = new();
+    private readonly Button scanDevicesButton = new();
     private readonly Label syncStatus = new();
     private readonly Button sendButton = new();
     private readonly Label netHomeStatus = new();
@@ -66,6 +73,8 @@ internal sealed class RemoteEditorWindow : Form
     private bool allowClose;
     private bool modulesLoaded;
     private string? automaticallyLoadedDevice;
+
+    private sealed record DeviceChoice(string DisplayName, DiscoveredEndpoint? Endpoint);
 
     public RemoteEditorWindow(
         RemoteEditorStore store,
@@ -85,6 +94,9 @@ internal sealed class RemoteEditorWindow : Form
         keyCommandRow = BuildOptionRow("Key", keyCommand);
         modifierRow = BuildOptionRow("Modifiers", BuildModifierOptions());
         actionHostRow = BuildOptionRow("Device", actionHost);
+        actionHttpMethodRow = BuildOptionRow("HTTP method", actionHttpMethod);
+        actionPathRow = BuildOptionRow("HTTP path", actionPath);
+        actionHttpBodyRow = BuildOptionRow("JSON body", actionHttpBody);
         actionChoiceRow = BuildOptionRow(actionChoiceLabel, actionChoice);
         actionValueRow = BuildOptionRow(actionValueLabel, actionValue);
         targetPageRow = BuildOptionRow("Destination page", targetPage);
@@ -104,7 +116,7 @@ internal sealed class RemoteEditorWindow : Form
         store.Changed += HandleStoreChanged;
         store.StatusChanged += HandleStatusChanged;
         discovery.Changed += HandleDiscoveryChanged;
-        discovery.Scan();
+        _ = discovery.ScanDevicesAsync(store.DeviceAddress);
         RefreshAll();
     }
 
@@ -171,12 +183,13 @@ internal sealed class RemoteEditorWindow : Form
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 5,
+            ColumnCount = 6,
             Padding = new Padding(14, 10, 14, 10),
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
         var brand = new Panel { Dock = DockStyle.Fill };
@@ -208,13 +221,35 @@ internal sealed class RemoteEditorWindow : Form
         syncStatus.ForeColor = Muted;
         syncStatus.TextAlign = ContentAlignment.MiddleRight;
         syncStatus.Margin = new Padding(8, 0, 10, 0);
-        deviceAddress.Dock = DockStyle.Fill;
-        deviceAddress.Margin = new Padding(4, 7, 8, 7);
-        deviceAddress.PlaceholderText = "M5Paper address";
-        deviceAddress.Leave += (_, _) => { store.DeviceAddress = deviceAddress.Text; store.Commit(); };
+        devicePicker.Dock = DockStyle.Fill;
+        devicePicker.Margin = new Padding(4, 7, 8, 7);
+        devicePicker.DropDownStyle = ComboBoxStyle.DropDownList;
+        devicePicker.DisplayMember = nameof(DeviceChoice.DisplayName);
+        devicePicker.SelectedIndexChanged += async (_, _) =>
+        {
+            if (refreshing || devicePicker.SelectedItem is not DeviceChoice { Endpoint: { } endpoint } ||
+                endpoint.Host.Equals(store.DeviceAddress, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            automaticallyLoadedDevice = endpoint.Host;
+            store.DeviceAddress = endpoint.Host;
+            await RunDeviceOperation(store.LoadFromDeviceAsync);
+        };
         var loadButton = Button("Reload", async (_, _) => await RunDeviceOperation(store.LoadFromDeviceAsync));
         loadButton.Dock = DockStyle.Fill;
         loadButton.Margin = new Padding(0, 6, 8, 6);
+        scanDevicesButton.Text = "Scan";
+        scanDevicesButton.BackColor = EditorTheme.Surface;
+        scanDevicesButton.ForeColor = Ink;
+        scanDevicesButton.FlatStyle = FlatStyle.Flat;
+        scanDevicesButton.FlatAppearance.BorderColor = EditorTheme.Border;
+        scanDevicesButton.FlatAppearance.MouseOverBackColor = EditorTheme.ForestSoft;
+        scanDevicesButton.UseVisualStyleBackColor = false;
+        scanDevicesButton.Dock = DockStyle.Fill;
+        scanDevicesButton.Margin = new Padding(0, 6, 8, 6);
+        scanDevicesButton.Click += (_, _) => _ = discovery.ScanDevicesAsync(store.DeviceAddress);
+        new ToolTip().SetToolTip(scanDevicesButton, "Scan the network for M5Paper devices");
         sendButton.Text = "Send";
         sendButton.BackColor = Forest;
         sendButton.ForeColor = Color.White;
@@ -226,9 +261,10 @@ internal sealed class RemoteEditorWindow : Form
         sendButton.Click += async (_, _) => await RunDeviceOperation(store.SendToDeviceAsync);
         layout.Controls.Add(brand, 0, 0);
         layout.Controls.Add(syncStatus, 1, 0);
-        layout.Controls.Add(deviceAddress, 2, 0);
-        layout.Controls.Add(loadButton, 3, 0);
-        layout.Controls.Add(sendButton, 4, 0);
+        layout.Controls.Add(devicePicker, 2, 0);
+        layout.Controls.Add(scanDevicesButton, 3, 0);
+        layout.Controls.Add(loadButton, 4, 0);
+        layout.Controls.Add(sendButton, 5, 0);
         bar.Controls.Add(layout);
         return bar;
     }
@@ -632,6 +668,37 @@ internal sealed class RemoteEditorWindow : Form
                 store.Commit();
             }
         };
+        ConfigureControlOption(actionHttpMethod, choice =>
+        {
+            if (store.SelectedControl is { } control)
+            {
+                control.Action.HttpMethod = choice.Value;
+                if (choice.Value == "GET")
+                {
+                    control.Action.HttpBody = null;
+                }
+            }
+        });
+        actionPath.Width = 210;
+        actionPath.Leave += (_, _) =>
+        {
+            if (!refreshing && store.SelectedControl is { } control)
+            {
+                control.Action.Text = actionPath.Text.Trim();
+                store.Commit();
+            }
+        };
+        actionHttpBody.Width = 210;
+        actionHttpBody.MaxLength = 191;
+        actionHttpBody.Leave += (_, _) =>
+        {
+            if (!refreshing && store.SelectedControl is { } control)
+            {
+                control.Action.HttpBody = string.IsNullOrEmpty(actionHttpBody.Text)
+                    ? null : actionHttpBody.Text;
+                store.Commit();
+            }
+        };
         actionValue.Width = 110;
         actionValue.ValueChanged += (_, _) => SaveActionValue();
         ConfigureControlOption(targetPage, choice =>
@@ -666,6 +733,9 @@ internal sealed class RemoteEditorWindow : Form
             keyCommandRow,
             modifierRow,
             actionHostRow,
+            actionHttpMethodRow,
+            actionPathRow,
+            actionHttpBodyRow,
             actionChoiceRow,
             actionValueRow,
             targetPageRow,
@@ -739,7 +809,7 @@ internal sealed class RemoteEditorWindow : Form
         computerButtons.Controls.Add(Button("Remove", (_, _) => RemoveComputer(), 62));
         computerButtons.Controls.Add(Button("Test", async (_, _) => await TestComputerAsync(), 48));
         var discoveryButtons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        discoveryButtons.Controls.Add(Button("Scan", (_, _) => discovery.Scan(), 52));
+        discoveryButtons.Controls.Add(Button("Scan", (_, _) => _ = discovery.ScanDevicesAsync(store.DeviceAddress), 52));
         discoveryButtons.Controls.Add(Button("Use selected", async (_, _) => await UseDiscoveredAsync(), 92));
         discoveredList.Dock = DockStyle.Fill;
         discoveredList.DisplayMember = nameof(DiscoveredEndpoint.DisplayName);
@@ -847,10 +917,29 @@ internal sealed class RemoteEditorWindow : Form
         wifiNetworks.DisplayMember = nameof(DeviceWifiNetwork.DisplayName);
         wifiNetworks.SelectedItem = store.WifiNetworks.FirstOrDefault(network =>
             network.Ssid == (selectedNetwork?.Ssid ?? store.Profile.WifiSSID));
-        deviceAddress.Text = store.DeviceAddress;
+        var selectedDeviceHost = (devicePicker.SelectedItem as DeviceChoice)?.Endpoint?.Host
+            ?? store.DeviceAddress;
+        var deviceChoices = discovery.Endpoints
+            .Where(endpoint => endpoint.Kind == DiscoveredServiceKind.M5Paper)
+            .Select(endpoint => new DeviceChoice(endpoint.Name, endpoint))
+            .ToList();
+        if (deviceChoices.Count == 0)
+        {
+            deviceChoices.Add(new DeviceChoice(
+                discovery.IsScanning ? "Scanning for M5Paper..." : "No M5Paper found",
+                null));
+        }
+        devicePicker.DataSource = deviceChoices;
+        devicePicker.SelectedItem = deviceChoices.FirstOrDefault(choice =>
+            choice.Endpoint?.Host.Equals(selectedDeviceHost, StringComparison.OrdinalIgnoreCase) == true)
+            ?? deviceChoices[0];
+        devicePicker.Enabled = !store.IsBusy && deviceChoices.Any(choice => choice.Endpoint is not null);
+        scanDevicesButton.Enabled = !discovery.IsScanning;
+        scanDevicesButton.Text = discovery.IsScanning ? "..." : "Scan";
         syncStatus.Text = store.ValidationMessage ?? store.Status;
         netHomeStatus.Text = netHomeService.IsSignedIn ? $"Connected: {netHomeService.Account}" : "Not connected";
-        sendButton.Enabled = !store.IsBusy && store.ValidationMessage is null;
+        sendButton.Enabled = !store.IsBusy && store.ValidationMessage is null &&
+            deviceChoices.Any(choice => choice.Endpoint is not null);
         refreshing = false;
         preview.Invalidate();
     }
@@ -859,9 +948,11 @@ internal sealed class RemoteEditorWindow : Form
     {
         var control = store.SelectedControl;
         var showActionComputer = control is not null && IsComputerAction(control.Action.Type);
-        var showMediaCommand = control?.Action.Type == RemoteActionType.MacMedia;
+        var showMediaCommand = control?.Action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia;
         var showKeyCommand = control?.Action.Type == RemoteActionType.MacKey;
         var showActionHost = control is not null && IsDeviceAction(control.Action.Type);
+        var showLocalHttp = control?.Action.Type == RemoteActionType.LocalHTTP;
+        var showLocalHttpBody = showLocalHttp && control?.Action.HttpMethod == "POST";
         var showActionChoice = control?.Action.Type is RemoteActionType.WledPower or
             RemoteActionType.NetHomePower or RemoteActionType.NetHomeMode or RemoteActionType.NetHomeAuto or
             RemoteActionType.OpenBuilds;
@@ -876,13 +967,16 @@ internal sealed class RemoteEditorWindow : Form
         mediaCommandRow.Visible = showMediaCommand;
         keyCommandRow.Visible = modifierRow.Visible = showKeyCommand;
         actionHostRow.Visible = showActionHost;
+        actionHttpMethodRow.Visible = showLocalHttp;
+        actionPathRow.Visible = showLocalHttp;
+        actionHttpBodyRow.Visible = showLocalHttpBody;
         actionChoiceRow.Visible = showActionChoice;
         actionValueRow.Visible = showActionValue;
         targetPageRow.Visible = showTargetPage;
         referencedControlRow.Visible = showReferencedControl;
         textComputerRow.Visible = showTextComputer;
         controlOptions.Visible = showActionComputer || showMediaCommand || showKeyCommand ||
-            showActionHost || showActionChoice || showActionValue || showTargetPage ||
+            showActionHost || showLocalHttp || showActionChoice || showActionValue || showTargetPage ||
             showReferencedControl || showTextComputer;
 
         SetControlOptions(mediaCommand,
@@ -905,6 +999,11 @@ internal sealed class RemoteEditorWindow : Form
             value.Equals("command", StringComparison.OrdinalIgnoreCase) ||
             value.Equals("windows", StringComparison.OrdinalIgnoreCase)) == true;
         actionHost.Text = control?.Action.Host ?? string.Empty;
+        SetControlOptions(actionHttpMethod,
+            [new("GET", "GET"), new("POST", "POST")],
+            control?.Action.HttpMethod ?? "GET");
+        actionPath.Text = showLocalHttp ? control?.Action.Text ?? "/" : string.Empty;
+        actionHttpBody.Text = showLocalHttp ? control?.Action.HttpBody ?? string.Empty : string.Empty;
         var actionChoices = control?.Action.Type switch
         {
             RemoteActionType.WledPower or RemoteActionType.NetHomePower =>
@@ -961,6 +1060,7 @@ internal sealed class RemoteEditorWindow : Form
         decimal displayedValue = control.Action.Value;
         switch (control.Action.Type)
         {
+            case RemoteActionType.IPhoneMedia:
             case RemoteActionType.MacMedia:
                 actionValueLabel.Text = "Volume percent";
                 actionValue.Minimum = 0;
@@ -1023,7 +1123,7 @@ internal sealed class RemoteEditorWindow : Form
             control.Action.ValueTenths = (int)Math.Round(celsius * 10m);
             control.Action.Value = (int)Math.Round(celsius);
         }
-        else if (control.Action.Type == RemoteActionType.MacMedia)
+        else if (control.Action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia)
         {
             control.Action.Value = (int)Math.Round(actionValue.Value * 255m / 100m);
         }
@@ -1153,7 +1253,6 @@ internal sealed class RemoteEditorWindow : Form
 
     private async Task RunDeviceOperation(Func<Task> operation)
     {
-        store.DeviceAddress = deviceAddress.Text;
         await operation();
         RefreshAll();
     }
@@ -1173,7 +1272,6 @@ internal sealed class RemoteEditorWindow : Form
         {
             automaticallyLoadedDevice = device.Host;
             store.DeviceAddress = device.Host;
-            deviceAddress.Text = device.Host;
             _ = store.LoadFromDeviceAsync();
         }
     }
@@ -1190,7 +1288,6 @@ internal sealed class RemoteEditorWindow : Form
             {
                 case DiscoveredServiceKind.M5Paper:
                     store.DeviceAddress = endpoint.Host;
-                    deviceAddress.Text = endpoint.Host;
                     await store.LoadFromDeviceAsync();
                     break;
                 case DiscoveredServiceKind.Companion:
@@ -1377,12 +1474,13 @@ internal sealed class RemoteEditorWindow : Form
 
     private static bool IsComputerAction(RemoteActionType type) => type is
         RemoteActionType.MacMedia or RemoteActionType.MacKey or RemoteActionType.MacOpen or
-        RemoteActionType.MacShortcut or RemoteActionType.MacScript or RemoteActionType.OpenBuilds ||
+        RemoteActionType.MacShortcut or RemoteActionType.MacScript or RemoteActionType.OpenBuilds or
+        RemoteActionType.Module ||
         IsNetHomeAction(type);
 
     private static bool IsDeviceAction(RemoteActionType type) => type is
         RemoteActionType.WledPower or RemoteActionType.WledPreset or RemoteActionType.WledBrightness or
-        RemoteActionType.OpenBuilds ||
+        RemoteActionType.LocalHTTP or RemoteActionType.OpenBuilds ||
         IsNetHomeAction(type);
 
     private static bool UsesActionValue(RemoteAction action) =>
@@ -1390,7 +1488,7 @@ internal sealed class RemoteEditorWindow : Form
             RemoteActionType.NetHomeTemperature or RemoteActionType.NetHomeTemperatureStep or
             RemoteActionType.NetHomeFan ||
         action.Type == RemoteActionType.OpenBuilds && action.Text.StartsWith("jog", StringComparison.Ordinal) ||
-        action.Type == RemoteActionType.MacMedia && action.Text == "volume";
+        action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia && action.Text == "volume";
 
     private void AddNetHomePage()
     {

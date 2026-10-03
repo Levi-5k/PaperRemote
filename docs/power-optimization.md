@@ -17,6 +17,56 @@ PaperRemote keeps Bluetooth and home Wi-Fi available while the remote is active.
 
 The M5GFX e-paper driver already disables the panel's high-voltage rail after each completed refresh. Dynamic text polling also stops while the screen saver is active.
 
+## Long-idle wake investigation (2026-09-13)
+
+Reported symptom: a library image/GIF remains visible after extended idle, and
+neither touch nor physical buttons wake the device while plugged in. HTTP also
+timed out during inspection. Opening the serial port reset the board, after which
+the device responded again. Its saved settings were slideshow enabled, Sleep
+Between Images enabled, and a 900-second screensaver delay. This reset lost the
+original execution state: the exact freeze site has **not** been reproduced.
+
+The **Images Below 100%** setting only selects still media versus animation,
+sampling the battery estimate every ten seconds. It does not disable touch or
+button wake, and charging by itself does not bypass the threshold. Reaching
+100% may change the render workload but is not established as the freeze cause.
+The battery threshold and saved settings are unchanged; diagnostics now record
+mode transitions and screensaver entry.
+
+One definite unbounded path was found in M5Unified 0.2.21 `Power_Class::deepSleep`:
+with touch wake enabled, it loops until the GT911 interrupt releases, **before**
+enabling the requested timer. The M5Paper implementation of
+`_clearWakeupInterrupt()` returns success even when touch reads do not release
+the pin, so the communication-failure escape does not bound this path. The loop
+calls `M5.update()` but never the application's button/touch/HTTP handlers. A
+stuck-low IRQ can therefore leave the screen asleep with neither responsive
+controls nor a running recovery timer. This is a confirmed code defect and a
+candidate explanation, not a confirmed diagnosis of the original freeze.
+
+Firmware now uses [sleep_wake.h](../firmware/include/sleep_wake.h) to bound the
+release wait to 250 ms and cancel sleep on an active touch or side button. A
+failed attempt returns to the main loop and defers retries; stuck-line reports
+are rate-limited and queued to companion diagnostics. EXT0 touch and EXT1 center
+button wake are explicitly armed before calling `M5.Power.deepSleep(..., false)`.
+Passing `false` skips only the library's touch-release setup, not the already
+armed EXT0 source. Existing timer selection and GPIO 2 power hold remain intact.
+A new touch after the release check can cause an immediate wake rather than
+trap sleep entry. No installed dependency source was modified.
+
+[sleep_wake_test.cpp](../firmware/tests/sleep_wake_test.cpp) covers stuck IRQ,
+normal release, held touch/button, a button during the wait, subsequent recovery,
+and clock rollover. The firmware host tests and M5Paper build passed and the
+image was flashed. A passive serial capture is left open for the long-idle soak;
+it sends no device commands or HTTP keepalives. A short reboot check does not
+establish that the reported long-duration issue is resolved. Post-flash capture
+reported a 10-second delay, media style, 30-second image interval and **Images
+Below 100% off** (changed externally; this patch does not write settings). Thus
+the 100% policy is not active in the current test. HTTP and a real user button
+action succeeded after the flash. At 23:10:25 UTC the new firmware displayed a
+single-frame image and armed scheduled deep sleep with battery reported at 100%.
+All nine host test programs passed. Restore the preferred delay after testing;
+long-duration sleep and center-button/touch wake validation remain outstanding.
+
 ## Deferred Work
 
 ### Maximum Wi-Fi Modem Sleep

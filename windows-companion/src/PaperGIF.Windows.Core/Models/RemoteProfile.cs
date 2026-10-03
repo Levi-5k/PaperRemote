@@ -73,6 +73,8 @@ public enum RemoteTextTapBehavior
 
 public enum RemoteActionType
 {
+    IPhoneMedia,
+    IPhoneHomePower,
     MacMedia,
     MacKey,
     MacOpen,
@@ -82,12 +84,15 @@ public enum RemoteActionType
     WledPower,
     WledPreset,
     WledBrightness,
+    EWeLinkPower,
+    LocalHTTP,
     NetHomePower,
     NetHomeTemperature,
     NetHomeTemperatureStep,
     NetHomeMode,
     NetHomeFan,
     NetHomeAuto,
+    Module,
     Page,
 }
 
@@ -111,6 +116,10 @@ public sealed class RemoteAction
     public int? ValueTenths { get; set; }
     public List<string> Modifiers { get; set; } = [];
     public string? ComputerID { get; set; }
+    public string? HttpMethod { get; set; }
+    public string? HttpBody { get; set; }
+    public string? DeviceID { get; set; }
+    public string? DeviceKey { get; set; }
     public int? DeadbandTenths { get; set; }
     public int? HumidityThreshold { get; set; }
     public int? MinimumCycleMinutes { get; set; }
@@ -194,6 +203,7 @@ public sealed class RemoteProfile
     public const int MaximumControlsPerPage = 24;
 
     public int Version { get; set; } = CurrentVersion;
+    public long UpdatedAtMilliseconds { get; set; }
     public string WifiSSID { get; set; } = string.Empty;
     public string WifiPassword { get; set; } = string.Empty;
     public string MacHost { get; set; } = string.Empty;
@@ -206,4 +216,12 @@ public sealed class RemoteProfile
     public TemperatureUnit TemperatureUnit { get; set; } = TemperatureUnit.Celsius;
     public int TimeZoneOffsetMinutes { get; set; } = (int)TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.Now).TotalMinutes;
     public List<RemotePage> Pages { get; set; } = [];
+
+    public void MarkUpdated(DateTimeOffset? now = null)
+    {
+        var currentMilliseconds = (now ?? DateTimeOffset.UtcNow).ToUnixTimeMilliseconds();
+        var nextRevision = UpdatedAtMilliseconds == long.MaxValue
+            ? long.MaxValue : UpdatedAtMilliseconds + 1;
+        UpdatedAtMilliseconds = Math.Max(nextRevision, currentMilliseconds);
+    }
 }

@@ -7,6 +7,31 @@ internal static class Program
     [STAThread]
     private static async Task Main(string[] args)
     {
+        System.Windows.Forms.Application.ThreadException += (_, eventArgs) =>
+            DiagnosticLog.Error("Unhandled Windows UI exception", eventArgs.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, eventArgs) =>
+            DiagnosticLog.Error(
+                "Unhandled process exception",
+                eventArgs.ExceptionObject as Exception ?? new Exception(eventArgs.ExceptionObject?.ToString()));
+        TaskScheduler.UnobservedTaskException += (_, eventArgs) =>
+        {
+            DiagnosticLog.Error("Unobserved task exception", eventArgs.Exception);
+            eventArgs.SetObserved();
+        };
+        DiagnosticLog.Info("paperGIF Windows started");
+        try
+        {
+            await RunAsync(args);
+        }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Error("paperGIF Windows terminated", exception);
+            throw;
+        }
+    }
+
+    private static async Task RunAsync(string[] args)
+    {
         if (args is ["--write-icon", var iconPath])
         {
             using var icon = PaperGifIcon.Create(256);
@@ -22,6 +47,14 @@ internal static class Program
         builder.Services.AddSingleton<PairingApprovalService>();
         builder.Services.AddSingleton<WindowsActionDispatcher>();
         builder.Services.AddSingleton<WindowsTextSourceResolver>();
+        builder.Services.AddSingleton(services => new WindowsMediaUpdatePublisher(
+            services.GetRequiredService<CompanionConfiguration>(),
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+            {
+                Timeout = TimeSpan.FromSeconds(3),
+            },
+            TimeProvider.System));
+        builder.Services.AddHostedService<WindowsMediaUpdateService>();
         builder.Services.AddSingleton<WindowsApplicationCatalog>();
         builder.Services.AddSingleton<NetHomeService>();
         builder.Services.AddSingleton<OpenBuildsControlService>();
@@ -95,6 +128,22 @@ internal static class Program
             lastAction = activity.LastAction,
         }));
 
+        app.MapPost("/device-log", (DeviceLogBatch batch) =>
+        {
+            try
+            {
+                DiagnosticLog.AppendDeviceBatch(batch);
+                return Results.Json(new { ok = true });
+            }
+            catch (Exception exception) when (exception is IOException or InvalidDataException)
+            {
+                DiagnosticLog.Error("Could not save M5Paper diagnostics", exception);
+                return Results.Json(
+                    new { ok = false, error = "log_write_failed" },
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+        });
+
         app.MapGet("/applications", (WindowsApplicationCatalog catalog) =>
             Results.Json(catalog.GetInstalledApplications()));
 
@@ -115,6 +164,7 @@ internal static class Program
         app.MapPost("/text-source", async (
             TextSourceBatchRequest request,
             WindowsTextSourceResolver resolver,
+            WindowsMediaUpdatePublisher publisher,
             HttpContext context,
             CancellationToken cancellationToken) =>
         {
@@ -128,6 +178,7 @@ internal static class Program
                 return;
             }
             var response = await resolver.ResolveAsync(request, cancellationToken);
+            publisher.Register(context.Connection.RemoteIpAddress, request);
             await WriteJsonWithContentLengthAsync(context, response, cancellationToken);
         });
 

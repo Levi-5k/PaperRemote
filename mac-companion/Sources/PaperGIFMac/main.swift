@@ -6,6 +6,38 @@ import Darwin
 import Foundation
 import IOKit.hidsystem
 import Network
+import SystemConfiguration
+
+private func routedIPv4Address() -> String? {
+    guard let store = SCDynamicStoreCreate(nil, "paperGIF" as CFString, nil, nil),
+          let global = SCDynamicStoreCopyValue(
+            store,
+            "State:/Network/Global/IPv4" as CFString
+          ) as? [String: Any],
+          let primaryInterface = global["PrimaryInterface"] as? String else { return nil }
+    var interfaces: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&interfaces) == 0, let first = interfaces else { return nil }
+    defer { freeifaddrs(interfaces) }
+    var current: UnsafeMutablePointer<ifaddrs>? = first
+    while let interface = current {
+        defer { current = interface.pointee.ifa_next }
+        guard String(cString: interface.pointee.ifa_name) == primaryInterface,
+              let address = interface.pointee.ifa_addr,
+              address.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        guard getnameinfo(
+            address,
+            socklen_t(address.pointee.sa_len),
+            &host,
+            socklen_t(host.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+        ) == 0 else { continue }
+        return String(cString: host)
+    }
+    return nil
+}
 
 private struct RemoteRequest: Decodable {
     let type: String
@@ -92,7 +124,6 @@ private struct CompanionConfiguration: Codable {
 
 private final class CompanionServer {
     private static let maximumConnections = 16
-    private static let requestDeadline: TimeInterval = 10
 
     private let port: UInt16
     private let token: String
@@ -102,9 +133,10 @@ private final class CompanionServer {
     private let textSourceHandler: (TextSourceBatchRequest, String?) -> TextSourceBatchResponse
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private var lifetimes: [ObjectIdentifier: CompanionRequestLifetime] = [:]
     private var respondingConnections: Set<ObjectIdentifier> = []
     private let queue = DispatchQueue(label: "paperGIF.companion.server")
-    private let workQueue = DispatchQueue(label: "paperGIF.companion.actions", qos: .utility)
+    private let scheduler = CompanionRequestScheduler()
 
     init(
         port: UInt16,
@@ -128,12 +160,13 @@ private final class CompanionServer {
                 NSLocalizedDescriptionKey: "Invalid port",
             ])
         }
+        let advertisedHost = routedIPv4Address() ?? ProcessInfo.processInfo.hostName
         let listener = try NWListener(using: .tcp, on: networkPort)
         listener.service = NWListener.Service(
             name: Host.current().localizedName ?? "paperGIF Mac",
             type: "_papergif._tcp",
             txtRecord: NWTXTRecord([
-                "host": ProcessInfo.processInfo.hostName,
+                "host": advertisedHost,
                 "port": String(port),
             ])
         )
@@ -145,26 +178,36 @@ private final class CompanionServer {
     }
 
     func stop() {
-        listener?.cancel()
-        listener = nil
-        connections.values.forEach { $0.cancel() }
-        connections.removeAll()
-        respondingConnections.removeAll()
+        queue.sync {
+            listener?.cancel()
+            listener = nil
+            lifetimes.values.forEach { $0.cancel() }
+            lifetimes.removeAll()
+            connections.values.forEach { $0.cancel() }
+            connections.removeAll()
+            respondingConnections.removeAll()
+        }
     }
 
     private func accept(_ connection: NWConnection) {
         guard connections.count < Self.maximumConnections else {
             connection.start(queue: queue)
-            respond(connection, status: 503, body: "{\"ok\":false}")
+            let response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
             return
         }
         let identifier = ObjectIdentifier(connection)
         connections[identifier] = connection
+        let lifetime = CompanionRequestLifetime()
+        lifetimes[identifier] = lifetime
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self, let connection else { return }
             switch state {
             case .failed, .cancelled:
                 let identifier = ObjectIdentifier(connection)
+                self.lifetimes.removeValue(forKey: identifier)?.cancel()
                 self.connections.removeValue(forKey: identifier)
                 self.respondingConnections.remove(identifier)
             default:
@@ -173,16 +216,38 @@ private final class CompanionServer {
         }
         connection.start(queue: queue)
         receive(connection, buffer: Data())
-        queue.asyncAfter(deadline: .now() + Self.requestDeadline) { [weak self, weak connection] in
-            guard let self, let connection,
-                  self.connections[ObjectIdentifier(connection)] != nil else { return }
+        scheduleTimeout(connection, lifetime: lifetime)
+    }
+
+    private func scheduleTimeout(_ connection: NWConnection, lifetime: CompanionRequestLifetime) {
+        guard let deadline = lifetime.nextDeadline else { return }
+        queue.asyncAfter(deadline: deadline) { [weak self, weak connection] in
+            guard let self, let connection, lifetime.expire() else { return }
             self.respond(connection, status: 408, body: "{\"ok\":false}")
+        }
+    }
+
+    private func enqueue(
+        _ connection: NWConnection,
+        on lane: CompanionRequestScheduler.Lane,
+        work: @escaping () -> Void
+    ) {
+        guard let lifetime = lifetimes[ObjectIdentifier(connection)],
+              lifetime.admit(timeout: lane.timeout) else {
+            respond(connection, status: 408, body: "{\"ok\":false}")
+            return
+        }
+        scheduleTimeout(connection, lifetime: lifetime)
+        if !scheduler.submit(on: lane, lifetime: lifetime, work: work) {
+            respond(connection, status: 503, body: "{\"ok\":false}")
         }
     }
 
     private func receive(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
+            guard let self,
+                  self.connections[ObjectIdentifier(connection)] != nil,
+                  !self.respondingConnections.contains(ObjectIdentifier(connection)) else { return }
             var requestData = buffer
             if let data {
                 requestData.append(data)
@@ -215,16 +280,24 @@ private final class CompanionServer {
                 respond(connection, status: 400, body: "{\"ok\":false}")
                 return
             }
-            var approved = false
-            DispatchQueue.main.sync {
-                approved = pairingHandler(request)
-            }
-            guard approved else {
-                respond(connection, status: 403, body: "{\"ok\":false,\"error\":\"Pairing declined\"}")
+            guard let lifetime = lifetimes[ObjectIdentifier(connection)],
+                  lifetime.admit(timeout: 60) else {
+                respond(connection, status: 408, body: "{\"ok\":false}")
                 return
             }
-            let body = try? JSONSerialization.data(withJSONObject: ["ok": true, "token": token])
-            respond(connection, status: 200, body: body.flatMap { String(data: $0, encoding: .utf8) } ?? "{\"ok\":false}")
+            scheduleTimeout(connection, lifetime: lifetime)
+            DispatchQueue.main.async { [weak self, weak connection] in
+                guard let self, let connection, lifetime.begin() else { return }
+                let approved = self.pairingHandler(request)
+                self.queue.async {
+                    guard approved else {
+                        self.respond(connection, status: 403, body: "{\"ok\":false,\"error\":\"Pairing declined\"}")
+                        return
+                    }
+                    let body = try? JSONSerialization.data(withJSONObject: ["ok": true, "token": self.token])
+                    self.respond(connection, status: 200, body: body.flatMap { String(data: $0, encoding: .utf8) } ?? "{\"ok\":false}")
+                }
+            }
             return
         }
 
@@ -238,8 +311,40 @@ private final class CompanionServer {
             return
         }
 
+        if header.hasPrefix("POST /device-log ") {
+            do {
+                let batch = try JSONDecoder().decode(
+                    DeviceLogBatch.self,
+                    from: data[headerEnd.upperBound...]
+                )
+                guard batch.entries.count <= 32 else {
+                    respond(connection, status: 400, body: "{\"ok\":false}")
+                    return
+                }
+                enqueue(connection, on: .catalog) { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    let succeeded: Bool
+                    do {
+                        try DiagnosticLog.appendDeviceBatch(batch)
+                        succeeded = true
+                    } catch {
+                        DiagnosticLog.error("Could not save M5Paper diagnostics", error: error)
+                        succeeded = false
+                    }
+                    self.queue.async {
+                        self.respond(connection, status: succeeded ? 200 : 400,
+                            body: succeeded ? "{\"ok\":true}" : "{\"ok\":false}")
+                    }
+                }
+            } catch {
+                DiagnosticLog.error("Could not save M5Paper diagnostics", error: error)
+                respond(connection, status: 400, body: "{\"ok\":false}")
+            }
+            return
+        }
+
         if header.hasPrefix("GET /applications ") {
-            workQueue.async { [weak self, weak connection] in
+            enqueue(connection, on: .catalog) { [weak self, weak connection] in
                 guard let self, let connection else { return }
                 let applications = Self.installedApplications()
                 let data = try? JSONEncoder().encode(applications)
@@ -255,7 +360,7 @@ private final class CompanionServer {
         }
 
         if header.hasPrefix("GET /nethome-units ") {
-            workQueue.async { [weak self, weak connection] in
+            enqueue(connection, on: .climate) { [weak self, weak connection] in
                 guard let self, let connection else { return }
                 let units = self.netHomeUnitsHandler()
                 let data = units.flatMap { try? JSONEncoder().encode($0) }
@@ -279,7 +384,7 @@ private final class CompanionServer {
                 return
             }
             let subscriberHost = Self.host(from: connection.endpoint)
-            workQueue.async { [weak self, weak connection] in
+            enqueue(connection, on: .text) { [weak self, weak connection] in
                 guard let self, let connection else { return }
                 let response = self.textSourceHandler(request, subscriberHost)
                 let encoded = try? JSONEncoder().encode(response)
@@ -300,7 +405,7 @@ private final class CompanionServer {
             return
         }
 
-        workQueue.async { [weak self, weak connection] in
+        enqueue(connection, on: .action(request.type)) { [weak self, weak connection] in
             guard let self, let connection else { return }
             let result = self.actionHandler(request)
             let responseBody = result.succeeded
@@ -405,7 +510,9 @@ private final class CompanionServer {
 
     private func respond(_ connection: NWConnection, status: Int, body: String) {
         let identifier = ObjectIdentifier(connection)
-        guard respondingConnections.insert(identifier).inserted else { return }
+        guard connections[identifier] != nil,
+              respondingConnections.insert(identifier).inserted else { return }
+        lifetimes[identifier]?.cancel()
         let reason: String
         switch status {
         case 200: reason = "OK"
@@ -428,9 +535,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pairedDevicesMenuItem: NSMenuItem!
     private var recentActionMenuItem: NSMenuItem!
     private var netHomeMenuItem: NSMenuItem!
+    private var updateMenuItem: NSMenuItem!
+    private var updateService: UpdateService?
     private var server: CompanionServer?
     private let netHomeService = NetHomeService()
     private let openBuildsService = OpenBuildsControlService()
+    private let moduleRuntimeHost = ModuleRuntimeHost()
     private var configuration = CompanionConfiguration.initial
     private var editorStore: RemoteEditorStore?
     private var moduleCatalog: ModuleCatalog?
@@ -445,6 +555,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastPushedNowPlayingText: String?
     private var lastPushedPlaybackState: Bool?
     private var hasPushedPlaybackState = false
+    private let mediaObservationQueue = DispatchQueue(
+        label: "paperGIF.companion.media-observation", qos: .utility)
+    private var mediaPushInFlight = false
+    private var mediaPushPending = false
+    private var mediaPushNeedsTitle = false
     private var defaultOutputDeviceListener: AudioObjectPropertyListenerBlock?
     private var outputVolumeListener: AudioObjectPropertyListenerBlock?
     private var observedOutputDevice = AudioObjectID(kAudioObjectUnknown)
@@ -452,6 +567,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastPushedOutputVolume: Int?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSSetUncaughtExceptionHandler { exception in
+            DiagnosticLog.error("Uncaught exception: \(exception.name.rawValue): \(exception.reason ?? "Unknown")")
+        }
+        DiagnosticLog.info("paperGIF Mac started")
         NSApp.setActivationPolicy(.accessory)
         configuration = loadConfiguration()
         configureMenu()
@@ -461,6 +580,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let store = controlsEditorStore()
         let catalog = controlsModuleCatalog()
         Task { await checkForModuleUpdates(in: catalog) }
+        startUpdateChecks()
         if netHomeService.isSignedIn {
             Task { await store.refreshNetHomeUnits() }
         } else {
@@ -471,6 +591,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         stopNowPlayingObservation()
         stopOutputVolumeObservation()
+        moduleRuntimeHost.stop()
     }
 
     private var token: String {
@@ -512,6 +633,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(configuration).write(to: configurationURL, options: .atomic)
         } catch {
+            DiagnosticLog.error("Could not save companion settings", error: error)
             statusMenuItem?.title = "Could not save settings"
         }
     }
@@ -536,6 +658,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(netHomeMenuItem)
         menu.addItem(NSMenuItem(title: "Accessibility Settings…", action: #selector(openAccessibilitySettings), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Forget Paired Devices…", action: #selector(forgetPairedDevices), keyEquivalent: ""))
+        menu.addItem(.separator())
+        updateMenuItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        menu.addItem(updateMenuItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit paperGIF Mac", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -567,6 +692,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             try server?.start()
             statusMenuItem.title = "Ready on \(ProcessInfo.processInfo.hostName):\(port)"
         } catch {
+            DiagnosticLog.error("Companion server failed to start", error: error)
             statusMenuItem.title = "Server failed: \(error.localizedDescription)"
         }
     }
@@ -669,7 +795,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let store = RemoteEditorStore(
             computerName: Host.current().localizedName ?? "This Mac",
-            host: ProcessInfo.processInfo.hostName,
+            host: routedIPv4Address() ?? ProcessInfo.processInfo.hostName,
             port: Int(port),
             token: token,
             netHomeService: netHomeService
@@ -683,6 +809,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             return moduleCatalog
         }
         let catalog = ModuleCatalog()
+        catalog.installedModulesDidChange = { [weak self] manifests in
+            self?.moduleRuntimeHost.load(manifests)
+        }
         moduleCatalog = catalog
         return catalog
     }
@@ -693,6 +822,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             // Module refresh is best effort; the editor exposes errors and an explicit retry.
         }
+    }
+
+    @MainActor private func startUpdateChecks() {
+        let service = UpdateService()
+        service.statusChanged = { [weak self] status in
+            self?.updateMenuItem.title = status ?? "Check for Updates…"
+            self?.updateMenuItem.action = status == nil ? #selector(self?.checkForUpdates) : nil
+        }
+        service.firmwareTarget = { [weak self] in
+            guard let self else { return nil }
+            let store = self.controlsEditorStore()
+            return UpdateService.FirmwareTarget(address: store.deviceAddress, token: store.localComputer.token)
+        }
+        updateService = service
+        service.startAutomaticChecks()
+    }
+
+    @MainActor @objc private func checkForUpdates() {
+        Task { await updateService?.checkForUpdates(userInitiated: true) }
     }
 
     @objc private func forgetPairedDevices() {
@@ -834,7 +982,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 valueTenths: request.valueTenths
             )
         default:
-            result = (false, false)
+            let response = moduleRuntimeHost.perform(ModuleActionRequest(
+                type: request.type,
+                host: request.host,
+                text: request.text,
+                value: request.value,
+                valueTenths: request.valueTenths,
+                modifiers: request.modifiers
+            ))
+            if let message = response?.message, !message.isEmpty {
+                DiagnosticLog.info("Module action \(request.type): \(message)")
+            }
+            result = (response?.succeeded ?? false, response?.changed ?? false)
         }
         let actionName = request.text.isEmpty ? request.type : request.text
         DispatchQueue.main.async { [weak self] in
@@ -893,10 +1052,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let openBuildsPositions = Dictionary(uniqueKeysWithValues: positionHosts.compactMap { host in
             openBuildsService.position(host: host).map { (host, $0) }
         })
+        // One media snapshot for the whole batch, including duplicate title,
+        // seek and play/pause controls. Queries can involve slow Apple Events.
+        let needsTimeline = !nowPlayingControlIDs.isEmpty || !playbackStateControlIDs.isEmpty
+        let timeline = needsTimeline ? (applicationMediaTimeline() ?? mediaRemoteTimeline()) : nil
+        let isPlaying = playbackStateControlIDs.isEmpty ? nil
+            : (timeline?.isPlaying ?? playbackIsPlaying())
+        let nowPlayingOutput = nowPlayingControlIDs.isEmpty ? nil
+            : nowPlayingText()?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let volume = outputVolumeControlIDs.isEmpty ? nil : outputVolumeValue()
         let items = request.items.map { item -> TextSourceResponse in
             if item.source == "playbackState" {
-                let timeline = applicationMediaTimeline() ?? mediaRemoteTimeline()
-                let isPlaying = timeline?.isPlaying ?? playbackIsPlaying()
                 return TextSourceResponse(
                     id: String(item.id.prefix(40)),
                     text: "",
@@ -908,17 +1074,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
             if item.source == "outputVolume" {
-                let value = outputVolumeValue()
                 return TextSourceResponse(
                     id: String(item.id.prefix(40)),
                     text: "",
-                    available: value != nil,
-                    value: value
+                    available: volume != nil,
+                    value: volume
                 )
             }
             if item.source == "nowPlaying" {
-                let timeline = applicationMediaTimeline() ?? mediaRemoteTimeline()
-                let output = nowPlayingText()?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let output = nowPlayingOutput
                 let available = output?.isEmpty == false
                 return TextSourceResponse(
                     id: String(item.id.prefix(40)),
@@ -1024,17 +1188,47 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let generation = nowPlayingUpdateGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self, generation == self.nowPlayingUpdateGeneration else { return }
-            self.pushNowPlayingIfChanged()
-            self.pushPlaybackStateIfChanged()
+            self.refreshMediaPush(includeTitle: true)
         }
     }
 
-    private func pushNowPlayingIfChanged() {
-        let normalized = nowPlayingText()?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let text = normalized?.isEmpty == false ? boundedUTF8(normalized!, maximumBytes: 192) : nil
+    private func refreshMediaPush(includeTitle: Bool) {
+        mediaPushNeedsTitle = mediaPushNeedsTitle || includeTitle
+        if mediaPushInFlight {
+            mediaPushPending = true
+            return
+        }
+        let readsTitle = mediaPushNeedsTitle
+        mediaPushNeedsTitle = false
+        mediaPushPending = false
+        mediaPushInFlight = true
+        let generation = nowPlayingUpdateGeneration
+        mediaObservationQueue.async { [weak self] in
+            guard let self else { return }
+            let timeline = self.applicationMediaTimeline() ?? self.mediaRemoteTimeline()
+            let playbackState = timeline?.isPlaying ?? self.playbackIsPlaying()
+            let normalized = readsTitle
+                ? self.nowPlayingText()?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+            let text = normalized?.isEmpty == false
+                ? self.boundedUTF8(normalized!, maximumBytes: 192) : nil
+            DispatchQueue.main.async {
+                self.mediaPushInFlight = false
+                if generation == self.nowPlayingUpdateGeneration {
+                    if readsTitle {
+                        self.publishNowPlaying(text: text, timeline: timeline)
+                    }
+                    self.publishPlaybackState(playbackState, timeline: timeline)
+                }
+                if self.mediaPushPending {
+                    self.refreshMediaPush(includeTitle: self.mediaPushNeedsTitle)
+                }
+            }
+        }
+    }
+
+    private func publishNowPlaying(text: String?, timeline: MediaTimelineSnapshot?) {
         guard text != lastPushedNowPlayingText else { return }
         lastPushedNowPlayingText = text
-        let timeline = applicationMediaTimeline() ?? mediaRemoteTimeline()
 
         for (host, controlIDs) in nowPlayingSubscriptions where !controlIDs.isEmpty {
             var components = URLComponents()
@@ -1067,8 +1261,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func pushPlaybackStateIfChanged() {
-        let timeline = applicationMediaTimeline() ?? mediaRemoteTimeline()
-        let playbackState = timeline?.isPlaying ?? playbackIsPlaying()
+        refreshMediaPush(includeTitle: false)
+    }
+
+    private func publishPlaybackState(_ playbackState: Bool?, timeline: MediaTimelineSnapshot?) {
         guard !hasPushedPlaybackState || playbackState != lastPushedPlaybackState else { return }
         hasPushedPlaybackState = true
         lastPushedPlaybackState = playbackState
@@ -1256,11 +1452,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         for application in applications where
             !NSRunningApplication.runningApplications(withBundleIdentifier: application.bundleID).isEmpty {
             guard requestAutomationPermission(for: application.bundleID) else {
-                recentActionMenuItem.title = "Allow Music access in System Settings"
-                statusItem.button?.image = NSImage(
-                    systemSymbolName: "exclamationmark.rectangle",
-                    accessibilityDescription: "Music access is required"
-                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.recentActionMenuItem.title = "Allow Music access in System Settings"
+                    self?.statusItem.button?.image = NSImage(
+                        systemSymbolName: "exclamationmark.rectangle",
+                        accessibilityDescription: "Music access is required"
+                    )
+                }
                 continue
             }
             let script = """

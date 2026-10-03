@@ -139,12 +139,7 @@ internal sealed class WindowsTextSourceResolver(
             var manager = await GlobalSystemMediaTransportControlsSessionManager
                 .RequestAsync()
                 .AsTask(cancellationToken);
-            var sessions = manager.GetSessions();
-            var session = manager.GetCurrentSession()
-                ?? sessions.FirstOrDefault(candidate =>
-                    candidate.GetPlaybackInfo().PlaybackStatus ==
-                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                ?? sessions.FirstOrDefault();
+            var session = WindowsMediaTransport.SelectSession(manager);
             if (session is null)
             {
                 return null;

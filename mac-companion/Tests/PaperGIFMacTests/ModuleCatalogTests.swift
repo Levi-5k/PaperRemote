@@ -144,6 +144,21 @@ final class ModuleCatalogTests: XCTestCase {
         XCTAssertTrue(zip(page.controls, definition.page.controls).allSatisfy { $0.id != $1.id })
     }
 
+    func testMatterModuleOwnsItsRuntimeCommands() throws {
+        let module = try JSONDecoder().decode(
+            PaperModuleManifest.self,
+            from: Data(contentsOf: moduleFixture("matter-switch.json"))
+        )
+
+        XCTAssertEqual(module.id, "matter-switch")
+        XCTAssertEqual(module.runtime?.executable, "matter")
+        XCTAssertEqual(module.runtime?.actions, ["on", "off", "toggle"])
+        XCTAssertTrue(module.controls.allSatisfy {
+            $0.control.action.type == .module && $0.control.action.host == module.id
+        })
+        XCTAssertEqual(Set(module.controls.map(\.control.action.text)), Set(module.runtime?.actions ?? []))
+    }
+
     func testUpdatingModulePagePreservesIdentitySettingsAndRouting() throws {
         let module = try JSONDecoder().decode(
             PaperModuleManifest.self,

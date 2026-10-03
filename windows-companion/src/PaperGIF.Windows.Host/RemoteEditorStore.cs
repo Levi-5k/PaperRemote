@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -248,6 +249,11 @@ internal sealed class RemoteEditorStore : IDisposable
         {
             return;
         }
+        if (page.Layout == RemotePageLayout.OpenBuildsController &&
+            OverlapsOpenBuildsSettings(destination.Value, page.GridColumns, page.GridRows))
+        {
+            return;
+        }
         var destinationCells = Cells(destination.Value, page.GridColumns);
         foreach (var candidate in page.Controls.Where(candidate => candidate.Id != controlId))
         {
@@ -255,8 +261,12 @@ internal sealed class RemoteEditorStore : IDisposable
                 Placement(candidate, slot, page) is { } placement &&
                 destinationCells.Overlaps(Cells(placement, page.GridColumns)))
             {
-                candidate.LayoutSlot = null;
+                return;
             }
+        }
+        if (control.LayoutSlot == destination.Value.Slot)
+        {
+            return;
         }
         control.LayoutSlot = destination.Value.Slot;
         Commit();
@@ -264,6 +274,10 @@ internal sealed class RemoteEditorStore : IDisposable
 
     public void Commit()
     {
+        if (!isApplyingDeviceProfile)
+        {
+            Profile.MarkUpdated();
+        }
         Save();
         Changed?.Invoke(this, EventArgs.Empty);
         if (HasLoadedDeviceProfile && !isApplyingDeviceProfile)
@@ -283,10 +297,29 @@ internal sealed class RemoteEditorStore : IDisposable
             {
                 throw new InvalidOperationException($"M5Paper returned {(int)response.StatusCode}.");
             }
+            var loadedProfile = RemoteProfileJson.Deserialize(json);
+            if (Profile.UpdatedAtMilliseconds > loadedProfile.UpdatedAtMilliseconds)
+            {
+                using var newerRequest = AuthorizedRequest(HttpMethod.Post, requestUri);
+                newerRequest.Content = new StringContent(
+                    RemoteProfileJson.Serialize(Profile),
+                    Encoding.UTF8,
+                    "application/json");
+                using var newerResponse = await httpClient.SendAsync(newerRequest);
+                newerResponse.EnsureSuccessStatusCode();
+                HasLoadedDeviceProfile = true;
+                return "Local settings were newer and were installed on M5Paper";
+            }
+            if (Profile.UpdatedAtMilliseconds == loadedProfile.UpdatedAtMilliseconds &&
+                Profile.UpdatedAtMilliseconds > 0)
+            {
+                HasLoadedDeviceProfile = true;
+                return "Settings are already current";
+            }
             isApplyingDeviceProfile = true;
             try
             {
-                Profile = RemoteProfileJson.Deserialize(json);
+                Profile = loadedProfile;
                 EnsureLocalComputer();
                 SelectedPageId = Profile.Pages.FirstOrDefault()?.Id;
                 SelectedControlId = null;
@@ -651,9 +684,41 @@ internal sealed class RemoteEditorStore : IDisposable
         return cells;
     }
 
-    private static string? LocalIpv4Address() => Dns.GetHostAddresses(Dns.GetHostName())
-        .FirstOrDefault(address => address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(address))
-        ?.ToString();
+    private static bool OverlapsOpenBuildsSettings(GridPlacement placement, int columns, int rows)
+    {
+        var row = placement.Slot / columns;
+        var column = placement.Slot % columns;
+        var left = 24 + column * 504d / columns;
+        var top = 142 + row * 712d / rows;
+        var right = left + placement.Width * 504d / columns - 12;
+        var bottom = top + placement.Height * 712d / rows - 12;
+        return left < 516 && right > 364 && top < 722 && bottom > 292;
+    }
+
+    internal static string? LocalIpv4Address()
+    {
+        var candidates = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(network => network.OperationalStatus == OperationalStatus.Up)
+            .Select(network => (Network: network, Properties: network.GetIPProperties()))
+            .SelectMany(candidate => candidate.Properties.UnicastAddresses
+                .Where(unicast => unicast.Address.AddressFamily == AddressFamily.InterNetwork)
+                .Select(unicast => (
+                    unicast.Address,
+                    HasDefaultGateway: candidate.Properties.GatewayAddresses.Any(gateway =>
+                        gateway.Address.AddressFamily == AddressFamily.InterNetwork &&
+                        !gateway.Address.Equals(IPAddress.Any)))))
+            .ToArray();
+        return PreferredIpv4Address(candidates);
+    }
+
+    internal static string? PreferredIpv4Address(
+        IEnumerable<(IPAddress Address, bool HasDefaultGateway)> candidates) => candidates
+        .Where(candidate => !IPAddress.IsLoopback(candidate.Address) &&
+            !candidate.Address.Equals(IPAddress.Any) &&
+            !candidate.Address.GetAddressBytes().Take(2).SequenceEqual(new byte[] { 169, 254 }))
+        .OrderByDescending(candidate => candidate.HasDefaultGateway)
+        .Select(candidate => candidate.Address.ToString())
+        .FirstOrDefault();
 
     private static string DocumentPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

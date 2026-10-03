@@ -1,0 +1,425 @@
+import Foundation
+import Matter
+import Security
+
+private struct ActionRequest: Decodable {
+    let type: String
+    let host: String?
+    let text: String
+    let value: Int
+    let valueTenths: Int?
+    let modifiers: [String]
+}
+
+private struct ActionResponse: Codable {
+    let succeeded: Bool
+    let changed: Bool
+    let message: String?
+}
+
+private struct MatterNode: Codable {
+    let id: UInt64
+    var name: String
+    var endpoint: UInt16
+}
+
+private struct MatterState: Codable {
+    var ipk: Data
+    var privateKey: Data
+    var fabricID: UInt64
+    var nextNodeID: UInt64
+    var nodes: [MatterNode]
+    var fabricCreated: Bool
+}
+
+@available(macOS 13.3, *)
+private final class MatterStorage: NSObject, MTRStorage {
+    private let fileURL: URL
+    private let lock = NSLock()
+    private var values: [String: Data]
+
+    init(directory: URL) throws {
+        fileURL = directory.appendingPathComponent("matter-storage.plist")
+        if let data = try? Data(contentsOf: fileURL),
+           let stored = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Data] {
+            values = stored
+        } else {
+            values = [:]
+        }
+        super.init()
+    }
+
+    func storageData(forKey key: String) -> Data? {
+        lock.withLock { values[key] }
+    }
+
+    func setStorageData(_ value: Data, forKey key: String) -> Bool {
+        lock.withLock {
+            values[key] = value
+            return persist()
+        }
+    }
+
+    func removeStorageData(forKey key: String) -> Bool {
+        lock.withLock {
+            guard values.removeValue(forKey: key) != nil else { return false }
+            return persist()
+        }
+    }
+
+    private func persist() -> Bool {
+        do {
+            let data = try PropertyListSerialization.data(
+                fromPropertyList: values,
+                format: .binary,
+                options: 0
+            )
+            try data.write(to: fileURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: fileURL.path
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+}
+
+@available(macOS 13.3, *)
+private final class MatterKeypair: NSObject, MTRKeypair {
+    let privateKey: SecKey
+
+    init(privateKeyData: Data) throws {
+        let attributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits: 256,
+        ]
+        var error: Unmanaged<CFError>?
+        guard let key = SecKeyCreateWithData(
+            privateKeyData as CFData,
+            attributes as CFDictionary,
+            &error
+        ) else {
+            throw error?.takeRetainedValue() ?? MatterModuleError.invalidPrivateKey
+        }
+        privateKey = key
+        super.init()
+    }
+
+    func publicKey() -> Unmanaged<SecKey> {
+        Unmanaged.passRetained(SecKeyCopyPublicKey(privateKey)!)
+    }
+
+    @available(macOS 15.4, *)
+    func copyPublicKey() -> SecKey {
+        SecKeyCopyPublicKey(privateKey)!
+    }
+
+    func signMessageECDSA_DER(_ message: Data) -> Data {
+        var error: Unmanaged<CFError>?
+        return SecKeyCreateSignature(
+            privateKey,
+            .ecdsaSignatureMessageX962SHA256,
+            message as CFData,
+            &error
+        ) as Data? ?? Data()
+    }
+}
+
+@available(macOS 13.3, *)
+private final class CommissioningDelegate: NSObject, MTRDeviceControllerDelegate {
+    let nodeID: NSNumber
+    let semaphore = DispatchSemaphore(value: 0)
+    private(set) var error: Error?
+
+    init(nodeID: NSNumber) {
+        self.nodeID = nodeID
+    }
+
+    func controller(
+        _ controller: MTRDeviceController,
+        commissioningSessionEstablishmentDone error: Error?
+    ) {
+        if let error {
+            self.error = error
+            semaphore.signal()
+            return
+        }
+        do {
+            try controller.commissionNode(
+                withID: nodeID,
+                commissioningParams: MTRCommissioningParameters()
+            )
+        } catch {
+            self.error = error
+            semaphore.signal()
+        }
+    }
+
+    func controller(
+        _ controller: MTRDeviceController,
+        commissioningComplete error: Error?
+    ) {
+        self.error = error
+        semaphore.signal()
+    }
+
+    @available(macOS 14.0, *)
+    func controller(
+        _ controller: MTRDeviceController,
+        commissioningComplete error: Error?,
+        nodeID: NSNumber?
+    ) {
+        self.error = error
+        semaphore.signal()
+    }
+}
+
+@available(macOS 13.3, *)
+private final class MatterHub {
+    private let stateURL: URL
+    private var state: MatterState
+    private let factory: MTRDeviceControllerFactory
+    private let controller: MTRDeviceController
+    private let callbackQueue = DispatchQueue(label: "paperGIF.module.matter.callbacks")
+    private var commissioningDelegate: CommissioningDelegate?
+
+    init(stateDirectory: URL) throws {
+        try FileManager.default.createDirectory(
+            at: stateDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        stateURL = stateDirectory.appendingPathComponent("hub.json")
+        state = try Self.loadOrCreateState(at: stateURL)
+        let storage = try MatterStorage(directory: stateDirectory)
+        let keypair = try MatterKeypair(privateKeyData: state.privateKey)
+        factory = MTRDeviceControllerFactory.sharedInstance()
+        if !factory.isRunning {
+            let factoryParameters = MTRDeviceControllerFactoryParams(storage: storage)
+            try factory.start(factoryParameters)
+        }
+
+        let startup = MTRDeviceControllerStartupParams(
+            ipk: state.ipk,
+            fabricID: NSNumber(value: state.fabricID),
+            nocSigner: keypair
+        )
+        startup.vendorID = 0xFFF1
+        if state.fabricCreated {
+            controller = try factory.createController(onExistingFabric: startup)
+        } else {
+            controller = try factory.createController(onNewFabric: startup)
+            state.fabricCreated = true
+            try saveState()
+        }
+    }
+
+    deinit {
+        controller.shutdown()
+        factory.stop()
+    }
+
+    func commission(setupCode: String, name: String = "Matter switch") throws -> MatterNode {
+        let payload: MTRSetupPayload
+        if #available(macOS 14.6, *) {
+            guard let parsed = MTRSetupPayload(payload: setupCode) else {
+                throw MatterModuleError.invalidSetupCode
+            }
+            payload = parsed
+        } else {
+            payload = try MTRSetupPayload(onboardingPayload: setupCode)
+        }
+
+        let nodeID = state.nextNodeID
+        let delegate = CommissioningDelegate(nodeID: NSNumber(value: nodeID))
+        commissioningDelegate = delegate
+        controller.setDeviceControllerDelegate(delegate, queue: callbackQueue)
+        try controller.setupCommissioningSession(
+            with: payload,
+            newNodeID: NSNumber(value: nodeID)
+        )
+        guard delegate.semaphore.wait(timeout: .now() + 120) == .success else {
+            commissioningDelegate = nil
+            throw MatterModuleError.commissioningTimedOut
+        }
+        commissioningDelegate = nil
+        if let error = delegate.error {
+            throw error
+        }
+        let node = MatterNode(id: nodeID, name: name, endpoint: 1)
+        state.nodes.append(node)
+        state.nextNodeID += 1
+        try saveState()
+        return node
+    }
+
+    func perform(command: String) -> ActionResponse {
+        guard let node = state.nodes.last else {
+            return ActionResponse(
+                succeeded: false,
+                changed: false,
+                message: "No Matter device has been commissioned"
+            )
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var commandError: Error?
+        let device = MTRDevice(nodeID: NSNumber(value: node.id), controller: controller)
+        guard let cluster = MTRClusterOnOff(
+            device: device,
+            endpointID: NSNumber(value: node.endpoint),
+            queue: callbackQueue
+        ) else {
+            return ActionResponse(succeeded: false, changed: false, message: "On/Off cluster unavailable")
+        }
+        let completion: MTRStatusCompletion = { error in
+            commandError = error
+            semaphore.signal()
+        }
+        switch command {
+        case "on":
+            cluster.on(with: nil, expectedValues: nil, expectedValueInterval: nil, completion: completion)
+        case "off":
+            cluster.off(with: nil, expectedValues: nil, expectedValueInterval: nil, completion: completion)
+        case "toggle":
+            cluster.toggle(with: nil, expectedValues: nil, expectedValueInterval: nil, completion: completion)
+        default:
+            return ActionResponse(succeeded: false, changed: false, message: "Unsupported command")
+        }
+        guard semaphore.wait(timeout: .now() + 20) == .success else {
+            return ActionResponse(succeeded: false, changed: false, message: "Matter command timed out")
+        }
+        if let commandError {
+            return ActionResponse(succeeded: false, changed: false, message: commandError.localizedDescription)
+        }
+        return ActionResponse(succeeded: true, changed: true, message: "\(node.name): \(command)")
+    }
+
+    func nodesJSON() throws -> Data {
+        try JSONEncoder().encode(state.nodes)
+    }
+
+    private func saveState() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(state).write(to: stateURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateURL.path)
+    }
+
+    private static func loadOrCreateState(at url: URL) throws -> MatterState {
+        if let data = try? Data(contentsOf: url),
+           let state = try? JSONDecoder().decode(MatterState.self, from: data) {
+            return state
+        }
+        let keyAttributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits: 256,
+        ]
+        var error: Unmanaged<CFError>?
+        guard let key = SecKeyCreateRandomKey(keyAttributes as CFDictionary, &error),
+              let keyData = SecKeyCopyExternalRepresentation(key, &error) as Data? else {
+            throw error?.takeRetainedValue() ?? MatterModuleError.keyGenerationFailed
+        }
+        return MatterState(
+            ipk: randomData(count: 16),
+            privateKey: keyData,
+            fabricID: UInt64.random(in: 1...UInt64.max),
+            nextNodeID: 0x1234_4321_0001,
+            nodes: [],
+            fabricCreated: false
+        )
+    }
+}
+
+private enum MatterModuleError: LocalizedError {
+    case invalidPrivateKey
+    case keyGenerationFailed
+    case invalidSetupCode
+    case commissioningTimedOut
+    case unsupportedSystem
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPrivateKey: "The stored Matter fabric key is invalid."
+        case .keyGenerationFailed: "Could not generate a Matter fabric key."
+        case .invalidSetupCode: "The Matter setup code is invalid."
+        case .commissioningTimedOut: "Matter commissioning timed out. Put the device in pairing mode and retry."
+        case .unsupportedSystem: "Matter modules require macOS 13.3 or later."
+        }
+    }
+}
+
+private func randomData(count: Int) -> Data {
+    var data = Data(count: count)
+    data.withUnsafeMutableBytes { bytes in
+        _ = SecRandomCopyBytes(kSecRandomDefault, count, bytes.baseAddress!)
+    }
+    return data
+}
+
+private extension NSLock {
+    func withLock<Result>(_ body: () -> Result) -> Result {
+        lock()
+        defer { unlock() }
+        return body()
+    }
+}
+
+private func argument(after name: String) -> String? {
+    guard let index = CommandLine.arguments.firstIndex(of: name),
+          CommandLine.arguments.indices.contains(index + 1) else { return nil }
+    return CommandLine.arguments[index + 1]
+}
+
+private func writeJSONLine(_ response: ActionResponse) {
+    guard let data = try? JSONEncoder().encode(response) else { return }
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data([0x0A]))
+}
+
+let defaultState = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    .appendingPathComponent("paperGIF Mac/module-state/matter-switch", isDirectory: true)
+let stateDirectory = URL(fileURLWithPath: argument(after: "--state") ?? defaultState.path, isDirectory: true)
+
+@available(macOS 13.3, *)
+func runMatterModule() throws {
+    let hub = try MatterHub(stateDirectory: stateDirectory)
+    if let setupCode = argument(after: "--commission") {
+        let node = try hub.commission(setupCode: setupCode)
+        writeJSONLine(ActionResponse(succeeded: true, changed: true, message: "Commissioned node \(node.id)"))
+    } else if CommandLine.arguments.contains("--list") {
+        FileHandle.standardOutput.write(try hub.nodesJSON())
+        FileHandle.standardOutput.write(Data([0x0A]))
+    } else if let command = ["on", "off", "toggle"].first(where: {
+        CommandLine.arguments.contains("--\($0)")
+    }) {
+        writeJSONLine(hub.perform(command: command))
+    } else if CommandLine.arguments.contains("--json-lines") {
+        while let line = readLine() {
+            guard let data = line.data(using: .utf8),
+                  let request = try? JSONDecoder().decode(ActionRequest.self, from: data),
+                  request.type == "module",
+                  request.host == "matter-switch" else {
+                writeJSONLine(ActionResponse(succeeded: false, changed: false, message: "Invalid module request"))
+                continue
+            }
+            writeJSONLine(hub.perform(command: request.text))
+        }
+    } else {
+        writeJSONLine(ActionResponse(succeeded: false, changed: false, message: "Specify --commission, --list, --on, --off, --toggle, or --json-lines"))
+        exit(2)
+    }
+}
+
+do {
+    guard #available(macOS 13.3, *) else {
+        throw MatterModuleError.unsupportedSystem
+    }
+    try runMatterModule()
+} catch {
+    writeJSONLine(ActionResponse(succeeded: false, changed: false, message: error.localizedDescription))
+    exit(1)
+}

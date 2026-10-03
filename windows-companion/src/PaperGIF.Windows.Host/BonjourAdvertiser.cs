@@ -15,6 +15,10 @@ internal sealed class BonjourAdvertiser : IDisposable
         {
             HostName = $"{Environment.MachineName}.local",
         };
+        if (RemoteEditorStore.LocalIpv4Address() is { } host)
+        {
+            profile.AddProperty("host", host);
+        }
         serviceDiscovery.Advertise(profile);
     }
 

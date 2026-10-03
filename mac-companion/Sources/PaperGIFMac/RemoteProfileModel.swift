@@ -148,6 +148,8 @@ enum RemoteTextTapBehavior: String, Codable, CaseIterable, Identifiable, Sendabl
 }
 
 enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
+    case iPhoneMedia
+    case iPhoneHomePower
     case macMedia
     case macKey
     case macOpen
@@ -157,18 +159,23 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
     case wledPower
     case wledPreset
     case wledBrightness
+    case eWeLinkPower
+    case localHTTP
     case netHomePower
     case netHomeTemperature
     case netHomeTemperatureStep
     case netHomeMode
     case netHomeFan
     case netHomeAuto
+    case module
     case page
 
     var id: Self { self }
 
     var title: String {
         switch self {
+        case .iPhoneMedia: "iPhone media"
+        case .iPhoneHomePower: "Apple Home power"
         case .macMedia: "Media"
         case .macKey: "Keyboard shortcut"
         case .macOpen: "Open app or URL"
@@ -178,18 +185,23 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .wledPower: "WLED power"
         case .wledPreset: "WLED preset"
         case .wledBrightness: "WLED brightness"
+        case .eWeLinkPower: "eWeLink power"
+        case .localHTTP: "Local HTTP request"
         case .netHomePower: "NetHome power"
         case .netHomeTemperature: "NetHome temperature"
         case .netHomeTemperatureStep: "NetHome temperature step"
         case .netHomeMode: "NetHome mode"
         case .netHomeFan: "NetHome fan"
         case .netHomeAuto: "Sensor auto mode"
+        case .module: "Module action"
         case .page: "Open page"
         }
     }
 
     var systemImage: String {
         switch self {
+        case .iPhoneMedia: "iphone"
+        case .iPhoneHomePower: "homekit"
         case .macMedia: "playpause.fill"
         case .macKey: "keyboard"
         case .macOpen: "arrow.up.forward.app"
@@ -199,12 +211,15 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .wledPower: "power"
         case .wledPreset: "sparkles"
         case .wledBrightness: "sun.max.fill"
+        case .eWeLinkPower: "powerplug.fill"
+        case .localHTTP: "network"
         case .netHomePower: "power"
         case .netHomeTemperature: "thermometer.medium"
         case .netHomeTemperatureStep: "plusminus"
         case .netHomeMode: "arrow.triangle.2.circlepath"
         case .netHomeFan: "fan.fill"
         case .netHomeAuto: "humidity.fill"
+        case .module: "shippingbox.fill"
         case .page: "rectangle.on.rectangle"
         }
     }
@@ -218,6 +233,10 @@ struct RemoteAction: Codable, Equatable, Sendable {
     var valueTenths: Int?
     var modifiers: [String] = []
     var computerID: String?
+    var httpMethod: String?
+    var httpBody: String?
+    var deviceID: String?
+    var deviceKey: String?
     var deadbandTenths: Int?
     var humidityThreshold: Int?
     var minimumCycleMinutes: Int?
@@ -343,6 +362,33 @@ struct RemoteGridPlacement: Equatable, Sendable {
 enum RemoteGrid {
     static let columns = 2
     static let rows = 8
+
+    static func translatedSlot(
+        from sourceSlot: Int,
+        columnOffset: Int,
+        rowOffset: Int,
+        columns: Int,
+        rows: Int
+    ) -> Int? {
+        let column = sourceSlot % columns + columnOffset
+        let row = sourceSlot / columns + rowOffset
+        guard (0..<columns).contains(column), (0..<rows).contains(row) else { return nil }
+        return row * columns + column
+    }
+
+    static func overlapsOpenBuildsSettings(
+        _ placement: RemoteGridPlacement,
+        columns: Int,
+        rows: Int
+    ) -> Bool {
+        let row = placement.slot / columns
+        let column = placement.slot % columns
+        let left = 24 + Double(column) * 504 / Double(columns)
+        let top = 142 + Double(row) * 712 / Double(rows)
+        let right = left + Double(placement.span.width) * 504 / Double(columns) - 12
+        let bottom = top + Double(placement.span.height) * 712 / Double(rows) - 12
+        return left < 516 && right > 364 && top < 722 && bottom > 292
+    }
 
     static func placement(
         for control: RemoteControl,
@@ -602,6 +648,7 @@ struct RemoteProfile: Codable, Equatable, Sendable {
     static let maximumControlsPerPage = 24
 
     var version = currentVersion
+    var updatedAtMilliseconds: Int64 = 0
     var wifiSSID = ""
     var wifiPassword = ""
     var macHost = ""
@@ -630,6 +677,9 @@ struct RemoteProfile: Codable, Equatable, Sendable {
             )
         }
         version = Self.currentVersion
+        updatedAtMilliseconds = try container.decodeIfPresent(
+            Int64.self, forKey: .updatedAtMilliseconds
+        ) ?? 0
         wifiSSID = try container.decodeIfPresent(String.self, forKey: .wifiSSID) ?? ""
         wifiPassword = try container.decodeIfPresent(String.self, forKey: .wifiPassword) ?? ""
         macHost = try container.decodeIfPresent(String.self, forKey: .macHost) ?? ""
@@ -650,6 +700,13 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         if decodedVersion < 6 {
             pages = pages.map { $0.upgradingGeneratedThermostat() }
         }
+    }
+
+    mutating func markUpdated(now: Date = Date()) {
+        let currentMilliseconds = Int64(now.timeIntervalSince1970 * 1_000)
+        let nextRevision = updatedAtMilliseconds == .max
+            ? Int64.max : updatedAtMilliseconds + 1
+        updatedAtMilliseconds = max(nextRevision, currentMilliseconds)
     }
 
     static let starter = RemoteProfile(pages: [

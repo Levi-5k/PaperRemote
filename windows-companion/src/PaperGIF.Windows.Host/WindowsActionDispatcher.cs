@@ -64,20 +64,7 @@ internal sealed class WindowsActionDispatcher(
             return TrySeek(request.Value);
         }
 
-        byte virtualKey = request.Text switch
-        {
-            "playPause" => 0xB3,
-            "previous" => 0xB1,
-            "next" => 0xB0,
-            _ => 0,
-        };
-        if (virtualKey == 0)
-        {
-            return false;
-        }
-
-        PressAndRelease(virtualKey);
-        return true;
+        return WindowsMediaTransport.SendAsync(request.Text).GetAwaiter().GetResult();
     }
 
     private static bool TrySeek(int value)
@@ -89,12 +76,7 @@ internal sealed class WindowsActionDispatcher(
                 .AsTask()
                 .GetAwaiter()
                 .GetResult();
-            var sessions = manager.GetSessions();
-            var session = manager.GetCurrentSession()
-                ?? sessions.FirstOrDefault(candidate =>
-                    candidate.GetPlaybackInfo().PlaybackStatus ==
-                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                ?? sessions.FirstOrDefault();
+            var session = WindowsMediaTransport.SelectSession(manager);
             if (session is null)
             {
                 return false;

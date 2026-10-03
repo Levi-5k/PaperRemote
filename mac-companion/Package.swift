@@ -13,6 +13,7 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .executable(name: "PaperGIFMac", targets: ["PaperGIFMac"]),
+        .executable(name: "PaperGIFModule-matter", targets: ["PaperGIFMatterModule"]),
     ],
     dependencies: [
         .package(url: "https://github.com/socketio/socket.io-client-swift.git", from: "16.1.1"),
@@ -32,6 +33,13 @@ let package = Package(
                     "-Xlinker", "__info_plist",
                     "-Xlinker", infoPlistPath,
                 ]),
+            ]
+        ),
+        .executableTarget(
+            name: "PaperGIFMatterModule",
+            linkerSettings: [
+                .linkedFramework("Matter"),
+                .linkedFramework("Security"),
             ]
         ),
         .testTarget(name: "PaperGIFMacTests", dependencies: ["PaperGIFMac"]),

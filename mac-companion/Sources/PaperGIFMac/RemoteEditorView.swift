@@ -33,6 +33,7 @@ private struct RemoteEditorView: View {
     @StateObject private var computerDiscovery = ComputerDiscovery()
     @StateObject private var deviceDiscovery = DeviceDiscovery()
     @State private var inspectorTab = InspectorTab.catalog
+    @State private var automaticallyLoadedDeviceAddress: String?
 
     private enum InspectorTab: String, CaseIterable, Identifiable {
         case catalog = "Add Controls"
@@ -60,7 +61,7 @@ private struct RemoteEditorView: View {
         .onAppear {
             discovery.start()
             computerDiscovery.start()
-            deviceDiscovery.start()
+            deviceDiscovery.start(preferredAddress: store.deviceAddress)
         }
         .onDisappear {
             discovery.stop()
@@ -69,7 +70,10 @@ private struct RemoteEditorView: View {
             store.saveImmediately()
         }
         .onChange(of: deviceDiscovery.devices) { devices in
-            guard let device = devices.first else { return }
+            guard let device = devices.first(where: { $0.address == store.deviceAddress })
+                ?? devices.first,
+                  automaticallyLoadedDeviceAddress != device.address else { return }
+            automaticallyLoadedDeviceAddress = device.address
             store.deviceAddress = device.address
             Task { await store.loadFromDevice() }
         }
@@ -96,28 +100,71 @@ private struct RemoteEditorView: View {
             }
             Spacer()
             sendStatus
-            TextField("M5Paper address", text: $store.deviceAddress)
-                .textFieldStyle(.roundedBorder)
+            if deviceDiscovery.devices.isEmpty {
+                Label(
+                    deviceDiscovery.isScanning ? "Scanning for M5Paper" : "No M5Paper found",
+                    systemImage: deviceDiscovery.isScanning ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle"
+                )
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                    .frame(width: 180)
+                    .help(deviceDiscovery.scanMessage ?? "Searching Bonjour and the local network")
+            } else {
+                Picker("M5Paper", selection: deviceSelection) {
+                    ForEach(deviceDiscovery.devices) { device in
+                        Text(device.name).tag(device.address)
+                    }
+                }
+                .labelsHidden()
                 .frame(width: 180)
-                .help("Connect to the paperGIF Wi-Fi, then use 192.168.4.1")
+                .help("Discovered M5Paper device")
+            }
+            Button {
+                deviceDiscovery.scan(preferredAddress: store.deviceAddress)
+            } label: {
+                if deviceDiscovery.isScanning {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "magnifyingglass")
+                }
+            }
+            .frame(width: 28)
+            .help("Scan the network for M5Paper devices")
+            .disabled(deviceDiscovery.isScanning)
             Button {
                 Task { await store.loadFromDevice() }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .help("Reload layouts and settings from M5Paper")
-            .disabled(store.sendState == .loading || store.sendState == .sending)
+            .disabled(selectedDevice == nil || store.sendState == .loading || store.sendState == .sending)
             Button {
                 Task { await store.send() }
             } label: {
                 Label("Send to M5Paper", systemImage: "paperplane.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(store.validationMessage != nil || store.sendState == .sending || store.sendState == .loading)
+            .disabled(selectedDevice == nil || store.validationMessage != nil || store.sendState == .sending || store.sendState == .loading)
         }
         .padding(.horizontal, 16)
         .frame(height: 58)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var selectedDevice: DeviceDiscovery.Device? {
+        deviceDiscovery.devices.first { $0.address == store.deviceAddress }
+    }
+
+    private var deviceSelection: Binding<String> {
+        Binding(
+            get: { selectedDevice?.address ?? deviceDiscovery.devices.first?.address ?? "" },
+            set: { address in
+                guard store.deviceAddress != address else { return }
+                automaticallyLoadedDeviceAddress = address
+                store.deviceAddress = address
+                Task { await store.loadFromDevice() }
+            }
+        )
     }
 
     @ViewBuilder private var sendStatus: some View {
@@ -839,7 +886,7 @@ private struct ControlInspector: View {
         }
 
         switch control.action.type {
-        case .macMedia:
+        case .iPhoneMedia, .macMedia:
             LabeledContent("Command") {
                 Picker("", selection: mediaCommandBinding) {
                     ForEach(mediaCommands, id: \.0) { command in Text(command.1).tag(command.0) }
@@ -854,6 +901,23 @@ private struct ControlInspector: View {
                     }
                 }
             }
+        case .iPhoneHomePower:
+            LabeledContent("Home accessory") {
+                Text(control.action.deviceID ?? "Not selected")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            LabeledContent("Power") {
+                Picker("", selection: $control.action.text) {
+                    Text("Toggle").tag("toggle")
+                    Text("On").tag("on")
+                    Text("Off").tag("off")
+                }
+                .labelsHidden()
+            }
+            Text("Runs through Apple Home on the connected iPhone.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .macKey:
             LabeledContent("Key") {
                 ComboBoxField(value: $control.action.text, suggestions: keyOptions)
@@ -930,6 +994,48 @@ private struct ControlInspector: View {
                     Text("\(control.action.value)").monospacedDigit().frame(width: 28)
                 }
             }
+        case .eWeLinkPower:
+            LabeledContent("Device address") {
+                TextField("device.local or private IP", text: $control.action.host)
+            }
+            LabeledContent("Device ID") {
+                TextField("Device ID", text: optionalActionStringBinding(\.deviceID))
+            }
+            LabeledContent("Device key") {
+                SecureField("Device key", text: optionalActionStringBinding(\.deviceKey))
+            }
+            LabeledContent("Power") {
+                Picker("", selection: $control.action.text) {
+                    Text("Toggle").tag("toggle")
+                    Text("On").tag("on")
+                    Text("Off").tag("off")
+                }
+                .labelsHidden()
+            }
+        case .localHTTP:
+            LabeledContent("Device address") {
+                TextField("device.local or private IP", text: $control.action.host)
+            }
+            LabeledContent("Method") {
+                Picker("", selection: localHTTPMethodBinding) {
+                    Text("GET").tag("GET")
+                    Text("POST").tag("POST")
+                }
+                .labelsHidden()
+            }
+            LabeledContent("Path") {
+                TextField("/relay/0?turn=toggle", text: $control.action.text)
+            }
+            if localHTTPMethodBinding.wrappedValue == "POST" {
+                Text("JSON body").font(.caption).foregroundStyle(.secondary)
+                TextEditor(text: localHTTPBodyBinding)
+                    .font(.body.monospaced())
+                    .frame(minHeight: 70)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
+            }
+            Text("M5Paper only sends plain HTTP requests to local addresses.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .netHomePower:
             netHomeDeviceField
             LabeledContent("Power") {
@@ -998,6 +1104,13 @@ private struct ControlInspector: View {
             Text("Humidity assist only extends cooling. The minimum cycle protects the compressor.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .module:
+            LabeledContent("Module") {
+                Text(control.action.host)
+            }
+            LabeledContent("Command") {
+                Text(control.action.text)
+            }
         case .page:
             LabeledContent("Page") {
                 Picker("", selection: $control.action.text) {
@@ -1130,7 +1243,7 @@ private struct ControlInspector: View {
 
     @ViewBuilder private func scheduleFunctionFields(_ entry: RemoteScheduleEntry) -> some View {
         switch control.action.type {
-        case .macMedia:
+        case .iPhoneMedia, .macMedia:
             LabeledContent("Command") {
                 Picker("", selection: scheduleTextBinding(entry.id)) {
                     ForEach(mediaCommands, id: \.0) { command in Text(command.1).tag(command.0) }
@@ -1140,7 +1253,7 @@ private struct ControlInspector: View {
             if (entry.text ?? control.action.text) == "volume" {
                 Stepper("Volume: \(scheduleVolume(entry))%", value: scheduleVolumeBinding(entry.id), in: 0...100)
             }
-        case .wledPower, .netHomePower:
+        case .iPhoneHomePower, .wledPower, .eWeLinkPower, .netHomePower:
             LabeledContent("Power") {
                 Picker("", selection: scheduleTextBinding(entry.id)) {
                     Text("Toggle").tag("toggle")
@@ -1467,6 +1580,25 @@ private struct ControlInspector: View {
         )
     }
 
+    private var localHTTPMethodBinding: Binding<String> {
+        Binding(
+            get: { control.action.httpMethod == "POST" ? "POST" : "GET" },
+            set: { method in
+                control.action.httpMethod = method
+                if method == "GET" {
+                    control.action.httpBody = nil
+                }
+            }
+        )
+    }
+
+    private var localHTTPBodyBinding: Binding<String> {
+        Binding(
+            get: { control.action.httpBody ?? "" },
+            set: { control.action.httpBody = $0.isEmpty ? nil : $0 }
+        )
+    }
+
     private var openTargetBinding: Binding<String> {
         Binding(
             get: { control.action.text },
@@ -1544,6 +1676,15 @@ private struct ControlInspector: View {
         )
     }
 
+    private func optionalActionStringBinding(
+        _ keyPath: WritableKeyPath<RemoteAction, String?>
+    ) -> Binding<String> {
+        Binding(
+            get: { control.action[keyPath: keyPath] ?? "" },
+            set: { control.action[keyPath: keyPath] = $0.isEmpty ? nil : $0 }
+        )
+    }
+
     private func presetBinding(_ presets: [WLEDDiscovery.Preset]) -> Binding<Int> {
         Binding(
             get: { control.action.value },
@@ -1565,11 +1706,18 @@ private struct ControlInspector: View {
                 let host = control.action.host
                 let computerID = control.action.computerID
                 switch type {
-                case .macMedia:
-                    control.action = RemoteAction(type: type, text: "playPause", computerID: computerID)
+                case .iPhoneMedia, .macMedia:
+                    control.action = RemoteAction(
+                        type: type,
+                        text: "playPause",
+                        computerID: type == .macMedia ? computerID : nil
+                    )
                     control.title = "Play / Pause"
                     control.symbol = "playpause.fill"
                     control.isToggle = nil
+                case .iPhoneHomePower:
+                    control.action = RemoteAction(type: type, host: host, text: "toggle")
+                    control.isToggle = true
                 case .macKey:
                     control.action = RemoteAction(type: type, text: "space", computerID: computerID)
                 case .macOpen:
@@ -1590,6 +1738,11 @@ private struct ControlInspector: View {
                     control.action = RemoteAction(type: type, host: host, value: 1)
                 case .wledBrightness:
                     control.action = RemoteAction(type: type, host: host, value: 128)
+                case .eWeLinkPower:
+                    control.action = RemoteAction(type: type, host: host, text: "toggle")
+                    control.isToggle = true
+                case .localHTTP:
+                    control.action = RemoteAction(type: type, host: host, text: "/", httpMethod: "GET")
                 case .netHomePower:
                     control.action = RemoteAction(type: type, host: host, text: "toggle", computerID: computerID)
                 case .netHomeTemperature:
@@ -1617,6 +1770,8 @@ private struct ControlInspector: View {
                         humidityThreshold: 65,
                         minimumCycleMinutes: 10
                     )
+                case .module:
+                    control.action = RemoteAction(type: type, host: host, computerID: computerID)
                 case .page:
                     control.action = RemoteAction(type: type)
                 }
@@ -1780,6 +1935,15 @@ private struct DevicePreview: View {
                         .frame(width: frame.width * scale, height: frame.height * scale)
                         .position(x: frame.midX * scale, y: frame.midY * scale)
                         .onTapGesture { onSelect(control.id) }
+                        .gesture(DragGesture(minimumDistance: 8).onEnded { drag in
+                            guard let slot = RemoteLayout.translatedSlot(
+                                from: frame,
+                                translation: drag.translation,
+                                scale: scale,
+                                page: page
+                            ) else { return }
+                            onMove(control.id, slot)
+                        })
                     }
                 } else {
                     ForEach(Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
@@ -1794,11 +1958,12 @@ private struct DevicePreview: View {
                             .position(x: frame.midX * scale, y: frame.midY * scale)
                             .onTapGesture { onSelect(control.id) }
                             .gesture(DragGesture(minimumDistance: 8).onEnded { drag in
-                                let point = CGPoint(
-                                    x: frame.midX + drag.translation.width / scale,
-                                    y: frame.midY + drag.translation.height / scale
-                                )
-                                guard let slot = RemoteLayout.slot(at: point, page: page) else { return }
+                                guard let slot = RemoteLayout.translatedSlot(
+                                    from: frame,
+                                    translation: drag.translation,
+                                    scale: scale,
+                                    page: page
+                                ) else { return }
                                 onMove(control.id, slot)
                             })
                     }
@@ -2189,12 +2354,25 @@ private enum RemoteLayout {
         return frames
     }
 
-    static func slot(at point: CGPoint, page: RemotePage) -> Int? {
-        let column = Int((point.x - 24) * CGFloat(page.gridColumns) / 504)
-        let row = Int((point.y - 142) * CGFloat(page.gridRows) / 712)
-        guard (0..<page.gridColumns).contains(column),
-              (0..<page.gridRows).contains(row) else { return nil }
-        return row * page.gridColumns + column
+    static func translatedSlot(
+        from frame: CGRect,
+        translation: CGSize,
+        scale: CGFloat,
+        page: RemotePage
+    ) -> Int? {
+        let sourceColumn = Int(((frame.minX - 24) * CGFloat(page.gridColumns) / 504).rounded())
+        let sourceRow = Int(((frame.minY - 142) * CGFloat(page.gridRows) / 712).rounded())
+        let columnOffset = Int((translation.width * CGFloat(page.gridColumns) /
+            (504 * scale)).rounded())
+        let rowOffset = Int((translation.height * CGFloat(page.gridRows) /
+            (712 * scale)).rounded())
+        return RemoteGrid.translatedSlot(
+            from: sourceRow * page.gridColumns + sourceColumn,
+            columnOffset: columnOffset,
+            rowOffset: rowOffset,
+            columns: page.gridColumns,
+            rows: page.gridRows
+        )
     }
 }
 

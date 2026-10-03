@@ -33,6 +33,11 @@ final class RemoteEditorStore: ObservableObject {
 
     @Published var profile: RemoteProfile {
         didSet {
+            if !isApplyingDeviceProfile && !isStampingProfile && profile != oldValue {
+                isStampingProfile = true
+                profile.markUpdated()
+                isStampingProfile = false
+            }
             scheduleSave()
             scheduleLiveSync()
         }
@@ -58,6 +63,7 @@ final class RemoteEditorStore: ObservableObject {
     private var pendingProfileSync: ProfileSyncRequest?
     private var profileSyncGeneration: UInt64 = 0
     private var isApplyingDeviceProfile = false
+    private var isStampingProfile = false
     private let netHomeService: NetHomeService?
     private var knownNetHomeUnits: [NetHomeUnit] = []
     private var netHomeNameAliases: [String: String] = [:]
@@ -71,26 +77,33 @@ final class RemoteEditorStore: ObservableObject {
     ) {
         self.netHomeService = netHomeService
         let document = Self.loadDocument()
-        profile = document?.profile ?? .starter
+        let loadedProfile = document?.profile ?? .starter
+        profile = loadedProfile
         deviceAddress = document?.deviceAddress ?? "192.168.4.1"
         knownNetHomeUnits = document?.netHomeUnits ?? []
         netHomeNameAliases = document?.netHomeNameAliases ?? [:]
         netHomeService?.registerUnitNameAliases(netHomeNameAliases)
 
         var computer = RemoteComputer(name: computerName, host: host, port: port, token: token)
-        if let existing = document?.profile.computers.first(where: { $0.host.caseInsensitiveCompare(host) == .orderedSame }) {
+        if let existing = document?.profile.computers.first(where: {
+            $0.token == token || $0.host.caseInsensitiveCompare(host) == .orderedSame
+        }) {
             computer.id = existing.id
         }
         localComputer = computer
         if profile.computers.isEmpty {
             profile.computers = [computer]
-        } else if let index = profile.computers.firstIndex(where: { $0.host.caseInsensitiveCompare(host) == .orderedSame }) {
+        } else if let index = profile.computers.firstIndex(where: {
+            $0.id == computer.id || $0.token == token ||
+                $0.host.caseInsensitiveCompare(host) == .orderedSame
+        }) {
             profile.computers[index] = computer
         } else {
             profile.computers.append(computer)
         }
         let duplicateComputerIDs = Set(profile.computers.compactMap { candidate in
-            candidate.id != computer.id && candidate.host.caseInsensitiveCompare(host) == .orderedSame
+            candidate.id != computer.id &&
+                (candidate.token == token || candidate.host.caseInsensitiveCompare(host) == .orderedSame)
                 ? candidate.id.uuidString
                 : nil
         })
@@ -113,6 +126,10 @@ final class RemoteEditorStore: ObservableObject {
         profile.macPort = port
         profile.macToken = token
         selectedPageID = profile.pages.first?.id
+        if profile != loadedProfile {
+            profile.markUpdated()
+            saveImmediately()
+        }
     }
 
     func addLocalComputer() {
@@ -403,6 +420,12 @@ final class RemoteEditorStore: ObservableObject {
         guard let destination = RemoteGrid.placement(
             for: source, at: requestedSlot, columns: page.gridColumns, rows: page.gridRows
         ) else { return }
+        if page.layout == .openBuildsController,
+           RemoteGrid.overlapsOpenBuildsSettings(
+               destination, columns: page.gridColumns, rows: page.gridRows
+           ) {
+            return
+        }
         let destinationSlots = RemoteGrid.cells(for: destination, columns: page.gridColumns)
         for index in profile.pages[pageIndex].controls.indices where index != sourceIndex {
             let control = profile.pages[pageIndex].controls[index]
@@ -414,7 +437,7 @@ final class RemoteEditorStore: ObservableObject {
             ) else { continue }
             let slots = RemoteGrid.cells(for: placement, columns: page.gridColumns)
             if !destinationSlots.isDisjoint(with: slots) {
-                profile.pages[pageIndex].controls[index].layoutSlot = nil
+                return
             }
         }
         profile.pages[pageIndex].controls[sourceIndex].layoutSlot = destination.slot
@@ -536,6 +559,16 @@ final class RemoteEditorStore: ObservableObject {
                 throw SendError.loadRejected(detail)
             }
             let loadedProfile = try JSONDecoder().decode(RemoteProfile.self, from: data)
+            if profile.updatedAtMilliseconds > loadedProfile.updatedAtMilliseconds {
+                sendState = .succeeded("Local settings are newer; sending to M5Paper")
+                enqueueProfileSync()
+                return
+            }
+            if profile.updatedAtMilliseconds == loadedProfile.updatedAtMilliseconds,
+               profile.updatedAtMilliseconds > 0 {
+                sendState = .succeeded("Settings are already current")
+                return
+            }
             let reconciledProfile = Self.reconcileNetHomeProfile(
                 loadedProfile,
                 previousUnits: knownNetHomeUnits,
@@ -634,7 +667,7 @@ final class RemoteEditorStore: ObservableObject {
         try deviceURL(from: address, path: "/remote")
     }
 
-    private static func deviceURL(from address: String, path: String) throws -> URL {
+    nonisolated static func deviceURL(from address: String, path: String) throws -> URL {
         let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               var components = URLComponents(string: trimmed.contains("://") ? trimmed : "http://\(trimmed)"),

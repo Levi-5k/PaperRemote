@@ -15,6 +15,9 @@ final class RemoteProfileModelTests: XCTestCase {
         XCTAssertEqual(profile.pages.count, 2)
         XCTAssertEqual(profile.pages[0].controls[5].textBox?.source, .nowPlaying)
         XCTAssertEqual(profile.pages[1].controls[4].action.schedules?.first?.valueTenths, 225)
+        let localHTTP = try XCTUnwrap(profile.pages[1].controls.first { $0.action.type == .localHTTP })
+        XCTAssertEqual(localHTTP.action.httpMethod, "GET")
+        XCTAssertNil(localHTTP.action.httpBody)
     }
 
     func testCanonicalV6FixtureCoversEveryTextSource() throws {
@@ -79,9 +82,19 @@ final class RemoteProfileModelTests: XCTestCase {
         let profile = try JSONDecoder().decode(RemoteProfile.self, from: data)
 
         XCTAssertEqual(profile.version, RemoteProfile.currentVersion)
+        XCTAssertEqual(profile.updatedAtMilliseconds, 0)
         XCTAssertEqual(profile.buttonQualityRefreshInterval, 10)
         XCTAssertEqual(profile.elementRefreshDelayMilliseconds, 20)
         XCTAssertEqual(profile.temperatureUnit, .celsius)
+    }
+
+    func testProfileTimestampAdvancesMonotonically() {
+        var profile = RemoteProfile(pages: [])
+        profile.updatedAtMilliseconds = 100_000
+
+        profile.markUpdated(now: Date(timeIntervalSince1970: 99))
+
+        XCTAssertEqual(profile.updatedAtMilliseconds, 100_001)
     }
 
     func testLegacyOpenBuildsPageMigratesToFlexibleGrid() throws {
@@ -175,6 +188,55 @@ final class RemoteProfileModelTests: XCTestCase {
         XCTAssertEqual(RemoteGrid.cells(for: placement), Set([15]))
         XCTAssertEqual(decoded.buttonHeight, 1)
         XCTAssertEqual(decoded.gridSpan, RemoteGridSpan(width: 1, height: 1))
+    }
+
+    func testGridTranslationPreservesControlOrigin() {
+        XCTAssertEqual(RemoteGrid.translatedSlot(
+            from: 0,
+            columnOffset: 0,
+            rowOffset: 0,
+            columns: 9,
+            rows: 14
+        ), 0)
+        XCTAssertEqual(RemoteGrid.translatedSlot(
+            from: 117,
+            columnOffset: 1,
+            rowOffset: 0,
+            columns: 9,
+            rows: 14
+        ), 118)
+        XCTAssertEqual(RemoteGrid.translatedSlot(
+            from: 118,
+            columnOffset: -1,
+            rowOffset: 0,
+            columns: 9,
+            rows: 14
+        ), 117)
+    }
+
+    func testOpenBuildsSettingsRailRejectsOverlappingControls() throws {
+        var control = RemoteControl(
+            title: "Move",
+            symbol: "arrow.right",
+            kind: .button,
+            action: RemoteAction(type: .page)
+        )
+        control.gridWidth = 2
+        control.gridHeight = 2
+
+        let openPlacement = try XCTUnwrap(RemoteGrid.placement(
+            for: control, at: 27, columns: 9, rows: 14
+        ))
+        let railPlacement = try XCTUnwrap(RemoteGrid.placement(
+            for: control, at: 33, columns: 9, rows: 14
+        ))
+
+        XCTAssertFalse(RemoteGrid.overlapsOpenBuildsSettings(
+            openPlacement, columns: 9, rows: 14
+        ))
+        XCTAssertTrue(RemoteGrid.overlapsOpenBuildsSettings(
+            railPlacement, columns: 9, rows: 14
+        ))
     }
 
     func testTextBoxAlignmentRoundTripsAndDefaultsLegacyValues() throws {

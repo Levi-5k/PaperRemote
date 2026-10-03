@@ -12,6 +12,109 @@ import Testing
 
 struct paperGIFTests {
 
+    @Test @MainActor func mediaSourceSelectionPreservesSeekSliderAndOutline() throws {
+        var control = PaperGIFRemoteControl(
+            title: "Music", symbol: "music.note", tintHex: "202020", kind: .slider,
+            gridWidth: 2, gridHeight: 1, sliderOutlineInsetPixels: 7,
+            action: .init(type: .macMedia, text: "seek", value: 123),
+            layoutSlot: 4,
+            textBox: .init(source: .nowPlaying, textSize: .large,
+                           horizontalAlignment: .center, verticalAlignment: .bottom)
+        )
+        for source in [PaperGIFRemoteActionType.iPhoneMedia, .macMedia] {
+            let previousType = control.action.type
+            control.action.type = source
+            control.applyEditorActionDefaults(previousType: previousType)
+            #expect(control.kind == .slider)
+            #expect(control.action.text == "seek")
+            #expect(control.sliderOutlineInsetPixels == 7)
+            #expect(control.title == "Music")
+            #expect(control.layoutSlot == 4)
+            #expect(control.gridWidth == 2 && control.gridHeight == 1)
+            #expect(control.textBox?.textSize == .large)
+            #expect(control.textBox?.verticalAlignment == .bottom)
+            #expect(control.action.value == 123)
+        }
+        let data = try JSONEncoder().encode(control)
+        #expect(try JSONDecoder().decode(PaperGIFRemoteControl.self, from: data) == control)
+    }
+
+    @Test @MainActor func newSliderKeepsOutlineWhenMediaSourceIsSelected() {
+        for source in [PaperGIFRemoteActionType.macMedia, .iPhoneMedia] {
+            var control = PaperGIFRemoteControl(
+                title: "Slider", symbol: "", tintHex: "202020", kind: .slider,
+                sliderOutlineInsetPixels: 3,
+                action: .init(type: .wledBrightness, value: 128)
+            )
+            control.action.type = source
+            control.applyEditorActionDefaults(previousType: .wledBrightness)
+            #expect(control.kind == .slider)
+            #expect(control.action.text == "volume")
+            #expect(control.sliderOutlineInsetPixels == 3)
+            control.setEditorMediaCommand("seek")
+            #expect(control.kind == .slider)
+            #expect(control.sliderOutlineInsetPixels == 3)
+            #expect(control.textBox?.source == .nowPlaying)
+        }
+        // Changing a transport button's appearance to Slider before its source
+        // must not silently undo the user's chosen layout either.
+        var control = PaperGIFRemoteControl.button(title: "Music", symbol: "", action: .playPause)
+        control.kind = .slider
+        control.sliderOutlineInsetPixels = 5
+        let previousType = control.action.type
+        control.action.type = .macMedia
+        control.applyEditorActionDefaults(previousType: previousType)
+        #expect(control.kind == .slider)
+        #expect(control.action.text == "volume")
+        #expect(control.sliderOutlineInsetPixels == 5)
+    }
+
+    @Test @MainActor func selectingSeekRepairsButtonLayoutAndUsesSelectedComputer() {
+        let computerID = UUID()
+        var control = PaperGIFRemoteControl.button(
+            title: "Music", symbol: "music.note",
+            action: .init(type: .macMedia, text: "playPause", computerID: computerID.uuidString)
+        )
+        control.setEditorMediaCommand("seek")
+        #expect(control.kind == .slider)
+        #expect(control.textBox?.source == .nowPlaying)
+        #expect(control.textBox?.computerID == computerID)
+        control.sliderOutlineInsetPixels = 9
+        control.setEditorMediaCommand("volume")
+        #expect(control.kind == .slider && control.sliderOutlineInsetPixels == 9)
+        control.setEditorMediaCommand("playPause")
+        #expect(control.kind == .button)
+        #expect(control.isToggle == nil)
+        control.setEditorMediaCommand("seek")
+        #expect(control.kind == .slider && control.sliderOutlineInsetPixels == 9)
+    }
+
+    @Test @MainActor func mediaTapActionDoesNotConvertTextBoxToSlider() {
+        var control = PaperGIFRemoteControl(
+            title: "Text", symbol: "", tintHex: "202020", kind: .textBox,
+            action: .init(type: .macMedia, text: "seek"),
+            textBox: .init(source: .staticText, sourceText: "Keep this text")
+        )
+        control.action.type = .iPhoneMedia
+        control.applyEditorActionDefaults(previousType: .macMedia)
+        control.setEditorMediaCommand("volume")
+        #expect(control.kind == .textBox)
+        #expect(control.textBox?.source == .staticText)
+        #expect(control.textBox?.sourceText == "Keep this text")
+    }
+
+    @Test @MainActor func nonMediaActionDefaultsStillNormalizeLayout() {
+        var control = PaperGIFRemoteControl.button(
+            title: "Control", symbol: "", action: .init(type: .netHomeTemperature)
+        )
+        control.applyEditorActionDefaults(previousType: .macMedia)
+        #expect(control.kind == .slider)
+        #expect(control.action.value == 22 && control.action.valueTenths == 220)
+        control.action.type = .macKey
+        control.applyEditorActionDefaults(previousType: .netHomeTemperature)
+        #expect(control.kind == .button)
+    }
+
     @Test func canonicalV6FixtureCoversEveryActionType() throws {
         let profile = try JSONDecoder().decode(
             PaperGIFRemoteProfile.self,
@@ -24,6 +127,9 @@ struct paperGIFTests {
         #expect(profile.pages.count == 2)
         #expect(profile.pages[0].controls[5].textBox?.source == .nowPlaying)
         #expect(profile.pages[1].controls[4].action.schedules?.first?.valueTenths == 225)
+        let localHTTP = try #require(profile.pages[1].controls.first { $0.action.type == .localHTTP })
+        #expect(localHTTP.action.httpMethod == "GET")
+        #expect(localHTTP.action.httpBody == nil)
     }
 
     @Test func canonicalV6FixtureCoversEveryTextSource() throws {
@@ -92,6 +198,20 @@ struct paperGIFTests {
         #expect(decoded.elementRefreshDelayMilliseconds == 35)
     }
 
+    @Test func remoteProfileTimestampDefaultsToZeroAndAdvancesMonotonically() throws {
+        let legacy = try JSONDecoder().decode(
+            PaperGIFRemoteProfile.self,
+            from: Data(#"{"version":6,"pages":[]}"#.utf8)
+        )
+        #expect(legacy.updatedAtMilliseconds == 0)
+
+        var profile = legacy
+        profile.markUpdated(now: Date(timeIntervalSince1970: 100))
+        #expect(profile.updatedAtMilliseconds == 100_000)
+        profile.markUpdated(now: Date(timeIntervalSince1970: 99))
+        #expect(profile.updatedAtMilliseconds == 100_001)
+    }
+
     @Test func remoteTextBoxWithoutAlignmentUsesTopLeadingDefaults() throws {
         let data = Data(#"{"source":"staticText","sourceText":"Legacy"}"#.utf8)
 
@@ -149,6 +269,95 @@ struct paperGIFTests {
         #expect(PaperGIFRemoteGrid.cells(for: placement) == Set([15]))
         #expect(decoded.buttonHeight == 1)
         #expect(decoded.gridSpan == PaperGIFRemoteGridSpan(width: 1, height: 1))
+    }
+
+    @Test func remoteGridTranslationPreservesControlOrigin() {
+        #expect(PaperGIFRemoteGrid.translatedSlot(
+            from: 0,
+            columnOffset: 0,
+            rowOffset: 0,
+            columns: 9,
+            rows: 14
+        ) == 0)
+        #expect(PaperGIFRemoteGrid.translatedSlot(
+            from: 117,
+            columnOffset: 1,
+            rowOffset: 0,
+            columns: 9,
+            rows: 14
+        ) == 118)
+        #expect(PaperGIFRemoteGrid.translatedSlot(
+            from: 118,
+            columnOffset: -1,
+            rowOffset: 0,
+            columns: 9,
+            rows: 14
+        ) == 117)
+    }
+
+    @Test func deviceProfilePreservesKnownNumericComputerHosts() {
+        let computerID = UUID()
+        let localComputer = PaperGIFRemoteComputer(
+            id: computerID,
+            name: "Mac",
+            host: "192.168.50.20",
+            token: "token"
+        )
+        var deviceProfile = PaperGIFRemoteProfile(
+            macHost: "levis-mac-mini.local",
+            macToken: "token",
+            computers: [PaperGIFRemoteComputer(
+                id: computerID,
+                name: "Mac",
+                host: "levis-mac-mini.local",
+                token: "token"
+            )],
+            pages: []
+        )
+        let localProfile = PaperGIFRemoteProfile(
+            macHost: "192.168.50.20",
+            macToken: "token",
+            computers: [localComputer],
+            pages: []
+        )
+
+        let changed = deviceProfile.preserveNumericComputerHosts(from: localProfile)
+        #expect(changed)
+        #expect(deviceProfile.macHost == "192.168.50.20")
+        #expect(deviceProfile.computers.first?.host == "192.168.50.20")
+    }
+
+    @Test func starterLayoutDetectionIgnoresGeneratedIdentifiers() {
+        #expect(PaperGIFRemoteProfile.starter.usesStarterLayout)
+
+        var configured = PaperGIFRemoteProfile.starter
+        configured.pages.append(.init(name: "Media", controls: []))
+
+        #expect(!configured.usesStarterLayout)
+    }
+
+    @Test func openBuildsSettingsRailRejectsOverlappingControls() throws {
+        var control = PaperGIFRemoteControl.button(
+            title: "Move",
+            symbol: "arrow.right",
+            action: .playPause
+        )
+        control.gridWidth = 2
+        control.gridHeight = 2
+
+        let openPlacement = try #require(PaperGIFRemoteGrid.placement(
+            for: control, at: 27, columns: 9, rows: 14
+        ))
+        let railPlacement = try #require(PaperGIFRemoteGrid.placement(
+            for: control, at: 33, columns: 9, rows: 14
+        ))
+
+        #expect(!PaperGIFRemoteGrid.overlapsOpenBuildsSettings(
+            openPlacement, columns: 9, rows: 14
+        ))
+        #expect(PaperGIFRemoteGrid.overlapsOpenBuildsSettings(
+            railPlacement, columns: 9, rows: 14
+        ))
     }
 
     @Test func remoteDevicePayloadIncludesClockWithoutChangingStoredProfile() throws {
@@ -481,6 +690,68 @@ struct paperGIFTests {
         #expect(page.moduleID == PaperGIFModuleCatalog.openBuildsModuleID)
         #expect(page.modulePageID == PaperGIFModuleCatalog.motionControllerPageID)
         #expect(Set(page.controls.map(\.id)).count == page.controls.count)
+    }
+
+    @Test func decodesPublishedModulePagesWithTheirGridGeometry() throws {
+        let fixtures = [
+            (module: "media-controls", page: "media", name: "Media"),
+            (module: "presentation-controls", page: "presentation", name: "Presentation"),
+            (module: "wled-scenes", page: "wled-scenes", name: "WLED Scenes"),
+        ]
+
+        for fixture in fixtures {
+            let page = try PaperGIFModuleCatalog.decodePage(
+                from: Data(contentsOf: moduleFixture("\(fixture.module).json")),
+                expectedModuleID: fixture.module,
+                pageID: fixture.page
+            )
+
+            #expect(page.name == fixture.name)
+            #expect(page.gridColumns == 3)
+            #expect(page.gridRows == 8)
+            #expect(page.moduleID == fixture.module)
+            #expect(page.modulePageID == fixture.page)
+            #expect(page.controls.allSatisfy { $0.layoutSlot != nil })
+            #expect(Set(page.controls.map(\.id)).count == page.controls.count)
+        }
+    }
+
+    @Test func loadsBundledModulePages() throws {
+        let modules = try PaperGIFModuleCatalog.bundledModules()
+
+        #expect(Set(modules.map(\.id)) == Set([
+            "media-controls",
+            "openbuilds-control",
+            "presentation-controls",
+            "wled-scenes",
+        ]))
+        #expect(modules.flatMap { $0.pages ?? [] }.count == 4)
+    }
+
+    @Test func modulePageComputerConfigurationRoutesCommandsAndLiveDataTogether() throws {
+        let computerID = UUID()
+        let mediaPage = try PaperGIFModuleCatalog.decodePage(
+            from: Data(contentsOf: moduleFixture("media-controls.json")),
+            expectedModuleID: "media-controls",
+            pageID: "media"
+        )
+        let configuredMedia = PaperGIFModuleCatalog.configure(mediaPage, for: computerID)
+        let seek = try #require(configuredMedia.controls.first { $0.action.text == "seek" })
+
+        #expect(seek.action.computerID == computerID.uuidString)
+        #expect(seek.textBox?.computerID == computerID)
+
+        let motionPage = try PaperGIFModuleCatalog.decodeMotionControllerPage(
+            from: Data(contentsOf: moduleFixture("openbuilds-control.json"))
+        )
+        let configuredMotion = PaperGIFModuleCatalog.configure(motionPage, for: computerID)
+
+        #expect(configuredMotion.controls.allSatisfy {
+            $0.action.computerID == computerID.uuidString
+        })
+        #expect(configuredMotion.controls.filter {
+            $0.textBox?.source == .openBuildsPosition
+        }.allSatisfy { $0.textBox?.computerID == computerID })
     }
 
     @Test func remoteTabLayoutMatchesFirmwareGeometry() throws {

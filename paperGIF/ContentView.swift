@@ -12,6 +12,8 @@ struct ContentView: View {
     }
 
     @StateObject private var bluetoothManager = PaperGIFBluetoothManager()
+    @StateObject private var musicPlayer = PaperGIFMusicPlayer()
+    @StateObject private var homeManager = PaperGIFHomeManager()
 
     @AppStorage(PaperGIFSettingKey.monochromeMode) private var monochromeMode = PaperGIFMonochromeMode.threshold
     @AppStorage(PaperGIFSettingKey.threshold) private var threshold = 128.0
@@ -52,14 +54,14 @@ struct ContentView: View {
                 Label("Remote", systemImage: "rectangle.grid.2x2")
             }
 
-            conversionView
+            mediaView
                 .tabItem {
-                    Label("Convert", systemImage: "rectangle.stack.badge.play")
+                    Label("Media", systemImage: "photo.stack")
                 }
 
-            libraryView
+            PaperGIFMusicPlayerView(player: musicPlayer)
                 .tabItem {
-                    Label("Library", systemImage: "photo.stack")
+                    Label("Player", systemImage: "music.note.list")
                 }
 
             PaperGIFSettingsView(
@@ -88,6 +90,7 @@ struct ContentView: View {
                 Label("Device", systemImage: "antenna.radiowaves.left.and.right")
             }
         }
+        .tabViewStyle(.sidebarAdaptable)
         .fileImporter(isPresented: $isImporting, allowedContentTypes: [.image]) { result in
             importMedia(result)
         }
@@ -95,18 +98,78 @@ struct ContentView: View {
             guard let selectedPhoto else { return }
             importPhoto(selectedPhoto)
         }
+        .onChange(of: bluetoothManager.localMediaCommandEvent) {
+            guard let event = bluetoothManager.localMediaCommandEvent else { return }
+            musicPlayer.handleRemoteCommand(event.command)
+        }
+        .onChange(of: bluetoothManager.localHomePowerCommandEvent) {
+            guard let event = bluetoothManager.localHomePowerCommandEvent else { return }
+            bluetoothManager.sendHomePowerStatus(0)
+            homeManager.performPowerCommand(
+                event.command,
+                accessoryID: event.accessoryID,
+                serviceID: event.serviceID
+            ) { error in
+                Task { @MainActor in
+                    bluetoothManager.sendHomePowerStatus(
+                        error == nil ? 1 : 2,
+                        message: error?.localizedDescription ?? ""
+                    )
+                    if let error {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+            }
+        }
+        .onChange(of: musicPlayer.currentTrack) { syncMusicPlayerState(immediately: true) }
+        .onChange(of: musicPlayer.isPlaying) { syncMusicPlayerState(immediately: true) }
+        .onChange(of: musicPlayer.volume) { syncMusicPlayerState(immediately: true) }
+        .onChange(of: musicPlayer.elapsed) { syncMusicPlayerState() }
+        .onChange(of: musicPlayer.duration) { syncMusicPlayerState(immediately: true) }
         .onChange(of: bluetoothManager.remoteProfileFromDevice) {
             guard let deviceProfile = bluetoothManager.remoteProfileFromDevice,
                   deviceProfile != remoteProfile else { return }
+            if remoteProfile.updatedAtMilliseconds > deviceProfile.updatedAtMilliseconds {
+                bluetoothManager.syncRemoteProfile(remoteProfile)
+                return
+            }
+            if deviceProfile.usesStarterLayout && !remoteProfile.usesStarterLayout {
+                var recoveredProfile = remoteProfile
+                recoveredProfile.markUpdated()
+                do {
+                    try PaperGIFStorage.saveRemoteProfile(recoveredProfile)
+                    remoteProfile = recoveredProfile
+                    bluetoothManager.syncRemoteProfile(recoveredProfile)
+                } catch {
+                    remoteProfileSaveError = error.localizedDescription
+                }
+                return
+            }
+            if deviceProfile.updatedAtMilliseconds == remoteProfile.updatedAtMilliseconds,
+               deviceProfile.updatedAtMilliseconds > 0 {
+                return
+            }
+            var reconciledProfile = deviceProfile
+            let repairedComputerHosts = reconciledProfile.preserveNumericComputerHosts(
+                from: remoteProfile
+            )
             do {
-                try PaperGIFStorage.saveRemoteProfile(deviceProfile)
-                remoteProfile = deviceProfile
+                if repairedComputerHosts {
+                    reconciledProfile.markUpdated()
+                }
+                try PaperGIFStorage.saveRemoteProfile(reconciledProfile)
+                remoteProfile = reconciledProfile
+                if repairedComputerHosts,
+                   bluetoothManager.connectionState == .connected {
+                    bluetoothManager.syncRemoteProfile(reconciledProfile)
+                }
             } catch {
                 remoteProfileSaveError = error.localizedDescription
             }
         }
         .task {
             restoreLibrary()
+            syncMusicPlayerState(immediately: true)
         }
         .task {
             await bluetoothManager.monitorWiFiConnection()
@@ -151,43 +214,85 @@ struct ContentView: View {
         }
     }
 
-    private var conversionView: some View {
+    private var mediaView: some View {
         NavigationStack {
-            GeometryReader { proxy in
-                if savedMedia.isEmpty && !isConverting {
-                    ContentUnavailableView(
-                        "No Media",
-                        systemImage: "photo.on.rectangle",
-                        description: Text("Add a picture or GIF to begin.")
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    let rowHeight = min(176, max(112, (proxy.size.height - 48) / 3))
-                    List {
-                        ForEach(savedMedia) { saved in
-                            PaperGIFMediaCard(
-                                savedMedia: saved,
-                                isSelected: selectedSavedMediaID == saved.id,
-                                bluetoothManager: bluetoothManager,
-                                onChangeCrop: { edit(saved, startsAtAdjustment: false) },
-                                onEditConversion: { edit(saved, startsAtAdjustment: true) },
-                                onExport: { export(saved) },
-                                onDelete: { delete([saved]) }
-                            )
-                            .frame(height: rowHeight)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                select(saved)
-                            }
-                            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                        }
+            VStack(spacing: 0) {
+                Picker("Media", selection: $libraryLocation) {
+                    ForEach(LibraryLocation.allCases) { location in
+                        Text(location.rawValue).tag(location)
                     }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                    .overlay(alignment: .top) {
-                        if isConverting {
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 10)
+
+                if libraryLocation == .phone {
+                    phoneMediaContent
+                } else {
+                    deviceLibraryContent
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if libraryLocation == .phone {
+                    importControls
+                }
+            }
+            .navigationTitle("Media")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if libraryLocation == .device && bluetoothManager.canAccessDeviceLibrary {
+                    Button {
+                        bluetoothManager.refreshDeviceLibrary()
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(bluetoothManager.isLoadingDeviceLibrary || bluetoothManager.isTransferring)
+                }
+            }
+            .onChange(of: libraryLocation) {
+                if libraryLocation == .device {
+                    bluetoothManager.refreshDeviceLibrary()
+                }
+            }
+        }
+    }
+
+    private var phoneMediaContent: some View {
+        GeometryReader { proxy in
+            if savedMedia.isEmpty && !isConverting {
+                ContentUnavailableView(
+                    "No Media",
+                    systemImage: "photo.on.rectangle",
+                    description: Text("Add a picture or GIF to begin.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                let rowHeight = min(176, max(112, (proxy.size.height - 48) / 3))
+                List {
+                    ForEach(savedMedia) { saved in
+                        PaperGIFMediaCard(
+                            savedMedia: saved,
+                            isSelected: selectedSavedMediaID == saved.id,
+                            bluetoothManager: bluetoothManager,
+                            onChangeCrop: { edit(saved, startsAtAdjustment: false) },
+                            onEditConversion: { edit(saved, startsAtAdjustment: true) },
+                            onExport: { export(saved) },
+                            onDelete: { delete([saved]) }
+                        )
+                        .frame(height: rowHeight)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            select(saved)
+                        }
+                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .overlay(alignment: .top) {
+                    if isConverting {
                         HStack(spacing: 10) {
                             ProgressView(value: conversionProgress)
                                 .frame(width: 72)
@@ -195,19 +300,13 @@ struct ContentView: View {
                                 .monospacedDigit()
                         }
                         .font(.footnote)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(.regularMaterial, in: Capsule())
-                            .padding(.top, 8)
-                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(.top, 8)
                     }
                 }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                importControls
-            }
-            .navigationTitle("Convert")
-            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
@@ -234,89 +333,6 @@ struct ContentView: View {
         .padding(.horizontal)
         .padding(.vertical, 10)
         .background(.bar)
-    }
-
-    private var libraryView: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Picker("Library", selection: $libraryLocation) {
-                    ForEach(LibraryLocation.allCases) { location in
-                        Text(location.rawValue).tag(location)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.vertical, 10)
-
-                if libraryLocation == .phone {
-                    phoneLibraryContent
-                } else {
-                    deviceLibraryContent
-                }
-            }
-            .navigationTitle("Library")
-            .toolbar {
-                if libraryLocation == .phone && !savedMedia.isEmpty {
-                    EditButton()
-                } else if libraryLocation == .device && bluetoothManager.canAccessDeviceLibrary {
-                    Button {
-                        bluetoothManager.refreshDeviceLibrary()
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(bluetoothManager.isLoadingDeviceLibrary || bluetoothManager.isTransferring)
-                }
-            }
-            .onChange(of: libraryLocation) {
-                if libraryLocation == .device {
-                    bluetoothManager.refreshDeviceLibrary()
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var phoneLibraryContent: some View {
-        if savedMedia.isEmpty {
-            ContentUnavailableView(
-                "No Saved Media",
-                systemImage: "photo.stack",
-                description: Text("Converted pictures and GIFs appear here.")
-            )
-        } else {
-            List {
-                ForEach(savedMedia) { saved in
-                    Button {
-                        select(saved)
-                    } label: {
-                        HStack(spacing: 14) {
-                            Image(systemName: "photo")
-                                .font(.title2)
-                                .frame(width: 32)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(saved.name)
-                                    .font(.headline)
-                                    .foregroundStyle(.primary)
-                                Text(saved.savedAt.formatted(date: .abbreviated, time: .shortened))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer()
-
-                            if selectedSavedMediaID == saved.id {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.tint)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-                .onDelete(perform: deleteSavedMedia)
-            }
-        }
     }
 
     @ViewBuilder
@@ -409,6 +425,27 @@ struct ContentView: View {
         Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
+        )
+    }
+
+    private func syncMusicPlayerState(immediately: Bool = false) {
+        let track = musicPlayer.currentTrack
+        let displayTitle: String
+        if let artist = track?.artist, !artist.isEmpty {
+            displayTitle = "\(track?.title ?? "") - \(artist)"
+        } else {
+            displayTitle = track?.title ?? ""
+        }
+        bluetoothManager.syncLocalMediaState(
+            .init(
+                title: displayTitle,
+                isAvailable: track != nil,
+                isPlaying: musicPlayer.isPlaying,
+                volume: Double(musicPlayer.volume),
+                elapsed: musicPlayer.elapsed,
+                duration: musicPlayer.duration
+            ),
+            immediately: immediately
         )
     }
 
@@ -544,10 +581,6 @@ struct ContentView: View {
                 errorMessage = error.localizedDescription
             }
         }
-    }
-
-    private func deleteSavedMedia(at offsets: IndexSet) {
-        delete(offsets.map { savedMedia[$0] })
     }
 
     private func delete(_ deletedItems: [PaperGIFStorage.SavedMedia]) {

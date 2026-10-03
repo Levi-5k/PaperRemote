@@ -1,4 +1,5 @@
 import Combine
+import HomeKit
 import NetworkExtension
 import SwiftUI
 import UIKit
@@ -36,10 +37,17 @@ struct PaperGIFRemoteView: View {
 
     @StateObject private var computerDiscovery = PaperGIFComputerDiscovery()
     @StateObject private var wledDiscovery = PaperGIFWLEDDiscovery()
+    @StateObject private var networkDeviceDiscovery = PaperGIFNetworkDeviceDiscovery()
+    @StateObject private var homeManager = PaperGIFHomeManager()
     @State private var saveError: String?
     @State private var wifiStatus: String?
     @State private var computerStatus: String?
     @State private var wledStatus: String?
+    @State private var networkDeviceStatus: String?
+    @State private var homeStatus: String?
+    @State private var isSettingUpMatter = false
+    @State private var matterSetupManager = HMAccessorySetupManager()
+    @State private var manualNetworkAddress = ""
     @State private var manualWLEDAddress = ""
     @State private var isReadingWiFi = false
     @State private var isConnectingComputer = false
@@ -57,7 +65,8 @@ struct PaperGIFRemoteView: View {
     @State private var selectedPanel = PaperGIFRemoteEditorPanel.layout
     @State private var liveSyncTask: Task<Void, Never>?
     @State private var liveSyncStatus: String?
-    @State private var isAddingMotionControl = false
+    @State private var availableModules = (try? PaperGIFModuleCatalog.bundledModules()) ?? []
+    @State private var isLoadingModules = false
     @State private var moduleStatus: String?
 
     var body: some View {
@@ -83,6 +92,8 @@ struct PaperGIFRemoteView: View {
                         computerSection
                         temperatureUnitSection
                         netHomeSection
+                        homeSection
+                        networkDevicesSection
                         wledSection
                     }
                 }
@@ -96,6 +107,7 @@ struct PaperGIFRemoteView: View {
             .onAppear {
                 computerDiscovery.start()
                 wledDiscovery.start()
+                networkDeviceDiscovery.start()
                 prepareComputerDraft()
                 if bluetoothManager.connectionState == .connected,
                    bluetoothManager.nearbyWiFiNetworks.isEmpty {
@@ -105,9 +117,11 @@ struct PaperGIFRemoteView: View {
             .onDisappear {
                 computerDiscovery.stop()
                 wledDiscovery.stop()
+                networkDeviceDiscovery.stop()
                 liveSyncTask?.cancel()
             }
             .task { await refreshNetHomeUnits() }
+            .task { await refreshModuleCatalog() }
             .onChange(of: bluetoothManager.remoteSyncStatus) {
                 if let status = bluetoothManager.remoteSyncStatus,
                    wifiStatus != nil {
@@ -121,6 +135,11 @@ struct PaperGIFRemoteView: View {
                     selectedComputerID = nil
                     prepareComputerDraft()
                     liveSyncStatus = "Loaded from M5Paper"
+                }
+                if bluetoothManager.remoteSyncStatus == "Could not load remote from M5Paper",
+                   bluetoothManager.connectionState == .connected {
+                    liveSyncStatus = "Sending saved remote over Bluetooth…"
+                    bluetoothManager.syncRemoteProfile(profile)
                 }
             }
             .onChange(of: bluetoothManager.connectionState) {
@@ -533,6 +552,223 @@ struct PaperGIFRemoteView: View {
         }
     }
 
+    private var homeSection: some View {
+        Section {
+            if homeManager.authorizationStatus.contains(.authorized) {
+                Button {
+                    homeManager.refreshAccessories()
+                } label: {
+                    Label(
+                        homeManager.isRefreshing ? "Refreshing Home…" : "Refresh Home Accessories",
+                        systemImage: "arrow.clockwise"
+                    )
+                }
+                .disabled(homeManager.isRefreshing)
+
+                ForEach(homeManager.powerServices) { service in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label(service.displayName, systemImage: "powerplug.fill")
+                            Spacer()
+                            if hasHomePowerControl(for: service) {
+                                Label("Added", systemImage: "checkmark.circle.fill")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.green)
+                            }
+                        }
+                        Text(service.homeName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button {
+                            homeStatus = "Toggling \(service.displayName)…"
+                            homeManager.performPowerCommand(
+                                "toggle",
+                                accessoryID: service.accessoryID,
+                                serviceID: service.serviceID
+                            ) { error in
+                                Task { @MainActor in
+                                    homeStatus = error.map {
+                                        "Couldn’t control \(service.displayName): \($0.localizedDescription)"
+                                    } ?? "Toggled \(service.displayName)."
+                                }
+                            }
+                        } label: {
+                            Label("Test Power", systemImage: "power")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!service.isReachable)
+                        if !hasHomePowerControl(for: service) {
+                            Button {
+                                addHomePowerPage(for: service)
+                            } label: {
+                                Label("Add Switch Page", systemImage: "plus.circle.fill")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(profile.pages.count >= 8)
+                        }
+                    }
+                }
+                if homeManager.powerServices.isEmpty {
+                    Label("No power accessories found in Home", systemImage: "house")
+                        .foregroundStyle(.secondary)
+                }
+            } else if homeManager.authorizationStatus.contains(.restricted) {
+                Button {
+                    UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
+                } label: {
+                    Label("Allow Home Access in Settings", systemImage: "gear")
+                }
+            } else {
+                ProgressView("Requesting Home access…")
+            }
+
+            if let homeStatus {
+                Text(homeStatus)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Accessories from Home")
+        } footer: {
+            Text("These controls use Apple Home through the connected iPhone. The iPhone must be connected to M5Paper over Bluetooth when the control is pressed.")
+        }
+    }
+
+    private var networkDevicesSection: some View {
+        Section {
+            Button {
+                setUpMatterAccessory()
+            } label: {
+                Label(
+                    isSettingUpMatter ? "Opening Matter Setup…" : "Set Up with Apple Home",
+                    systemImage: "homekit"
+                )
+            }
+            .disabled(isSettingUpMatter)
+
+            Button {
+                networkDeviceStatus = nil
+                networkDeviceDiscovery.start()
+            } label: {
+                Label(
+                    networkDeviceDiscovery.state == .searching
+                        ? "Searching…"
+                        : (networkDeviceDiscovery.devices.isEmpty ? "Search for Network Devices" : "Search Again"),
+                    systemImage: "network"
+                )
+            }
+            .disabled(networkDeviceDiscovery.state == .searching)
+
+            if networkDeviceDiscovery.state == .searching {
+                ProgressView()
+            }
+
+            ForEach(networkDeviceDiscovery.devices) { device in
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label(
+                            device.name,
+                            systemImage: device.kind.isShelly || device.kind.isEWeLink
+                                ? "powerplug.fill" : "network"
+                        )
+                        Spacer()
+                        if hasNetworkControl(for: device) {
+                            Label("Added", systemImage: "checkmark.circle.fill")
+                                .font(.subheadline)
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    Text("\(device.kind.rawValue) · \(device.actionHost)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    if device.kind.isEWeLink {
+                        Label(
+                            device.requiresDeviceKey
+                                ? "Encrypted eWeLink LAN API"
+                                : "eWeLink LAN API",
+                            systemImage: device.requiresDeviceKey ? "lock.fill" : "checkmark.shield.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        if device.requiresDeviceKey {
+                            Text("Direct control requires an eWeLink LAN device key, which this model does not expose locally.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if !hasEWeLinkControl(for: device) {
+                            Button {
+                                addEWeLinkPage(for: device)
+                            } label: {
+                                Label("Add Switch Page", systemImage: "plus.circle.fill")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(profile.pages.count >= 8)
+                        }
+                    } else if !hasLocalHTTPControl(for: device) {
+                        Button {
+                            addLocalHTTPPage(for: device)
+                        } label: {
+                            Label(
+                                device.kind.isShelly ? "Add Switch Page" : "Add HTTP Page",
+                                systemImage: "plus.circle.fill"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(profile.pages.count >= 8)
+                    }
+                }
+            }
+
+            if networkDeviceDiscovery.state == .ready && networkDeviceDiscovery.devices.isEmpty {
+                Label("No HTTP devices found", systemImage: "network.slash")
+                    .foregroundStyle(.secondary)
+            }
+
+            if case .failed(let message) = networkDeviceDiscovery.state {
+                Text(message)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let networkDeviceStatus {
+                Text(networkDeviceStatus)
+                    .foregroundStyle(.secondary)
+            }
+
+            DisclosureGroup("Add by Address") {
+                TextField("Hostname or private IP address", text: $manualNetworkAddress)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .submitLabel(.go)
+                    .onSubmit(addManualNetworkDevice)
+
+                Button(action: addManualNetworkDevice) {
+                    Label("Add HTTP Page", systemImage: "plus.circle.fill")
+                }
+                .disabled(
+                    manualNetworkAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                    profile.pages.count >= 8
+                )
+            }
+        } header: {
+            Text("Network Devices")
+        } footer: {
+            Text("Encrypted eWeLink LAN control requires a device key. The S41s does not expose that key through its local pairing mode.")
+        }
+    }
+
+    private func setUpMatterAccessory(suggestedName: String? = nil) {
+        isSettingUpMatter = true
+        networkDeviceStatus = "Use the printed Matter code in the Apple Home setup sheet."
+        let request = HMAccessorySetupRequest()
+        request.suggestedAccessoryName = suggestedName
+        matterSetupManager.performAccessorySetup(using: request) { _, error in
+            Task { @MainActor in
+                isSettingUpMatter = false
+                networkDeviceStatus = error?.localizedDescription
+                    ?? "Matter accessory added to Apple Home."
+            }
+        }
+    }
+
     private var pagesSection: some View {
         Section("Pages") {
             ForEach(Array(profile.pages.enumerated()), id: \.element.id) { index, page in
@@ -589,61 +825,145 @@ struct PaperGIFRemoteView: View {
 
     private var modulesSection: some View {
         Section {
-            if hasMotionControlPage {
-                Label("Motion Control Added", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Button {
-                    Task { await addMotionControlPage() }
-                } label: {
-                    if isAddingMotionControl {
-                        HStack {
-                            ProgressView()
-                            Text("Adding Motion Control…")
-                        }
-                    } else {
-                        Label("Add Motion Control Page", systemImage: "plus.rectangle.on.rectangle")
-                    }
+            if isLoadingModules && availableModules.isEmpty {
+                HStack {
+                    ProgressView()
+                    Text("Loading module pages…")
                 }
-                .disabled(isAddingMotionControl || profile.pages.count >= 8)
+            }
+
+            ForEach(availableModules) { module in
+                ForEach(module.pages ?? []) { definition in
+                    modulePageRow(module: module, definition: definition)
+                }
             }
 
             if let moduleStatus {
-                Text(moduleStatus)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text(moduleStatus)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Retry") {
+                        Task { await refreshModuleCatalog() }
+                    }
+                }
             }
         } header: {
             Text("Modules")
         } footer: {
-            Text("Motion Control adds the OpenBuilds coordinate, jogging, zeroing, and machine controls from the paperGIF module catalog.")
+            Text("Add published page layouts or configure which paired computer handles their commands and live data.")
         }
     }
 
-    private var hasMotionControlPage: Bool {
-        profile.pages.contains {
-            ($0.moduleID == PaperGIFModuleCatalog.openBuildsModuleID &&
-                $0.modulePageID == PaperGIFModuleCatalog.motionControllerPageID) ||
-                $0.layout == .openBuildsController
+    @ViewBuilder
+    private func modulePageRow(
+        module: PaperGIFModuleManifest,
+        definition: PaperGIFModulePageDefinition
+    ) -> some View {
+        let installed = modulePageIndex(moduleID: module.id, pageID: definition.id) != nil
+        HStack(spacing: 12) {
+            PaperGIFRemotePageThumbnail(page: definition.page)
+                .frame(width: 38, height: 68)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(definition.page.name)
+                    .font(.headline)
+                Text(module.name)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(definition.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            if PaperGIFModuleCatalog.requiresComputer(definition.page),
+               !profile.computers.isEmpty {
+                Menu {
+                    ForEach(profile.computers) { computer in
+                        Button(computer.name) {
+                            installModulePage(
+                                module: module,
+                                definition: definition,
+                                computerID: computer.id
+                            )
+                        }
+                    }
+                } label: {
+                    Image(systemName: installed ? "gearshape" : "plus.circle")
+                }
+                .accessibilityLabel(installed
+                    ? "Configure \(definition.page.name)"
+                    : "Add \(definition.page.name)")
+                .disabled(!installed && profile.pages.count >= 8)
+            } else if installed {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .accessibilityLabel("Added")
+            } else {
+                Button {
+                    installModulePage(
+                        module: module,
+                        definition: definition,
+                        computerID: nil
+                    )
+                } label: {
+                    Image(systemName: "plus.circle")
+                }
+                .accessibilityLabel("Add \(definition.page.name)")
+                .disabled(profile.pages.count >= 8)
+            }
+        }
+    }
+
+    private func modulePageIndex(moduleID: String, pageID: String) -> Int? {
+        profile.pages.firstIndex {
+            $0.moduleID == moduleID && $0.modulePageID == pageID
         }
     }
 
     @MainActor
-    private func addMotionControlPage() async {
-        guard !hasMotionControlPage, profile.pages.count < 8 else { return }
-        isAddingMotionControl = true
+    private func refreshModuleCatalog() async {
+        guard !isLoadingModules else { return }
+        isLoadingModules = true
         moduleStatus = nil
-        defer { isAddingMotionControl = false }
+        defer { isLoadingModules = false }
 
         do {
-            let page = try await PaperGIFModuleCatalog.downloadMotionControllerPage()
-            guard !hasMotionControlPage else { return }
-            var updatedProfile = profile
-            updatedProfile.pages.append(page)
-            applyLiveProfile(updatedProfile)
-            moduleStatus = "Added Motion Control."
+            availableModules = try await PaperGIFModuleCatalog.downloadModules()
         } catch {
-            moduleStatus = "Couldn’t add Motion Control: \(error.localizedDescription)"
+            if availableModules.isEmpty {
+                moduleStatus = "Couldn’t load module pages: \(error.localizedDescription)"
+            } else {
+                moduleStatus = "Showing built-in module pages while offline."
+            }
         }
+    }
+
+    private func installModulePage(
+        module: PaperGIFModuleManifest,
+        definition: PaperGIFModulePageDefinition,
+        computerID: UUID?
+    ) {
+        var updatedProfile = profile
+        if let index = modulePageIndex(moduleID: module.id, pageID: definition.id) {
+            updatedProfile.pages[index] = PaperGIFModuleCatalog.configure(
+                updatedProfile.pages[index],
+                for: computerID
+            )
+            moduleStatus = "Configured \(definition.page.name)."
+        } else {
+            guard updatedProfile.pages.count < 8 else { return }
+            let page = PaperGIFModuleCatalog.configure(
+                PaperGIFModuleCatalog.clonePage(definition, moduleID: module.id),
+                for: computerID
+            )
+            updatedProfile.pages.append(page)
+            moduleStatus = "Added \(definition.page.name)."
+        }
+        applyLiveProfile(updatedProfile)
     }
 
     private var saveSection: some View {
@@ -720,6 +1040,8 @@ struct PaperGIFRemoteView: View {
         _ updatedProfile: PaperGIFRemoteProfile,
         immediately: Bool = false
     ) {
+        var updatedProfile = updatedProfile
+        updatedProfile.markUpdated()
         profile = updatedProfile
         if immediately {
             liveSyncTask?.cancel()
@@ -775,7 +1097,8 @@ struct PaperGIFRemoteView: View {
 
     @discardableResult
     private func save() -> Bool {
-        save(profile)
+        profile.markUpdated()
+        return save(profile)
     }
 
     @discardableResult
@@ -928,7 +1251,10 @@ struct PaperGIFRemoteView: View {
                let index = profile.computers.firstIndex(where: { $0.id == paired.id }) {
                 paired.host = computer.host
                 profile.computers[index] = paired
-                save()
+                syncDefaultComputer()
+                if save(), bluetoothManager.connectionState == .connected {
+                    bluetoothManager.syncRemoteProfile(profile)
+                }
             }
             selectPairedComputer(paired)
             return
@@ -1025,6 +1351,173 @@ struct PaperGIFRemoteView: View {
                 wledStatus = error.localizedDescription
             }
         }
+    }
+
+    private func hasLocalHTTPControl(
+        for device: PaperGIFNetworkDeviceDiscovery.Device
+    ) -> Bool {
+        let deviceHost = normalizedNetworkHost(device.actionHost)
+        return profile.pages.contains { page in
+            page.controls.contains { control in
+                control.action.type == .localHTTP &&
+                normalizedNetworkHost(control.action.host) == deviceHost
+            }
+        }
+    }
+
+    private func hasEWeLinkControl(
+        for device: PaperGIFNetworkDeviceDiscovery.Device
+    ) -> Bool {
+        let deviceHost = normalizedNetworkHost(device.actionHost)
+        return profile.pages.contains { page in
+            page.controls.contains { control in
+                control.action.type == .eWeLinkPower &&
+                normalizedNetworkHost(control.action.host) == deviceHost &&
+                control.action.deviceID == device.deviceID
+            }
+        }
+    }
+
+    private func hasNetworkControl(
+        for device: PaperGIFNetworkDeviceDiscovery.Device
+    ) -> Bool {
+        device.kind.isEWeLink
+            ? hasEWeLinkControl(for: device)
+            : hasLocalHTTPControl(for: device)
+    }
+
+    private func addEWeLinkPage(for device: PaperGIFNetworkDeviceDiscovery.Device) {
+        guard profile.pages.count < 8 else {
+            networkDeviceStatus = "Delete a page before adding another network device."
+            return
+        }
+        guard let deviceID = device.deviceID, !deviceID.isEmpty else {
+            networkDeviceStatus = "The eWeLink device did not publish its device ID."
+            return
+        }
+        guard !hasEWeLinkControl(for: device) else {
+            networkDeviceStatus = "A control for \(device.name) is already in the remote."
+            return
+        }
+        var control = PaperGIFRemoteControl.button(
+            title: "Power",
+            symbol: "power",
+            tintHex: "34C759",
+            action: .init(
+                type: .eWeLinkPower,
+                host: device.actionHost,
+                text: "toggle",
+                deviceID: deviceID
+            )
+        )
+        control.isToggle = true
+        var updatedProfile = profile
+        updatedProfile.pages.append(
+            PaperGIFRemotePage(name: device.name, controls: [control])
+        )
+        applyLiveProfile(updatedProfile)
+        networkDeviceStatus = "Added \(device.name)."
+    }
+
+    private func hasHomePowerControl(for service: PaperGIFHomePowerService) -> Bool {
+        profile.pages.contains { page in
+            page.controls.contains { control in
+                control.action.type == .iPhoneHomePower &&
+                control.action.deviceID == service.accessoryID &&
+                control.action.host == service.serviceID
+            }
+        }
+    }
+
+    private func addHomePowerPage(for service: PaperGIFHomePowerService) {
+        guard profile.pages.count < 8, !hasHomePowerControl(for: service) else { return }
+        var control = PaperGIFRemoteControl.button(
+            title: "Power",
+            symbol: "power",
+            tintHex: "34C759",
+            action: .init(
+                type: .iPhoneHomePower,
+                host: service.serviceID,
+                text: "toggle",
+                deviceID: service.accessoryID
+            )
+        )
+        control.isToggle = true
+        var updatedProfile = profile
+        updatedProfile.pages.append(
+            PaperGIFRemotePage(name: service.accessoryName, controls: [control])
+        )
+        applyLiveProfile(updatedProfile)
+        homeStatus = "Added \(service.displayName)."
+    }
+
+    private func addLocalHTTPPage(for device: PaperGIFNetworkDeviceDiscovery.Device) {
+        guard profile.pages.count < 8 else {
+            networkDeviceStatus = "Delete a page before adding another network device."
+            return
+        }
+        guard !hasLocalHTTPControl(for: device) else {
+            networkDeviceStatus = "A control for \(device.name) is already in the remote."
+            return
+        }
+        let title = device.kind.isShelly ? "Toggle" : "Request"
+        var control = PaperGIFRemoteControl.button(
+            title: title,
+            symbol: device.kind.isShelly ? "power" : "network",
+            tintHex: device.kind.isShelly ? "34C759" : "4A90E2",
+            action: .init(
+                type: .localHTTP,
+                host: device.actionHost,
+                text: device.togglePath,
+                httpMethod: "GET"
+            )
+        )
+        control.isToggle = device.kind.isShelly ? true : nil
+        var updatedProfile = profile
+        updatedProfile.pages.append(
+            PaperGIFRemotePage(name: device.name, controls: [control])
+        )
+        applyLiveProfile(updatedProfile)
+        networkDeviceStatus = "Added \(device.name). Open Layout to edit its request."
+    }
+
+    private func addManualNetworkDevice() {
+        var address = manualNetworkAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        if address.lowercased().hasPrefix("http://") {
+            address.removeFirst("http://".count)
+        }
+        while address.hasSuffix("/") {
+            address.removeLast()
+        }
+        guard !address.isEmpty,
+              !address.lowercased().hasPrefix("https://"),
+              !address.contains("/"),
+              !address.contains("@") else {
+            networkDeviceStatus = "Enter a local hostname or private IP address, with an optional port."
+            return
+        }
+        let device = PaperGIFNetworkDeviceDiscovery.Device(
+            serviceName: address,
+            name: address,
+            host: address,
+            port: 80,
+            kind: .http
+        )
+        addLocalHTTPPage(for: device)
+        if hasLocalHTTPControl(for: device) {
+            manualNetworkAddress = address
+        }
+    }
+
+    private func normalizedNetworkHost(_ host: String) -> String {
+        var normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("http://") {
+            normalized.removeFirst("http://".count)
+        }
+        while normalized.hasSuffix("/") {
+            normalized.removeLast()
+        }
+        return normalized
     }
 
     private func normalizedWLEDHost(_ host: String) -> String {
@@ -1236,14 +1729,34 @@ private struct PaperGIFRemotePageThumbnail: View {
             .padding(.horizontal, 4)
             .frame(height: 10)
 
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 2), spacing: 2) {
-                ForEach(0..<8, id: \.self) { index in
-                    Rectangle()
-                        .fill(index < page.controls.count ? Color.primary.opacity(0.14) : Color.clear)
-                        .overlay {
-                            Rectangle().stroke(Color.primary, lineWidth: 0.5)
+            GeometryReader { geometry in
+                let placements = PaperGIFRemoteGrid.placements(
+                    for: page.controls,
+                    columns: page.gridColumns,
+                    rows: page.gridRows
+                )
+                ZStack(alignment: .topLeading) {
+                    ForEach(Array(page.controls.enumerated()), id: \.element.id) { index, _ in
+                        if let placement = placements[index] {
+                            let row = placement.slot / page.gridColumns
+                            let column = placement.slot % page.gridColumns
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.14))
+                                .overlay {
+                                    Rectangle().stroke(Color.primary, lineWidth: 0.5)
+                                }
+                                .frame(
+                                    width: CGFloat(placement.span.width) * geometry.size.width /
+                                        CGFloat(page.gridColumns) - 1,
+                                    height: CGFloat(placement.span.height) * geometry.size.height /
+                                        CGFloat(page.gridRows) - 1
+                                )
+                                .offset(
+                                    x: CGFloat(column) * geometry.size.width / CGFloat(page.gridColumns),
+                                    y: CGFloat(row) * geometry.size.height / CGFloat(page.gridRows)
+                                )
                         }
-                        .frame(height: 16)
+                    }
                 }
             }
             .padding(.horizontal, 3)
@@ -1307,8 +1820,18 @@ private struct PaperGIFRemotePagePreview: View {
                     ForEach(Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
                         previewControl(control, frame: frames[index], scale: scale, controllerCompact: true)
                             .contentShape(Rectangle())
-                            .position(center(of: frames[index]))
+                            .position(
+                                draggedControlID == control.id
+                                    ? dragLocation ?? center(of: frames[index])
+                                    : center(of: frames[index])
+                            )
+                            .zIndex(draggedControlID == control.id ? 1 : 0)
                             .onTapGesture { onEditControl(control.id) }
+                            .simultaneousGesture(reorderGesture(
+                                for: control.id,
+                                frame: frames[index],
+                                scale: scale
+                            ))
                     }
                 } else {
                     ForEach(Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
@@ -1321,7 +1844,11 @@ private struct PaperGIFRemotePagePreview: View {
                             )
                             .zIndex(draggedControlID == control.id ? 1 : 0)
                             .onTapGesture { onEditControl(control.id) }
-                            .simultaneousGesture(reorderGesture(for: control.id, scale: scale))
+                            .simultaneousGesture(reorderGesture(
+                                for: control.id,
+                                frame: frames[index],
+                                scale: scale
+                            ))
                     }
                 }
 
@@ -1581,17 +2108,30 @@ private struct PaperGIFRemoteTabsPreview: View {
         return Alignment(horizontal: horizontal, vertical: vertical)
     }
 
-    private func reorderGesture(for controlID: UUID, scale: CGFloat) -> some Gesture {
+    private func reorderGesture(
+        for controlID: UUID,
+        frame: CGRect,
+        scale: CGFloat
+    ) -> some Gesture {
         LongPressGesture(minimumDuration: 0.25)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("remotePreview")))
             .onChanged { value in
                 guard case let .second(true, drag?) = value else { return }
                 draggedControlID = controlID
-                dragLocation = drag.location
-                guard let destinationSlot = layoutSlot(at: drag.location, scale: scale) else { return }
-                moveControl(controlID, to: destinationSlot)
+                dragLocation = CGPoint(
+                    x: frame.midX + drag.translation.width,
+                    y: frame.midY + drag.translation.height
+                )
             }
-            .onEnded { _ in
+            .onEnded { value in
+                if case let .second(true, drag?) = value,
+                   let destinationSlot = translatedSlot(
+                       from: frame,
+                       translation: drag.translation,
+                       scale: scale
+                   ) {
+                    moveControl(controlID, to: destinationSlot)
+                }
                 draggedControlID = nil
                 dragLocation = nil
             }
@@ -1601,12 +2141,23 @@ private struct PaperGIFRemoteTabsPreview: View {
         CGPoint(x: frame.midX, y: frame.midY)
     }
 
-    private func layoutSlot(at location: CGPoint, scale: CGFloat) -> Int? {
-        let column = Int((location.x / scale - 24) * CGFloat(page.gridColumns) / 504)
-        let row = Int((location.y / scale - 142) * CGFloat(page.gridRows) / 712)
-        guard (0..<page.gridColumns).contains(column),
-              (0..<page.gridRows).contains(row) else { return nil }
-        return row * page.gridColumns + column
+    private func translatedSlot(
+        from frame: CGRect,
+        translation: CGSize,
+        scale: CGFloat
+    ) -> Int? {
+        let sourceSlot = slot(for: frame, scale: scale)
+        let columnOffset = Int((translation.width * CGFloat(page.gridColumns) /
+            (504 * scale)).rounded())
+        let rowOffset = Int((translation.height * CGFloat(page.gridRows) /
+            (712 * scale)).rounded())
+        return PaperGIFRemoteGrid.translatedSlot(
+            from: sourceSlot,
+            columnOffset: columnOffset,
+            rowOffset: rowOffset,
+            columns: page.gridColumns,
+            rows: page.gridRows
+        )
     }
 
     private func moveControl(_ controlID: UUID, to requestedSlot: Int) {
@@ -1624,6 +2175,14 @@ private struct PaperGIFRemoteTabsPreview: View {
             columns: page.gridColumns,
             rows: page.gridRows
         ) else { return }
+        if page.layout == .openBuildsController,
+           PaperGIFRemoteGrid.overlapsOpenBuildsSettings(
+               destination,
+               columns: page.gridColumns,
+               rows: page.gridRows
+           ) {
+            return
+        }
         let destinationSlot = destination.slot
         guard sourceSlot != destinationSlot else { return }
         let destinationCells = PaperGIFRemoteGrid.cells(
@@ -1639,16 +2198,16 @@ private struct PaperGIFRemoteTabsPreview: View {
             ) else { continue }
             let slots = PaperGIFRemoteGrid.cells(for: placement, columns: page.gridColumns)
             if !destinationCells.isDisjoint(with: slots) {
-                controls[index].layoutSlot = nil
+                return
             }
         }
         controls[sourceIndex].layoutSlot = destinationSlot
         page.controls = controls
     }
 
-    private func slot(for frame: CGRect) -> Int {
-        let column = Int(((frame.minX - 24) * CGFloat(page.gridColumns) / 504).rounded())
-        let row = Int(((frame.minY - 142) * CGFloat(page.gridRows) / 712).rounded())
+    private func slot(for frame: CGRect, scale: CGFloat = 1) -> Int {
+        let column = Int(((frame.minX / scale - 24) * CGFloat(page.gridColumns) / 504).rounded())
+        let row = Int(((frame.minY / scale - 142) * CGFloat(page.gridRows) / 712).rounded())
         return row * page.gridColumns + column
     }
 
@@ -1764,6 +2323,7 @@ private struct PaperGIFRemoteControlEditor: View {
     let gridRows: Int
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     @StateObject private var applicationCatalog = PaperGIFMacApplicationCatalog()
+    @StateObject private var homeManager = PaperGIFHomeManager()
 
     private let mediaCommands = ["playPause", "previous", "next", "seek", "volumeUp", "volumeDown", "volume", "mute"]
     private let modifierNames = ["command", "option", "control", "shift"]
@@ -1839,21 +2399,8 @@ private struct PaperGIFRemoteControlEditor: View {
             }
         }
         .navigationTitle(control.title)
-        .onChange(of: control.action.type) {
-            control.action.scheduleEnabled = nil
-            control.action.scheduleHour = nil
-            control.action.scheduleMinute = nil
-            control.action.schedules = nil
-            applyActionDefaults()
-            if control.action.type != .macOpen {
-                control.iconBitmap = nil
-            }
-            if control.kind != .textBox && [.wledBrightness, .netHomeTemperature, .netHomeFan].contains(control.action.type) {
-                control.kind = .slider
-                control.isToggle = nil
-            } else if control.kind == .slider {
-                control.kind = .button
-            }
+        .onChange(of: control.action.type) { previousType, _ in
+            control.applyEditorActionDefaults(previousType: previousType)
             selectOnlyWLEDDeviceIfNeeded()
             loadSelectedWLEDPresetsIfNeeded()
         }
@@ -1879,7 +2426,7 @@ private struct PaperGIFRemoteControlEditor: View {
                 Text("Mac script output").tag(PaperGIFRemoteTextSource.macScript)
                 Text("Shortcut output").tag(PaperGIFRemoteTextSource.macShortcut)
                 Text("Control value").tag(PaperGIFRemoteTextSource.controlValue)
-                Text("Mac now playing").tag(PaperGIFRemoteTextSource.nowPlaying)
+                Text("Now playing").tag(PaperGIFRemoteTextSource.nowPlaying)
                 Text("OpenBuilds position").tag(PaperGIFRemoteTextSource.openBuildsPosition)
             }
 
@@ -1906,7 +2453,15 @@ private struct PaperGIFRemoteControlEditor: View {
                     }
                 }
             case .nowPlaying:
-                macTextSourceComputerPicker
+                Picker("Player", selection: referencedControlBinding) {
+                    Text("Automatic").tag("")
+                    ForEach(iPhoneMediaControls) { candidate in
+                        Text("iPhone - \(candidate.title)").tag(candidate.id.uuidString)
+                    }
+                }
+                if control.textBox?.referencedControlID == nil {
+                    macTextSourceComputerPicker
+                }
             case .openBuildsPosition:
                 macTextSourceComputerPicker
                 TextField("127.0.0.1|x|mm", text: textBoxBinding(\.sourceText))
@@ -1986,7 +2541,7 @@ private struct PaperGIFRemoteControlEditor: View {
         }
 
         switch control.action.type {
-        case .macMedia:
+        case .iPhoneMedia, .macMedia:
             Picker("Command", selection: mediaCommandBinding) {
                 ForEach(mediaCommands, id: \.self) { Text(mediaTitle($0)).tag($0) }
             }
@@ -1994,6 +2549,30 @@ private struct PaperGIFRemoteControlEditor: View {
                 LabeledContent("Volume", value: "\(volumePercentage)%")
                 Slider(value: volumePercentageBinding, in: 0...100, step: 1)
             }
+        case .iPhoneHomePower:
+            Picker("Home accessory", selection: homePowerServiceBinding) {
+                Text("Choose Accessory").tag("")
+                ForEach(homeManager.powerServices) { service in
+                    Text("\(service.homeName) · \(service.displayName)").tag(service.id)
+                }
+            }
+            Button {
+                homeManager.refreshAccessories()
+            } label: {
+                Label(
+                    homeManager.isRefreshing ? "Refreshing Home…" : "Refresh Home Accessories",
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(homeManager.isRefreshing)
+            Picker("Power", selection: $control.action.text) {
+                Text("Toggle").tag("toggle")
+                Text("On").tag("on")
+                Text("Off").tag("off")
+            }
+            Text("Runs through Apple Home on the connected iPhone.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .macKey:
             TextField("Key", text: $control.action.text)
                 .textInputAutocapitalization(.never)
@@ -2081,6 +2660,47 @@ private struct PaperGIFRemoteControlEditor: View {
             wledDevicePicker
             LabeledContent("Brightness", value: "\(control.action.value)")
             Slider(value: brightnessBinding, in: 0...255, step: 1)
+        case .eWeLinkPower:
+            TextField("Device address", text: $control.action.host)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+            TextField("Device ID", text: optionalActionStringBinding(\.deviceID))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            SecureField("eWeLink LAN device key", text: optionalActionStringBinding(\.deviceKey))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Picker("Power", selection: $control.action.text) {
+                Text("Toggle").tag("toggle")
+                Text("On").tag("on")
+                Text("Off").tag("off")
+            }
+              Text("Only encrypted eWeLink LAN control needs this key. A Matter pairing code is not a device key.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .localHTTP:
+            TextField("Device address", text: $control.action.host)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+            Picker("Method", selection: localHTTPMethodBinding) {
+                Text("GET").tag("GET")
+                Text("POST").tag("POST")
+            }
+            .pickerStyle(.segmented)
+            TextField("Path, such as /relay/0?turn=toggle", text: $control.action.text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if localHTTPMethodBinding.wrappedValue == "POST" {
+                TextField("JSON body", text: localHTTPBodyBinding, axis: .vertical)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .lineLimit(2...6)
+            }
+            Text("Only local HTTP addresses are accepted. HTTPS and internet hosts are not sent by M5Paper.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .netHomePower:
             netHomeDeviceField
             Picker("Power", selection: $control.action.text) {
@@ -2140,6 +2760,9 @@ private struct PaperGIFRemoteControlEditor: View {
             Text("Humidity assist only extends cooling. The minimum cycle protects the compressor.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .module:
+            LabeledContent("Module", value: control.action.host)
+            LabeledContent("Command", value: control.action.text)
         case .page:
             Picker("Page", selection: $control.action.text) {
                 Text("Choose Page").tag("")
@@ -2355,14 +2978,14 @@ private struct PaperGIFRemoteControlEditor: View {
 
     @ViewBuilder private func scheduleFunctionFields(_ entry: PaperGIFRemoteScheduleEntry) -> some View {
         switch control.action.type {
-        case .macMedia:
+        case .iPhoneMedia, .macMedia:
             Picker("Command", selection: scheduleTextBinding(entry.id)) {
                 ForEach(mediaCommands, id: \.self) { Text(mediaTitle($0)).tag($0) }
             }
             if (entry.text ?? control.action.text) == "volume" {
                 Stepper("Volume: \(scheduleVolume(entry))%", value: scheduleVolumeBinding(entry.id), in: 0...100)
             }
-        case .wledPower, .netHomePower:
+        case .iPhoneHomePower, .wledPower, .netHomePower:
             Picker("Power", selection: scheduleTextBinding(entry.id)) {
                 Text("Toggle").tag("toggle")
                 Text("On").tag("on")
@@ -2565,6 +3188,10 @@ private struct PaperGIFRemoteControlEditor: View {
         }
     }
 
+    private var iPhoneMediaControls: [PaperGIFRemoteControl] {
+        pages.flatMap(\.controls).filter { $0.action.type == .iPhoneMedia }
+    }
+
     private func referenceableControlTitle(_ candidate: PaperGIFRemoteControl) -> String {
         let isNetHomeControl = switch candidate.action.type {
         case .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
@@ -2597,6 +3224,9 @@ private struct PaperGIFRemoteControlEditor: View {
                 var textBox = control.textBox ?? PaperGIFRemoteTextBox()
                 textBox.computerID = UUID(uuidString: identifier)
                 control.textBox = textBox
+                if [.macMedia, .macScript, .macShortcut, .openBuilds].contains(control.action.type) {
+                    control.action.computerID = identifier.isEmpty ? nil : identifier
+                }
             }
         )
     }
@@ -2772,59 +3402,64 @@ private struct PaperGIFRemoteControlEditor: View {
         switch control.action.type {
         case .macMedia, .macKey, .macOpen, .macShortcut, .macScript, .openBuilds,
                .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
-               .netHomeMode, .netHomeFan, .netHomeAuto:
+             .netHomeMode, .netHomeFan, .netHomeAuto, .module:
             true
         default:
             false
         }
     }
 
-    private func applyActionDefaults() {
-        switch control.action.type {
-        case .macMedia:
-            control.action.text = "playPause"
-            control.title = "Play/Pause"
-            control.symbol = "playpause.fill"
-            control.iconBitmap = nil
-            control.isToggle = nil
-        case .openBuilds:
-            control.action.host = "127.0.0.1"
-            control.action.text = "jogXPositive"
-            control.action.value = 1
-        case .netHomePower:
-            control.action.text = "toggle"
-        case .netHomeTemperature:
-            control.action.value = 22
-            control.action.valueTenths = 220
-        case .netHomeTemperatureStep:
-            control.action.value = 1
-        case .netHomeAuto:
-            control.action.text = "cool"
-            control.action.value = 22
-            control.action.deadbandTenths = 10
-            control.action.humidityThreshold = 65
-            control.action.minimumCycleMinutes = 10
-            control.isToggle = true
-        case .netHomeMode:
-            control.action.text = "auto"
-        case .netHomeFan:
-            control.action.value = 40
-        default:
-            break
-        }
-    }
-
     private var mediaCommandBinding: Binding<String> {
         Binding(
             get: { control.action.text },
-            set: { command in
-                control.action.text = command
-                guard command == "playPause" else { return }
-                control.title = "Play/Pause"
-                control.symbol = "playpause.fill"
-                control.iconBitmap = nil
-                control.isToggle = nil
+            set: { control.setEditorMediaCommand($0) }
+        )
+    }
+
+    private var localHTTPMethodBinding: Binding<String> {
+        Binding(
+            get: { control.action.httpMethod == "POST" ? "POST" : "GET" },
+            set: { method in
+                control.action.httpMethod = method
+                if method == "GET" {
+                    control.action.httpBody = nil
+                }
             }
+        )
+    }
+
+    private var homePowerServiceBinding: Binding<String> {
+        Binding(
+            get: {
+                guard let accessoryID = control.action.deviceID,
+                      !accessoryID.isEmpty, !control.action.host.isEmpty else { return "" }
+                return "\(accessoryID):\(control.action.host)"
+            },
+            set: { selection in
+                guard let service = homeManager.powerServices.first(where: { $0.id == selection }) else {
+                    control.action.deviceID = nil
+                    control.action.host = ""
+                    return
+                }
+                control.action.deviceID = service.accessoryID
+                control.action.host = service.serviceID
+            }
+        )
+    }
+
+    private func optionalActionStringBinding(
+        _ keyPath: WritableKeyPath<PaperGIFRemoteAction, String?>
+    ) -> Binding<String> {
+        Binding(
+            get: { control.action[keyPath: keyPath] ?? "" },
+            set: { control.action[keyPath: keyPath] = $0.isEmpty ? nil : $0 }
+        )
+    }
+
+    private var localHTTPBodyBinding: Binding<String> {
+        Binding(
+            get: { control.action.httpBody ?? "" },
+            set: { control.action.httpBody = $0.isEmpty ? nil : $0 }
         )
     }
 
@@ -2842,6 +3477,10 @@ private struct PaperGIFRemoteControlEditor: View {
             get: { control.action.computerID ?? "" },
             set: {
                 control.action.computerID = $0.isEmpty ? nil : $0
+                if let source = control.textBox?.source,
+                   [.macScript, .macShortcut, .nowPlaying, .openBuildsPosition].contains(source) {
+                    control.textBox?.computerID = UUID(uuidString: $0)
+                }
                 control.iconBitmap = nil
             }
         )

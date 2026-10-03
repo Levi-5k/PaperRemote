@@ -7,7 +7,9 @@ configuration="${1:-debug}"
 app="$root/.build/paperGIF Mac.app"
 contents="$app/Contents"
 executable="$contents/MacOS/PaperGIFMac"
+matter_executable="$contents/MacOS/PaperGIFModule-matter"
 resources="$contents/Resources"
+module_resources="$resources/Modules"
 
 swift build --package-path "$root" --configuration "$configuration"
 bin_path=$(swift build --package-path "$root" --configuration "$configuration" --show-bin-path)
@@ -16,7 +18,11 @@ pkill -x PaperGIFMac 2>/dev/null || true
 
 mkdir -p "$contents/MacOS" "$resources"
 install -m 755 "$bin_path/PaperGIFMac" "$executable"
+install -m 755 "$bin_path/PaperGIFModule-matter" "$matter_executable"
 install -m 644 "$root/Sources/PaperGIFMac/Info.plist" "$contents/Info.plist"
+rm -rf "$module_resources"
+mkdir -p "$module_resources"
+install -m 644 "$root/../modules/matter-switch.json" "$module_resources/matter-switch.json"
 rm -rf "$app/PaperGIFMac_PaperGIFMac.bundle"
 rm -rf "$resources/PaperGIFMac_PaperGIFMac.bundle"
 ditto "$bin_path/PaperGIFMac_PaperGIFMac.bundle" "$resources/PaperGIFMac_PaperGIFMac.bundle"
@@ -32,6 +38,9 @@ if [[ -z "$identity" ]]; then
     exit 1
 fi
 
+codesign --force --sign "$identity" --identifier human-programs.paperGIFMac.module.matter "$matter_executable"
 codesign --force --sign "$identity" --identifier human-programs.paperGIFMac "$app"
-open "$app"
+if [[ -z "${PAPERGIF_NO_LAUNCH:-}" ]]; then
+    open "$app"
+fi
 echo "$app"

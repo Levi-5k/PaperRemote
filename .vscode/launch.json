@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:paperGIF}/mac-companion",
+            "name": "Debug PaperGIFMac (mac-companion)",
+            "target": "PaperGIFMac",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug PaperGIFMac (mac-companion)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:paperGIF}/mac-companion",
+            "name": "Release PaperGIFMac (mac-companion)",
+            "target": "PaperGIFMac",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release PaperGIFMac (mac-companion)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:paperGIF}/mac-companion",
+            "name": "Debug PaperGIFModule-matter (mac-companion)",
+            "target": "PaperGIFModule-matter",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug PaperGIFModule-matter (mac-companion)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:paperGIF}/mac-companion",
+            "name": "Release PaperGIFModule-matter (mac-companion)",
+            "target": "PaperGIFModule-matter",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release PaperGIFModule-matter (mac-companion)"
+        }
+    ]
+}

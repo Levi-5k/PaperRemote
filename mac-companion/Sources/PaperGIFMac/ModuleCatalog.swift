@@ -28,6 +28,11 @@ struct PaperModulePage: Codable, Sendable {
     let page: RemotePage
 }
 
+struct PaperModuleRuntime: Codable, Sendable {
+    let executable: String
+    let actions: [String]
+}
+
 struct PaperModuleManifest: Codable, Identifiable, Sendable {
     let schemaVersion: Int
     let id: String
@@ -37,6 +42,7 @@ struct PaperModuleManifest: Codable, Identifiable, Sendable {
     let author: String
     let controls: [PaperModuleControl]
     let pages: [PaperModulePage]?
+    let runtime: PaperModuleRuntime?
 }
 
 @MainActor
@@ -48,18 +54,24 @@ final class ModuleCatalog: ObservableObject {
     @Published private(set) var availableModules: [PaperModuleListing] = []
     @Published private(set) var isLoading = false
     @Published private var installedByID: [String: PaperModuleManifest] = [:]
+    var installedModulesDidChange: (([PaperModuleManifest]) -> Void)? {
+        didSet { installedModulesDidChange?(installedModules) }
+    }
     private let indexURL: URL
     private let installedDirectory: URL
+    private let bundledDirectory: URL?
     private let maximumDownloadBytes = 512 * 1024
 
     init(
         indexURL: URL? = nil,
-        installedDirectory: URL? = nil
+        installedDirectory: URL? = nil,
+        bundledDirectory: URL? = Bundle.main.resourceURL?.appendingPathComponent("Modules", isDirectory: true)
     ) {
         self.indexURL = indexURL ?? Self.defaultIndexURL
         self.installedDirectory = installedDirectory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("paperGIF Mac/modules", isDirectory: true)
+        self.bundledDirectory = bundledDirectory
         loadInstalled()
     }
 
@@ -182,6 +194,7 @@ final class ModuleCatalog: ObservableObject {
             options: .atomic
         )
         installedByID[manifest.id] = manifest
+        installedModulesDidChange?(installedModules)
         return manifest
     }
 
@@ -206,8 +219,15 @@ final class ModuleCatalog: ObservableObject {
     }
 
     private func loadInstalled() {
+        if let bundledDirectory {
+            loadManifests(in: bundledDirectory)
+        }
+        loadManifests(in: installedDirectory)
+    }
+
+    private func loadManifests(in directory: URL) {
         guard let files = try? FileManager.default.contentsOfDirectory(
-            at: installedDirectory,
+            at: directory,
             includingPropertiesForKeys: nil
         ) else { return }
         for file in files where file.pathExtension.lowercased() == "json" {
@@ -244,13 +264,23 @@ final class ModuleCatalog: ObservableObject {
                       !$0.detail.isEmpty &&
                       !$0.page.name.isEmpty &&
                       $0.page.controls.count <= RemoteProfile.maximumControlsPerPage
-              }) else {
+              }),
+              manifest.runtime.map({
+                  isValidIdentifier($0.executable) &&
+                      !$0.actions.isEmpty &&
+                      Set($0.actions).count == $0.actions.count &&
+                      $0.actions.allSatisfy(isValidActionType)
+              }) ?? true else {
             throw ModuleCatalogError.invalidManifest
         }
     }
 
     private static func isValidIdentifier(_ value: String) -> Bool {
         value.range(of: "^[a-z0-9]+(?:-[a-z0-9]+)*$", options: .regularExpression) != nil
+    }
+
+    private static func isValidActionType(_ value: String) -> Bool {
+        value.range(of: "^[A-Za-z][A-Za-z0-9.]{0,63}$", options: .regularExpression) != nil
     }
 
     nonisolated static func isVersion(_ candidate: String, newerThan installed: String) -> Bool {

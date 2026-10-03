@@ -15,6 +15,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly RemoteEditorStore editorStore;
     private readonly RemoteEditorWindow window;
     private readonly Icon icon;
+    private readonly UpdateService updateService = new();
+    private readonly ToolStripMenuItem updateItem;
+    private readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 24 * 60 * 60 * 1000 };
+    private bool updateBusy;
 
     public TrayApplicationContext(
         CompanionConfiguration configuration,
@@ -68,6 +72,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         startupRegistration.Changed += (_, _) => startupItem.Checked = startupRegistration.IsEnabled;
         var exitItem = new ToolStripMenuItem("Exit", null, (_, _) => ExitThread());
+        updateItem = new ToolStripMenuItem(
+            "Check for updates...",
+            null,
+            async (_, _) => await CheckForUpdatesAsync(userInitiated: true));
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(openItem);
@@ -78,6 +86,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(startupItem);
         menu.Items.Add(settingsItem);
         menu.Items.Add(forgetDevicesItem);
+        menu.Items.Add(updateItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
 
@@ -98,6 +107,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         activity.ActionRecorded += HandleActionRecorded;
         _ = CheckForModuleUpdatesAsync(moduleCatalog);
+        updateTimer.Tick += async (_, _) => await CheckForUpdatesAsync(userInitiated: false);
+        updateTimer.Start();
+        _ = CheckForUpdatesAfterStartupAsync();
         notifyIcon.ShowBalloonTip(
             3_000,
             "paperGIF",
@@ -118,9 +130,121 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    private async Task CheckForUpdatesAfterStartupAsync()
+    {
+        await Task.Delay(TimeSpan.FromSeconds(15));
+        await CheckForUpdatesAsync(userInitiated: false);
+    }
+
+    private async Task CheckForUpdatesAsync(bool userInitiated)
+    {
+        if (updateBusy)
+        {
+            return;
+        }
+        updateBusy = true;
+        var installConfirmed = false;
+        SetUpdateStatus("Checking for updates...");
+        try
+        {
+            var release = await updateService.LatestAsync();
+            var offeredUpdate = false;
+            var currentVersion = UpdateService.CurrentVersion;
+            if (release.Manifest.Windows is { } appAsset && SoftwareVersion.IsNewer(release.Version, currentVersion))
+            {
+                offeredUpdate = true;
+                if (Confirm(
+                    $"paperGIF {release.Version} is available",
+                    $"You have {currentVersion}. paperGIF will download, verify, install, and restart.\n\n{release.Notes}",
+                    "Install and restart?"))
+                {
+                    installConfirmed = true;
+                    SetUpdateStatus($"Downloading paperGIF {release.Version}...");
+                    var archive = await updateService.DownloadAsync(appAsset, release);
+                    updateService.InstallAppAndExit(archive, release.Version, ExitThread);
+                    return;
+                }
+            }
+
+            var address = editorStore.DeviceAddress;
+            var deviceVersion = await updateService.DeviceFirmwareVersionAsync(address);
+            if (deviceVersion is not null && release.Manifest.Firmware is { } firmwareAsset &&
+                SoftwareVersion.IsNewer(release.Version, deviceVersion))
+            {
+                offeredUpdate = true;
+                if (Confirm(
+                    $"M5Paper firmware {release.Version} is available",
+                    $"The M5Paper has {deviceVersion}. Keep it awake and nearby; it restarts when the update finishes.",
+                    "Update the M5Paper now?"))
+                {
+                    installConfirmed = true;
+                    SetUpdateStatus($"Downloading M5Paper firmware {release.Version}...");
+                    var firmware = await updateService.DownloadAsync(firmwareAsset, release);
+                    try
+                    {
+                        SetUpdateStatus($"Installing M5Paper firmware {release.Version}...");
+                        await updateService.InstallFirmwareAsync(firmware, release.Version, address, configuration.Token);
+                    }
+                    finally
+                    {
+                        File.Delete(firmware);
+                    }
+                    DiagnosticLog.Info($"M5Paper firmware updated to {release.Version}");
+                    MessageBox.Show(
+                        $"The M5Paper restarted with firmware {release.Version}.",
+                        "paperGIF",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+            }
+
+            if (userInitiated && !offeredUpdate)
+            {
+                var firmwareLine = deviceVersion is null
+                    ? "M5Paper not reachable, so its firmware was not checked"
+                    : $"M5Paper firmware {deviceVersion}";
+                MessageBox.Show(
+                    $"paperGIF {currentVersion}\n{firmwareLine}\nLatest release: {release.Version}",
+                    "paperGIF is up to date",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+        }
+        catch (Exception exception) when (exception is UpdateException or HttpRequestException or
+            TaskCanceledException or System.Text.Json.JsonException or IOException or
+            InvalidDataException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            DiagnosticLog.Error("Update failed", exception);
+            if (userInitiated || installConfirmed)
+            {
+                MessageBox.Show(exception.Message, "paperGIF update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        finally
+        {
+            updateBusy = false;
+            SetUpdateStatus(null);
+        }
+    }
+
+    private void SetUpdateStatus(string? status)
+    {
+        updateItem.Text = status ?? "Check for updates...";
+        updateItem.Enabled = status is null;
+    }
+
+    private static bool Confirm(string title, string message, string question) =>
+        MessageBox.Show(
+            $"{message}\n\n{question}",
+            title,
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Information) == DialogResult.Yes;
+
     protected override void ExitThreadCore()
     {
         activity.ActionRecorded -= HandleActionRecorded;
+        updateTimer.Dispose();
+        updateService.Dispose();
         window.CloseForExit();
         window.Dispose();
         notifyIcon.Visible = false;

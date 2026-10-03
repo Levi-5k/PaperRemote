@@ -71,6 +71,30 @@ installation until every expected byte is present.
 | `0x37` | Client to device | Request home Wi-Fi status |
 | `0x38` | Client to device | Prepare home-Wi-Fi upload |
 
+## iPhone Media Commands
+
+An `iPhoneMedia` remote action is sent from the device to the subscribed iOS
+client as `[0x60, command, value]`. Commands are `0x01` play/pause, `0x02`
+previous, `0x03` next, `0x04` volume up, `0x05` volume down, `0x06` mute,
+`0x07` seek, and `0x08` set volume. Seek and volume use `value` from 0 to 255.
+
+The iOS client sends its current playback state to the device on the control
+characteristic. The packet is at most 64 bytes:
+
+```text
+offset  size  value
+0       1     0x61
+1       1     flags: bit 0 available, bit 1 playing
+2       1     volume from 0 to 255
+3       4     elapsed milliseconds
+7       4     duration milliseconds
+11      1     UTF-8 title byte count (0 to 52)
+12      n     title, optionally followed by " - Artist"
+```
+
+The client sends state after connection and playback changes, and periodically
+while progress changes. Firmware advances the timeline locally between packets.
+
 ## State-Machine Requirements
 
 1. Only one media or profile transfer may own the data characteristic.

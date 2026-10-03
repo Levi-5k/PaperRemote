@@ -21,6 +21,10 @@ public sealed class RemoteProfileContractTests
         Assert.Equal(2, profile.Pages.Count);
         Assert.Equal(RemoteTextSource.NowPlaying, profile.Pages[0].Controls[5].TextBox?.Source);
         Assert.Equal(225, profile.Pages[1].Controls[4].Action.Schedules?[0].ValueTenths);
+        var localHttp = Assert.Single(profile.Pages[1].Controls.Where(
+            control => control.Action.Type == RemoteActionType.LocalHTTP));
+        Assert.Equal("GET", localHttp.Action.HttpMethod);
+        Assert.Null(localHttp.Action.HttpBody);
     }
 
     [Fact]
@@ -52,11 +56,22 @@ public sealed class RemoteProfileContractTests
         var profile = RemoteProfileJson.Deserialize(json);
 
         Assert.Equal(RemoteProfile.CurrentVersion, profile.Version);
+        Assert.Equal(0, profile.UpdatedAtMilliseconds);
         Assert.Equal(10, profile.ButtonQualityRefreshInterval);
         Assert.Equal(20, profile.ElementRefreshDelayMilliseconds);
         var computer = Assert.Single(profile.Computers);
         Assert.Equal("legacy.local", computer.Host);
         Assert.Equal("legacy-token", computer.Token);
+    }
+
+    [Fact]
+    public void ProfileTimestampAdvancesMonotonically()
+    {
+        var profile = new RemoteProfile { UpdatedAtMilliseconds = 100_000 };
+
+        profile.MarkUpdated(DateTimeOffset.FromUnixTimeMilliseconds(99_000));
+
+        Assert.Equal(100_001, profile.UpdatedAtMilliseconds);
     }
 
     [Fact]

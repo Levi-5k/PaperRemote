@@ -1,0 +1,55 @@
+{
+  "$schema": "../protocol/module-manifest-v1.schema.json",
+  "schemaVersion": 1,
+  "id": "matter-switch",
+  "name": "Matter Switch",
+  "summary": "Direct local control for a Matter smart switch through the Mac companion.",
+  "version": "1.0.0",
+  "author": "paperGIF",
+  "runtime": {
+    "executable": "matter",
+    "actions": ["on", "off", "toggle"]
+  },
+  "controls": [
+    {
+      "id": "power-toggle",
+      "category": "Matter",
+      "detail": "Toggle the most recently commissioned Matter switch",
+      "control": {
+        "id": "18b0ba5c-3906-49d9-990b-a177c1ef2e30",
+        "title": "Switch",
+        "symbol": "powerplug.fill",
+        "tintHex": "197278",
+        "kind": "button",
+        "isToggle": true,
+        "action": { "type": "module", "host": "matter-switch", "text": "toggle", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "power-on",
+      "category": "Matter",
+      "detail": "Turn on the most recently commissioned Matter switch",
+      "control": {
+        "id": "94bdf30e-f7a1-4560-b7ae-f247250af74f",
+        "title": "On",
+        "symbol": "power",
+        "tintHex": "2D6A4F",
+        "kind": "button",
+        "action": { "type": "module", "host": "matter-switch", "text": "on", "value": 0, "modifiers": [] }
+      }
+    },
+    {
+      "id": "power-off",
+      "category": "Matter",
+      "detail": "Turn off the most recently commissioned Matter switch",
+      "control": {
+        "id": "1311638e-568f-444f-b06f-16011ae7f834",
+        "title": "Off",
+        "symbol": "power",
+        "tintHex": "A33D3D",
+        "kind": "button",
+        "action": { "type": "module", "host": "matter-switch", "text": "off", "value": 0, "modifiers": [] }
+      }
+    }
+  ]
+}

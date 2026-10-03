@@ -313,6 +313,7 @@ internal sealed class CompanionWindow : Form
     {
         var actionName = action.Type switch
         {
+            "iPhoneMedia" => "iPhone media",
             "macMedia" => "Media",
             "macKey" => "Keyboard",
             "macOpen" => "Open",

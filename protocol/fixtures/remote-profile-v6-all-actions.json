@@ -150,6 +150,38 @@
             },
             "refreshIntervalSeconds": 5
           }
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000317",
+          "title": "iPhone Play",
+          "symbol": "playpause.fill",
+          "tintHex": "197278",
+          "kind": "button",
+          "action": {
+            "type": "iPhoneMedia",
+            "host": "",
+            "text": "playPause",
+            "value": 0,
+            "modifiers": []
+          },
+          "layoutSlot": 12
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000319",
+          "title": "Home Power",
+          "symbol": "power",
+          "tintHex": "34C759",
+          "kind": "button",
+          "isToggle": true,
+          "action": {
+            "type": "iPhoneHomePower",
+            "host": "00000000-0000-0000-0000-000000000502",
+            "text": "toggle",
+            "value": 0,
+            "modifiers": [],
+            "deviceID": "00000000-0000-0000-0000-000000000501"
+          },
+          "layoutSlot": 13
         }
       ]
     },
@@ -280,6 +312,58 @@
           "kind": "button",
           "action": { "type": "openBuilds", "host": "127.0.0.1", "text": "jogXPositive", "value": 1, "modifiers": [], "computerID": "00000000-0000-0000-0000-000000000102" },
           "layoutSlot": 11
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000318",
+          "title": "Smart Switch",
+          "symbol": "power",
+          "tintHex": "34C759",
+          "kind": "button",
+          "action": {
+            "type": "localHTTP",
+            "host": "switch.local",
+            "text": "/relay/0?turn=toggle",
+            "value": 0,
+            "modifiers": [],
+            "httpMethod": "GET",
+            "httpBody": null
+          },
+          "layoutSlot": 14
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000320",
+          "title": "eWeLink Power",
+          "symbol": "power",
+          "tintHex": "34C759",
+          "kind": "button",
+          "isToggle": true,
+          "action": {
+            "type": "eWeLinkPower",
+            "host": "192.168.50.77:8081",
+            "text": "toggle",
+            "value": 0,
+            "modifiers": [],
+            "deviceID": "1002a6028d",
+            "deviceKey": "fixture-device-key"
+          },
+          "layoutSlot": 15
+        },
+        {
+          "id": "00000000-0000-0000-0000-000000000321",
+          "title": "Matter Switch",
+          "symbol": "powerplug.fill",
+          "tintHex": "197278",
+          "kind": "button",
+          "isToggle": true,
+          "action": {
+            "type": "module",
+            "host": "matter-switch",
+            "text": "toggle",
+            "value": 0,
+            "modifiers": [],
+            "computerID": "00000000-0000-0000-0000-000000000101"
+          },
+          "layoutSlot": 16
         }
       ]
     }

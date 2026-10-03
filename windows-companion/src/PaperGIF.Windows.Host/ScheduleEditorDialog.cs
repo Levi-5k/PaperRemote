@@ -188,7 +188,7 @@ internal sealed class ScheduleEditorDialog : Form
     {
         var choices = action.Type switch
         {
-            RemoteActionType.MacMedia => new[]
+            RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia => new[]
             {
                 new EditorChoice("previous", "Previous"),
                 new EditorChoice("playPause", "Play / Pause"),
@@ -206,7 +206,7 @@ internal sealed class ScheduleEditorDialog : Form
             [new("cool", "Cooling"), new("heat", "Heating")],
             _ => [],
         };
-        textLabel.Text = action.Type == RemoteActionType.MacMedia ? "Command" :
+        textLabel.Text = action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia ? "Command" :
             action.Type is RemoteActionType.WledPower or RemoteActionType.NetHomePower ? "Power" :
             action.Type == RemoteActionType.NetHomeMode ? "Mode" : "Control";
         text.DataSource = choices;
@@ -260,14 +260,14 @@ internal sealed class ScheduleEditorDialog : Form
     }
 
     private static bool UsesText(RemoteActionType type) => type is
-        RemoteActionType.MacMedia or RemoteActionType.WledPower or
+        RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia or RemoteActionType.WledPower or
         RemoteActionType.NetHomePower or RemoteActionType.NetHomeMode or
         RemoteActionType.NetHomeAuto;
 
     private static bool UsesValue(RemoteActionType type, string command) =>
         type is RemoteActionType.WledPreset or RemoteActionType.WledBrightness or
             RemoteActionType.NetHomeTemperatureStep or RemoteActionType.NetHomeFan ||
-        type == RemoteActionType.MacMedia && command == "volume";
+        type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia && command == "volume";
 
     private void RefreshList(Guid? selectedId = null)
     {

@@ -103,13 +103,42 @@ public sealed class CompanionEndpointTests
     }
 
     [Fact]
+    public async Task AuthenticatedMediaReadSubscribesPeer()
+    {
+        await using var host = await TestHost.StartAsync();
+
+        var response = await host.Client.PostAsJsonAsync("/text-source", new
+        {
+            items = new[] { new { id = "volume", source = "outputVolume" } },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(host.Publisher.HasSubscribers);
+    }
+
+    [Fact]
+    public async Task UnauthorizedMediaReadCannotSubscribePeer()
+    {
+        await using var host = await TestHost.StartAsync();
+        host.Client.DefaultRequestHeaders.Authorization = null;
+
+        var response = await host.Client.PostAsJsonAsync("/text-source", new
+        {
+            items = new[] { new { id = "volume", source = "outputVolume" } },
+        });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.False(host.Publisher.HasSubscribers);
+    }
+
+    [Fact]
     public async Task TextSourceRejectsMoreThanMaximumItems()
     {
         await using var host = await TestHost.StartAsync();
         var items = Enumerable.Range(0, RemoteProfile.MaximumControlsPerPage + 1).Select(index => new
         {
             id = index.ToString(),
-            source = "unsupported",
+            source = "outputVolume",
             sourceText = "",
             placeholder = "",
         });
@@ -117,11 +146,13 @@ public sealed class CompanionEndpointTests
         var response = await host.Client.PostAsJsonAsync("/text-source", new { items });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.False(host.Publisher.HasSubscribers);
     }
 
     private sealed class TestHost(WebApplication app, HttpClient client) : IAsyncDisposable
     {
         public HttpClient Client { get; } = client;
+        public WindowsMediaUpdatePublisher Publisher => app.Services.GetRequiredService<WindowsMediaUpdatePublisher>();
 
         public static async Task<TestHost> StartAsync()
         {
@@ -139,10 +170,17 @@ public sealed class CompanionEndpointTests
             builder.Services.AddSingleton<PairingApprovalService>();
             builder.Services.AddSingleton<WindowsActionDispatcher>();
             builder.Services.AddSingleton<WindowsTextSourceResolver>();
+            builder.Services.AddSingleton(_ => new WindowsMediaUpdatePublisher(
+                configuration, new HttpClient(), TimeProvider.System));
             builder.Services.AddSingleton<WindowsApplicationCatalog>();
             builder.Services.AddSingleton<NetHomeService>();
             builder.Services.AddSingleton<OpenBuildsControlService>();
             var app = builder.Build();
+            app.Use((context, next) =>
+            {
+                context.Connection.RemoteIpAddress = IPAddress.Parse("192.168.50.142");
+                return next(context);
+            });
             Program.ConfigureEndpoints(app, configuration);
             await app.StartAsync();
             var client = app.GetTestClient();

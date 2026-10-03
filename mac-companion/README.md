@@ -23,3 +23,14 @@ The device validates the complete profile before replacing its active remote. Th
 Open the paperGIF iPhone Remote tab, select the discovered Mac, and request pairing when editing from iPhone. Approve the request on the Mac; the credential is exchanged and saved automatically. Script actions are rejected unless the exact command appears in the companion's allowed-script list.
 
 Keyboard shortcuts require Accessibility access in System Settings. The server advertises `_papergif._tcp` through Bonjour and listens only for authenticated `POST /action` requests.
+
+## Matter module
+
+The packaged app includes `PaperGIFModule-matter`, an executable module that owns its Matter fabric, commissioned-node registry, and switch commands. Put an existing accessory into multi-admin pairing mode, then commission it with the fresh code shown by its current ecosystem:
+
+```sh
+swift build --package-path mac-companion --product PaperGIFModule-matter
+mac-companion/.build/debug/PaperGIFModule-matter --commission '1234-567-8901'
+```
+
+Use `--list`, `--on`, `--off`, or `--toggle` to inspect and test the module directly. Module state is stored under `~/Library/Application Support/paperGIF Mac/module-state/matter-switch` with owner-only permissions.

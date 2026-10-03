@@ -28,6 +28,9 @@ firmware/.esp-flasher.json
 firmware/.vscode/
 firmware/compile_commands.json
 
+# Release builds
+dist/
+
 # Local output and credentials
 *.log
 *.pem

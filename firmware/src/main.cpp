@@ -12,18 +12,36 @@
 #include <Wire.h>
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
+#include <esp_ota_ops.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <nvs.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <mbedtls/aes.h>
+#include <mbedtls/base64.h>
+#include <mbedtls/md5.h>
 #include "geometric_snake.h"
+#include "local_http_policy.h"
+#include "media_timeline.h"
 #include "monochrome_damage.h"
+#include "psram_json_allocator.h"
+#include "remote_computer.h"
+#include "remote_network_queue.h"
 #include "remote_schedule.h"
 #include "screensaver_battery.h"
+#include "sleep_wake.h"
+#include "render_diagnostics.h"
+
+#ifndef PAPERGIF_FIRMWARE_VERSION
+#define PAPERGIF_FIRMWARE_VERSION "0.0.0"
+#endif
 
 namespace {
+
+PsramJsonAllocator profileJsonAllocator;
 
 constexpr char kServiceUuid[] = "7A230001-7D2A-4C7B-9C42-504749460001";
 constexpr char kControlUuid[] = "7A230002-7D2A-4C7B-9C42-504749460001";
@@ -71,6 +89,9 @@ constexpr uint8_t kFinishRemoteProfile = 0x42;
 constexpr uint8_t kRemoteProfileComplete = 0x43;
 constexpr uint8_t kRemoteProfileDataReceived = 0x44;
 constexpr uint8_t kRemoteProfileProgress = 0x45;
+constexpr uint8_t kLocalMediaState = 0x61;
+constexpr uint8_t kClaimIPhoneController = 0x62;
+constexpr uint8_t kHomePowerResult = 0x63;
 constexpr uint8_t kUploadFailed = 0x7F;
 
 constexpr uint16_t kDisplayWidth = 540;
@@ -141,12 +162,16 @@ constexpr size_t kRemoteRequestBodyBytes = 768;
 constexpr size_t kRemoteResponseBodyBytes = 4097;
 constexpr uint32_t kClimateSampleIntervalMs = 60000;
 constexpr uint64_t kClimateWakeIntervalUs = 5ULL * 60ULL * 1000000ULL;
-constexpr uint32_t kRemotePageNavigationSettleMs = 700;
+constexpr uint32_t kRemotePageNavigationSettleMs = 250;
 constexpr uint32_t kRemotePageButtonDebounceMs = 250;
 constexpr uint32_t kClimateAutomationMagic = 0x434C4933;
 constexpr size_t kMaximumClimateAutomations = 8;
 constexpr uint32_t kScheduleRunStoreMagic = 0x53434832;
 constexpr uint16_t kScheduleCatchUpMinutes = 15;
+constexpr size_t kDeviceErrorCapacity = 15;
+constexpr size_t kDeviceErrorMessageBytes = 192;
+constexpr uint32_t kDeviceErrorRetryMs = 15000;
+constexpr uint64_t kRemoteSleepRecoveryIntervalUs = 60ULL * 1000000ULL;
 
 constexpr int kSdSclk = 14;
 constexpr int kSdMiso = 13;
@@ -209,6 +234,8 @@ struct RemoteAction {
     char type[24] = {};
     char host[64] = {};
     char text[192] = {};
+    char httpMethod[8] = {};
+    char httpBody[192] = {};
     int value = 0;
     int16_t valueTenths = 0;
     char modifiers[4][12] = {};
@@ -276,11 +303,12 @@ struct PendingRemoteAction {
 struct RemoteNetworkRequest {
     char url[kRemoteRequestUrlBytes] = {};
     char body[kRemoteRequestBodyBytes] = {};
+    char method[8] = {};
     char token[80] = {};
     char actionType[24] = {};
     char controlId[40] = {};
     char pageId[40] = {};
-    uint32_t sequence = 0;
+    uint32_t enqueuedAt = 0;
     uint32_t profileRevision = 0;
     bool reportStatus = false;
     bool slider = false;
@@ -288,9 +316,13 @@ struct RemoteNetworkRequest {
     bool toggleOnBefore = false;
     bool playPause = false;
     bool textRequest = false;
+    bool deviceLogRequest = false;
+    uint8_t logComputerIndex = 0;
+    uint32_t logEntryId = 0;
 };
 
 struct RemoteNetworkResult {
+    char url[kRemoteRequestUrlBytes] = {};
     char actionType[24] = {};
     char controlId[40] = {};
     uint32_t profileRevision = 0;
@@ -301,13 +333,34 @@ struct RemoteNetworkResult {
     bool toggle = false;
     bool toggleOnBefore = false;
     bool playPause = false;
+    bool deviceLogRequest = false;
+    uint8_t logComputerIndex = 0;
+    uint32_t logEntryId = 0;
+};
+
+using RemoteRequestQueue = remote_network::WorkQueue<
+    RemoteNetworkRequest, kRemoteNetworkQueueCapacity>;
+
+struct RemoteNetworkWorker {
+    RemoteRequestQueue* requests = nullptr;
+    TaskHandle_t task = nullptr;
+    remote_network::Lane lane = remote_network::Lane::interactive;
 };
 
 struct RemoteTextNetworkResult {
+    char url[kRemoteRequestUrlBytes] = {};
+    char token[80] = {};
     char pageId[40] = {};
     char responseBody[kRemoteResponseBodyBytes] = {};
     uint32_t profileRevision = 0;
     bool sent = false;
+};
+
+struct DeviceErrorEntry {
+    uint32_t id = 0;
+    char timestamp[32] = {};
+    char message[kDeviceErrorMessageBytes] = {};
+    uint8_t pendingTargets = 0;
 };
 
 struct RemotePage {
@@ -326,6 +379,7 @@ struct RemotePage {
 };
 
 struct RemoteProfile {
+    uint64_t updatedAtMilliseconds = 0;
     char wifiSsid[33] = {};
     char wifiPassword[65] = {};
     char macHost[64] = {};
@@ -413,19 +467,25 @@ bool sliderPositionStoreLoaded = false;
 ToggleStateStore toggleStateStore;
 PendingRemoteAction pendingRemoteActions[kPendingRemoteActionCapacity];
 size_t pendingRemoteActionCount = 0;
-QueueHandle_t remoteNetworkRequestQueue = nullptr;
-QueueHandle_t remoteSliderNetworkRequestQueue = nullptr;
+RemoteNetworkWorker remoteNetworkWorkers[static_cast<size_t>(remote_network::Lane::count)];
+SemaphoreHandle_t remoteNetworkMutex = nullptr;
+bool remoteNetworkWorkersReady = false;
 QueueHandle_t remoteNetworkResultQueue = nullptr;
 QueueHandle_t remoteTextNetworkResultQueue = nullptr;
-QueueSetHandle_t remoteNetworkQueueSet = nullptr;
-TaskHandle_t remoteNetworkTaskHandle = nullptr;
 RemoteTextNetworkResult* remoteTextWorkerResult = nullptr;
 RemoteTextNetworkResult* remoteTextUiResult = nullptr;
 bool remoteTextRequestPending = false;
+DeviceErrorEntry deviceErrors[kDeviceErrorCapacity];
+uint8_t deviceErrorCount = 0;
+uint32_t nextDeviceErrorId = 1;
+bool deviceErrorUploadPending = false;
+uint32_t deviceErrorUploadStartedAt = 0;
+uint32_t nextDeviceErrorUploadAt = 0;
 uint32_t remoteProfileRevision = 1;
-uint32_t remoteNetworkSequence = 0;
-volatile uint32_t remoteNetworkLatestAcceptedSequence = 0;
-volatile uint32_t remoteNetworkCompletedSequence = 0;
+uint32_t remoteFeedbackDirtyMask = 0;
+uint32_t remoteFeedbackPressedMask = 0;
+uint32_t remoteFeedbackQualityMask = 0;
+bool remoteStatusRedrawPending = false;
 PendingRemoteAction deferredThermostatSetpoint;
 bool deferredThermostatSetpointPending = false;
 uint32_t deferredThermostatSetpointDueAt = 0;
@@ -476,6 +536,19 @@ bool wifiUploadRequestAccepted = false;
 bool wifiUploadRequestFinal = false;
 uint32_t wifiUploadRequestOffset = 0;
 uint32_t wifiUploadExpectedChunkBytes = 0;
+// Heap-allocated only while an OTA upload is in progress; internal DRAM has no spare static room.
+struct FirmwareUpdateSession {
+    const esp_partition_t* partition;
+    mbedtls_md5_context md5;
+    uint32_t expectedBytes;
+    uint32_t receivedBytes;
+    uint32_t erasedBytes;
+    char expectedMd5[33];
+    bool accepting;
+    bool succeeded;
+    const char* error;
+};
+FirmwareUpdateSession* firmwareUpdate = nullptr;
 bool wifiScreenRefreshPending = false;
 bool remoteProfileDisplayPending = false;
 uint32_t remoteProfileDisplayAt = 0;
@@ -489,6 +562,7 @@ bool bluetoothActive = false;
 bool bluetoothStopping = false;
 NimBLEServer* bluetoothServer = nullptr;
 uint16_t bluetoothConnectionHandle = UINT16_MAX;
+uint16_t iPhoneControllerHandle = UINT16_MAX;
 volatile bool bluetoothSuspendRequested = false;
 volatile bool bluetoothResumeRequested = false;
 bool bluetoothSuspendedForWifiUpload = false;
@@ -513,15 +587,20 @@ struct BatteryPlaybackState {
     uint32_t displayedFrames = 0;
 };
 BatteryPlaybackState batteryPlaybackState;
-struct MediaTimelineState {
+using MediaTimelineState = media_timeline::State;
+MediaTimelineState mediaTimelineState;
+MediaTimelineState iPhoneMediaTimelineState;
+media_timeline::Position displayedRemoteMediaPosition;
+struct LocalMediaStateUpdate {
     bool available = false;
     bool playing = false;
-    bool stale = true;
+    uint8_t volume = 255;
     uint32_t elapsedMilliseconds = 0;
     uint32_t durationMilliseconds = 0;
-    uint32_t sampledAt = 0;
+    char title[53] = {};
 };
-MediaTimelineState mediaTimelineState;
+LocalMediaStateUpdate localMediaState;
+QueueHandle_t localMediaStateQueue = nullptr;
 size_t batteryStillIndex = 0;
 M5Canvas snakeCanvas(&M5.Display);
 geometric_snake::Scene* snakeScene = nullptr;
@@ -539,6 +618,8 @@ bool remoteVisible = false;
 bool remoteQualityRefreshPending = false;
 bool screensaverActive = false;
 bool slideshowSleepPending = false;
+uint32_t sleepAttemptDeferredAt = 0;
+bool sleepAttemptDeferred = false;
 volatile bool touchInterruptPending = false;
 volatile int32_t pendingRemotePageDelta = 0;
 volatile TickType_t previousButtonInterruptAt = 0;
@@ -616,19 +697,24 @@ void prepareRemoteTextBoxes();
 void pollRemoteTextBoxes();
 void displayRemoteSliderValue(const RemotePage& page, size_t index, bool waitForCompletion);
 void drawRemoteStatusLine();
+void displayRemoteActionStatus(const char* message);
 void refreshReferencedTextBoxes(
     RemotePage& page,
     const char* controlId,
     bool redraw = true);
 bool isMacPlayPauseControl(const RemoteControl& control);
 bool isMacVolumeControl(const RemoteControl& control);
-bool shouldSuppressRecentSliderAcknowledgement(
+bool isMediaPlayPauseControl(const RemoteControl& control);
+bool isMediaVolumeControl(const RemoteControl& control);
+bool isRecentSliderReleaseAcknowledgement(
     const char* controlId,
     int value,
     uint32_t now);
 bool isMediaSeekControl(const RemoteControl& control);
+bool isMacMediaSeekControl(const RemoteControl& control);
 bool isMacTextSource(const RemoteControl& control);
 bool updateMediaTimelineFromResponse(JsonObject response, uint32_t now);
+void processLocalMediaStateUpdate();
 bool readHttpLine(WiFiClient& client, String& line, uint32_t deadline) {
     line = "";
     while (static_cast<int32_t>(millis() - deadline) < 0) {
@@ -653,8 +739,9 @@ bool readHttpLine(WiFiClient& client, String& line, uint32_t deadline) {
     return false;
 }
 
-bool postJsonResponse(
+bool sendHttpResponse(
     const String& url,
+    const char* method,
     const String& body,
     String& responseBody,
     const char* token,
@@ -679,6 +766,8 @@ void startRemoteNetworkWorker();
 void pollRemoteNetworkResults();
 bool hasPendingRemoteNetworkWork();
 void applyMacTextBoxResponse(const RemoteTextNetworkResult& result);
+RemoteComputer* resolveRemoteComputer(const char* identifier);
+RemoteComputer* textBoxComputer(RemoteControl& control);
 void resetClimateAutomationController(const RemoteControl& control);
 void dispatchCapturedWakeTouch();
 void enterM5PaperDeepSleep(uint64_t microseconds);
@@ -1063,6 +1152,66 @@ bool wifiRequestFromAccessPoint() {
     return wifiActive && wifiServer.client().localIP() == WiFi.softAPIP();
 }
 
+void failFirmwareUpdate(const char* error) {
+    firmwareUpdate->accepting = false;
+    if (firmwareUpdate->error == nullptr) {
+        firmwareUpdate->error = error;
+        Serial.printf("Firmware update failed: %s\n", error);
+    }
+}
+
+void releaseFirmwareUpdate() {
+    if (firmwareUpdate == nullptr) {
+        return;
+    }
+    mbedtls_md5_free(&firmwareUpdate->md5);
+    delete firmwareUpdate;
+    firmwareUpdate = nullptr;
+}
+
+// Raw partition writes; esp_ota_begin/write would add static DRAM the firmware cannot spare.
+bool writeFirmwareChunk(const uint8_t* data, size_t length) {
+    const uint32_t end = firmwareUpdate->receivedBytes + length;
+    if (end > firmwareUpdate->erasedBytes) {
+        const uint32_t eraseEnd =
+            (end + SPI_FLASH_SEC_SIZE - 1) / SPI_FLASH_SEC_SIZE * SPI_FLASH_SEC_SIZE;
+        if (eraseEnd > firmwareUpdate->partition->size ||
+            esp_partition_erase_range(firmwareUpdate->partition, firmwareUpdate->erasedBytes,
+                eraseEnd - firmwareUpdate->erasedBytes) != ESP_OK) {
+            return false;
+        }
+        firmwareUpdate->erasedBytes = eraseEnd;
+    }
+    return esp_partition_write(firmwareUpdate->partition, firmwareUpdate->receivedBytes,
+        data, length) == ESP_OK;
+}
+
+void finishFirmwareUpdate() {
+    unsigned char digest[16];
+    char actualMd5[33];
+    mbedtls_md5_finish_ret(&firmwareUpdate->md5, digest);
+    for (size_t index = 0; index < sizeof(digest); ++index) {
+        snprintf(actualMd5 + index * 2, 3, "%02x", digest[index]);
+    }
+    if (firmwareUpdate->receivedBytes != firmwareUpdate->expectedBytes) {
+        failFirmwareUpdate("size_mismatch");
+        return;
+    }
+    if (strcasecmp(actualMd5, firmwareUpdate->expectedMd5) != 0) {
+        failFirmwareUpdate("md5_mismatch");
+        return;
+    }
+    // Verifies the written image (checksum and embedded SHA-256) before switching boot slots.
+    if (esp_ota_set_boot_partition(firmwareUpdate->partition) != ESP_OK) {
+        failFirmwareUpdate("image_invalid");
+        return;
+    }
+    firmwareUpdate->accepting = false;
+    firmwareUpdate->succeeded = true;
+    Serial.printf("Firmware update installed: %lu bytes\n",
+        static_cast<unsigned long>(firmwareUpdate->receivedBytes));
+}
+
 bool wifiRequestAuthorized() {
     if (wifiRequestFromAccessPoint()) {
         return true;
@@ -1234,7 +1383,13 @@ void updateScreensaverBatteryPolicy() {
         return;
     }
     if (!batteryPolicySampled || millis() - batteryPolicySampledAt >= 10000) {
-        batteryImagesOnly = screensaver_battery::imagesOnly(true, M5.Power.getBatteryLevel());
+        const int32_t level = M5.Power.getBatteryLevel();
+        const bool imagesOnly = screensaver_battery::imagesOnly(true, level);
+        if (!batteryPolicySampled || imagesOnly != batteryImagesOnly) {
+            Serial.printf("Screen saver battery: %ld%% -> %s\n",
+                static_cast<long>(level), imagesOnly ? "still images" : "animation");
+        }
+        batteryImagesOnly = imagesOnly;
         batteryPolicySampledAt = millis();
         batteryPolicySampled = true;
     }
@@ -1282,7 +1437,7 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     if (!file) {
         return false;
     }
-    JsonDocument document;
+    JsonDocument document(&profileJsonAllocator);
     const DeserializationError error = deserializeJson(document, file);
     file.close();
     const int profileVersion = document["version"] | 1;
@@ -1291,6 +1446,7 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
         return false;
     }
 
+    output.updatedAtMilliseconds = document["updatedAtMilliseconds"] | uint64_t(0);
     strlcpy(output.wifiSsid, document["wifiSSID"] | "", sizeof(output.wifiSsid));
     strlcpy(output.wifiPassword, document["wifiPassword"] | "", sizeof(output.wifiPassword));
     strlcpy(output.macHost, document["macHost"] | "", sizeof(output.macHost));
@@ -1473,6 +1629,29 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
             strlcpy(control.action.type, actionJson["type"] | "", sizeof(control.action.type));
             strlcpy(control.action.host, actionJson["host"] | "", sizeof(control.action.host));
             strlcpy(control.action.text, actionJson["text"] | "", sizeof(control.action.text));
+            strlcpy(
+                control.action.httpMethod,
+                actionJson["httpMethod"] | "GET",
+                sizeof(control.action.httpMethod));
+            strlcpy(
+                control.action.httpBody,
+                actionJson["httpBody"] | "",
+                sizeof(control.action.httpBody));
+            if (strcmp(control.action.type, "eWeLinkPower") == 0) {
+                strlcpy(
+                    control.action.computerId,
+                    actionJson["deviceID"] | "",
+                    sizeof(control.action.computerId));
+                strlcpy(
+                    control.action.httpBody,
+                    actionJson["deviceKey"] | "",
+                    sizeof(control.action.httpBody));
+            } else if (strcmp(control.action.type, "iPhoneHomePower") == 0) {
+                strlcpy(
+                    control.action.computerId,
+                    actionJson["deviceID"] | "",
+                    sizeof(control.action.computerId));
+            }
             control.action.value = actionJson["value"] | 0;
             control.action.valueTenths = actionJson["valueTenths"] | (control.action.value * 10);
             control.action.deadbandTenths = constrain(actionJson["deadbandTenths"] | 10, 5, 30);
@@ -1510,10 +1689,13 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
                 schedule.minute = control.action.scheduleMinute;
                 control.action.scheduleCount = 1;
             }
-            strlcpy(
-                control.action.computerId,
-                actionJson["computerID"] | "",
-                sizeof(control.action.computerId));
+            if (strcmp(control.action.type, "eWeLinkPower") != 0 &&
+                strcmp(control.action.type, "iPhoneHomePower") != 0) {
+                strlcpy(
+                    control.action.computerId,
+                    actionJson["computerID"] | "",
+                    sizeof(control.action.computerId));
+            }
             for (const char* modifier : actionJson["modifiers"].as<JsonArray>()) {
                 if (control.action.modifierCount >= 4) {
                     break;
@@ -1750,6 +1932,10 @@ bool installTemporaryRemoteProfile() {
     remoteProfile = pendingRemoteProfile;
     pendingRemoteProfile = previousProfile;
     ++remoteProfileRevision;
+    remoteFeedbackDirtyMask = 0;
+    remoteFeedbackPressedMask = 0;
+    remoteFeedbackQualityMask = 0;
+    remoteStatusRedrawPending = false;
     preserveRemoteTextBoxValues(*pendingRemoteProfile, *remoteProfile);
     persistRemoteSliderPositions(*remoteProfile);
     if (remoteProfile->hasDeviceClock) {
@@ -1920,9 +2106,21 @@ bool initializeSdCard() {
 }
 
 void notifyControl(uint8_t status) {
-    if (controlCharacteristic != nullptr) {
+    if (controlCharacteristic != nullptr && bluetoothConnectionHandle != UINT16_MAX) {
         controlCharacteristic->setValue(&status, 1);
-        controlCharacteristic->notify();
+        controlCharacteristic->notify(bluetoothConnectionHandle);
+    }
+}
+
+void notifyActiveController() {
+    if (controlCharacteristic != nullptr && bluetoothConnectionHandle != UINT16_MAX) {
+        controlCharacteristic->notify(bluetoothConnectionHandle);
+    }
+}
+
+void notifyIPhoneController() {
+    if (controlCharacteristic != nullptr && iPhoneControllerHandle != UINT16_MAX) {
+        controlCharacteristic->notify(iPhoneControllerHandle);
     }
 }
 
@@ -1938,7 +2136,7 @@ void notifyUploadProgress() {
         static_cast<uint8_t>(upload.receivedBytes >> 24),
     };
     controlCharacteristic->setValue(response, sizeof(response));
-    controlCharacteristic->notify();
+    notifyActiveController();
 }
 
 void notifyRemoteProfileProgress() {
@@ -1953,7 +2151,7 @@ void notifyRemoteProfileProgress() {
         static_cast<uint8_t>(remoteProfileUpload.receivedBytes >> 24),
     };
     controlCharacteristic->setValue(response, sizeof(response));
-    controlCharacteristic->notify();
+    notifyActiveController();
 }
 
 void notifyWifiInfo() {
@@ -1964,7 +2162,7 @@ void notifyWifiInfo() {
     const size_t ssidLength = strlen(wifiSsid);
     memcpy(response + 1, wifiSsid, ssidLength);
     controlCharacteristic->setValue(response, 1 + ssidLength);
-    controlCharacteristic->notify();
+    notifyActiveController();
 }
 
 void scanWifiNetworks() {
@@ -1978,7 +2176,7 @@ void scanWifiNetworks() {
     const uint8_t visibleCount = static_cast<uint8_t>(min<int16_t>(wifiScanResultCount, 255));
     const uint8_t response[] = {kWifiNetworkCount, visibleCount};
     controlCharacteristic->setValue(response, sizeof(response));
-    controlCharacteristic->notify();
+    notifyActiveController();
     Serial.printf("Wi-Fi scan found %d networks\n", wifiScanResultCount);
 }
 
@@ -1997,7 +2195,7 @@ void notifyWifiNetwork(uint8_t index) {
     };
     memcpy(response + 4, ssid.c_str(), ssidLength);
     controlCharacteristic->setValue(response, 4 + ssidLength);
-    controlCharacteristic->notify();
+    notifyActiveController();
 }
 
 void notifyHomeWifiStatus() {
@@ -2018,14 +2216,14 @@ void notifyHomeWifiStatus() {
         response[8 + index] = static_cast<uint8_t>(homeWifiSessionToken >> ((7 - index) * 8));
     }
     controlCharacteristic->setValue(response, sizeof(response));
-    controlCharacteristic->notify();
+    notifyActiveController();
 }
 
 void notifyLibraryCount() {
     refreshLibrary(true);
     const uint8_t response[] = {kLibraryCount, static_cast<uint8_t>(libraryItemCount)};
     controlCharacteristic->setValue(response, sizeof(response));
-    controlCharacteristic->notify();
+    notifyActiveController();
 }
 
 void notifyLibraryItem(uint8_t index) {
@@ -2043,7 +2241,7 @@ void notifyLibraryItem(uint8_t index) {
     response[4] = static_cast<uint8_t>(item.frameCount >> 8);
     memcpy(response + 5, item.title, titleLength);
     controlCharacteristic->setValue(response, 5 + titleLength);
-    controlCharacteristic->notify();
+    notifyActiveController();
 }
 
 void closeAnimation() {
@@ -2553,12 +2751,14 @@ void configureWifiServer() {
         "X-PGIF-Chunk-Size",
         "X-PGIF-Final",
         "Authorization",
+        "X-PGIF-MD5",
     };
-    wifiServer.collectHeaders(headerKeys, 5);
+    wifiServer.collectHeaders(headerKeys, 6);
     wifiServer.on("/status", HTTP_GET, []() {
-        char response[128];
+        char response[192];
         snprintf(response, sizeof(response),
-            "{\"device\":\"paperGIF\",\"ready\":%s,\"uploading\":%s,\"ssid\":\"%s\"}",
+            "{\"device\":\"paperGIF\",\"firmware\":\"%s\",\"ready\":%s,\"uploading\":%s,\"ssid\":\"%s\"}",
+            PAPERGIF_FIRMWARE_VERSION,
             sdReady && !upload.active ? "true" : "false",
             upload.active ? "true" : "false",
             wifiSsid);
@@ -2651,11 +2851,22 @@ void configureWifiServer() {
             wifiServer.send(404, "application/json", "{\"ok\":false,\"error\":\"profile_not_found\"}");
             return;
         }
-        JsonDocument document;
+        Serial.printf("Profile GET: file=%u bytes, internal RAM before=%u\n",
+            static_cast<unsigned>(file.size()),
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        JsonDocument document(&profileJsonAllocator);
         const DeserializationError error = deserializeJson(document, file);
         file.close();
+        Serial.printf("Profile GET parsed: internal RAM=%u largest=%u, error=%s\n",
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            error.c_str());
         if (error) {
-            wifiServer.send(500, "application/json", "{\"ok\":false,\"error\":\"profile_invalid\"}");
+            if (error == DeserializationError::NoMemory) {
+                wifiServer.send(503, "application/json", "{\"ok\":false,\"error\":\"profile_memory_unavailable\"}");
+            } else {
+                wifiServer.send(500, "application/json", "{\"ok\":false,\"error\":\"profile_invalid\"}");
+            }
             return;
         }
         if (remoteProfile != nullptr) {
@@ -2701,7 +2912,19 @@ void configureWifiServer() {
             }
         }
         String response;
-        serializeJson(document, response);
+        // Reserve once so growing a large response does not consume internal RAM
+        // in small increments. Reject allocation failures instead of sending a
+        // truncated profile with HTTP 200.
+        const size_t responseBytes = measureJson(document);
+        if (document.overflowed() || !response.reserve(responseBytes) ||
+            serializeJson(document, response) != responseBytes) {
+            wifiServer.send(503, "application/json", "{\"ok\":false,\"error\":\"profile_memory_unavailable\"}");
+            return;
+        }
+        Serial.printf("Profile GET serialized: bytes=%u internal RAM=%u largest=%u\n",
+            static_cast<unsigned>(response.length()),
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         wifiServer.send(200, "application/json", response);
     });
     wifiServer.on("/remote", HTTP_POST, []() {
@@ -2742,6 +2965,9 @@ void configureWifiServer() {
             wifiServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_update\"}");
             return;
         }
+        const String authorization = wifiServer.header("Authorization");
+        const String sourceToken = authorization.startsWith("Bearer ")
+            ? authorization.substring(7) : String();
         const uint32_t now = millis();
         for (JsonObject item : document["items"].as<JsonArray>()) {
             const char* identifier = item["id"] | "";
@@ -2752,6 +2978,10 @@ void configureWifiServer() {
                 RemotePage& page = remoteProfile->pages[pageIndex];
                 for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
                     RemoteControl& control = page.controls[controlIndex];
+                    if (strcmp(control.id, identifier) != 0 ||
+                        !remote_computer::acceptsToken(textBoxComputer(control), sourceToken.c_str())) {
+                        continue;
+                    }
                     if (isMacVolumeControl(control) && strcmp(control.id, identifier) == 0) {
                         control.nextRefreshAt = now + 60000;
                         if (available && item["value"].is<int>()) {
@@ -2764,13 +2994,15 @@ void configureWifiServer() {
                             }
                             const int value = constrain(item["value"].as<int>(), 0, 255);
                             const bool changed = control.action.value != value;
-                            const bool suppressRedraw =
-                                shouldSuppressRecentSliderAcknowledgement(
-                                    control.id, value, now);
+                            const bool releaseAcknowledged =
+                                isRecentSliderReleaseAcknowledgement(control.id, value, now);
                             control.action.value = value;
-                            if (changed && !suppressRedraw && remoteVisible &&
+                            if (releaseAcknowledged) {
+                                recentSliderReleaseControlId[0] = '\0';
+                            }
+                            if ((changed || releaseAcknowledged) && remoteVisible &&
                                 pageIndex == remotePageIndex) {
-                                displayRemoteSliderValue(page, controlIndex, true);
+                                displayRemoteSliderValue(page, controlIndex, false);
                                 refreshReferencedTextBoxes(page, control.id);
                             }
                         }
@@ -2788,17 +3020,17 @@ void configureWifiServer() {
                         control.nextRefreshAt = updateMediaTimelineFromResponse(item, now)
                             ? 0 : now + 60000;
                         if (changed && remoteVisible && pageIndex == remotePageIndex) {
-                            displayRemoteSliderValue(page, controlIndex, true);
+                            displayRemoteSliderValue(page, controlIndex, false);
                             refreshReferencedTextBoxes(page, control.id);
                         }
                         continue;
                     }
-                    if ((control.kind != 2 && !isMediaSeekControl(control)) ||
+                    if ((control.kind != 2 && !isMacMediaSeekControl(control)) ||
                         strcmp(control.textSource, "nowPlaying") != 0 ||
                         strcmp(control.id, identifier) != 0) {
                         continue;
                     }
-                    const bool timelineUpdated = isMediaSeekControl(control) &&
+                    const bool timelineUpdated = isMacMediaSeekControl(control) &&
                         updateMediaTimelineFromResponse(item, now);
                     control.nextRefreshAt = timelineUpdated ? 0 : now + 60000;
                     if (!available && control.hasResolvedValue) {
@@ -2830,6 +3062,79 @@ void configureWifiServer() {
             }
         }
         wifiServer.send(200, "application/json", "{\"ok\":true}");
+    });
+    wifiServer.on("/firmware", HTTP_POST, []() {
+        if (!wifiRequestAuthorized()) {
+            wifiServer.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+            return;
+        }
+        if (firmwareUpdate != nullptr && firmwareUpdate->succeeded) {
+            releaseFirmwareUpdate();
+            wifiServer.send(200, "application/json", "{\"ok\":true,\"restarting\":true}");
+            wifiServer.client().flush();
+            Serial.println("Restarting into updated firmware");
+            Serial.flush();
+            delay(500);
+            ESP.restart();
+            return;
+        }
+        const char* error = "invalid_firmware_request";
+        if (firmwareUpdate != nullptr) {
+            if (firmwareUpdate->error == nullptr) {
+                failFirmwareUpdate("incomplete_upload");
+            }
+            error = firmwareUpdate->error;
+        }
+        String response = "{\"ok\":false,\"error\":";
+        appendJsonString(response, error);
+        response += '}';
+        releaseFirmwareUpdate();
+        wifiServer.send(400, "application/json", response);
+    }, []() {
+        HTTPUpload& part = wifiServer.upload();
+        if (part.status == UPLOAD_FILE_START) {
+            releaseFirmwareUpdate();
+            if (!wifiRequestAuthorized()) {
+                wifiServer.client().stop();
+                return;
+            }
+            firmwareUpdate = new (std::nothrow) FirmwareUpdateSession();
+            if (firmwareUpdate == nullptr) {
+                return;
+            }
+            mbedtls_md5_init(&firmwareUpdate->md5);
+            mbedtls_md5_starts_ret(&firmwareUpdate->md5);
+            firmwareUpdate->expectedBytes =
+                static_cast<uint32_t>(wifiServer.header("X-PGIF-Size").toInt());
+            const String md5 = wifiServer.header("X-PGIF-MD5");
+            strlcpy(firmwareUpdate->expectedMd5, md5.c_str(), sizeof(firmwareUpdate->expectedMd5));
+            firmwareUpdate->partition = esp_ota_get_next_update_partition(nullptr);
+            if (upload.active || remoteProfileUpload.active) {
+                failFirmwareUpdate("device_busy");
+            } else if (firmwareUpdate->expectedBytes == 0 || md5.length() != 32 ||
+                       firmwareUpdate->partition == nullptr ||
+                       firmwareUpdate->expectedBytes > firmwareUpdate->partition->size) {
+                failFirmwareUpdate("invalid_firmware_request");
+            } else {
+                firmwareUpdate->accepting = true;
+                Serial.printf("Firmware update started: %lu bytes\n",
+                    static_cast<unsigned long>(firmwareUpdate->expectedBytes));
+            }
+        } else if (firmwareUpdate == nullptr || !firmwareUpdate->accepting) {
+            return;
+        } else if (part.status == UPLOAD_FILE_WRITE) {
+            if (part.currentSize > firmwareUpdate->expectedBytes - firmwareUpdate->receivedBytes ||
+                !writeFirmwareChunk(part.buf, part.currentSize)) {
+                failFirmwareUpdate("write_failed");
+                return;
+            }
+            mbedtls_md5_update_ret(&firmwareUpdate->md5, part.buf, part.currentSize);
+            firmwareUpdate->receivedBytes += part.currentSize;
+        } else if (part.status == UPLOAD_FILE_END) {
+            finishFirmwareUpdate();
+        } else if (part.status == UPLOAD_FILE_ABORTED) {
+            failFirmwareUpdate("upload_aborted");
+        }
     });
     wifiServer.on("/upload", HTTP_POST, []() {
         if (!wifiRequestAuthorized()) {
@@ -3413,12 +3718,16 @@ void receiveRemoteProfileData(const uint8_t* value, size_t length) {
 }
 
 class ControlCallbacks final : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo&) override {
+    void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connectionInfo) override {
         lastRemoteActivityAt = millis();
         const NimBLEAttValue value = characteristic->getValue();
         if (value.size() == 0) {
+            bluetoothConnectionHandle = connectionInfo.getConnHandle();
             notifyControl(kUploadFailed);
             return;
+        }
+        if (value[0] != kLocalMediaState) {
+            bluetoothConnectionHandle = connectionInfo.getConnHandle();
         }
         if (value[0] == kBeginUpload) {
             beginUpload(value.data(), value.size());
@@ -3435,7 +3744,7 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
                 deleteLibraryItem(value[1]) ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0),
             };
             controlCharacteristic->setValue(response, sizeof(response));
-            controlCharacteristic->notify();
+            notifyActiveController();
         } else if (value[0] == kSelectLibraryItem && value.size() == 2) {
             if (value[1] >= libraryItemCount) {
                 notifyControl(kUploadFailed);
@@ -3459,6 +3768,39 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
             beginRemoteProfileUpload(value.data(), value.size());
         } else if (value[0] == kFinishRemoteProfile && value.size() == 1) {
             finishRemoteProfileUpload();
+        } else if (value[0] == kClaimIPhoneController && value.size() == 1) {
+            bluetoothConnectionHandle = connectionInfo.getConnHandle();
+            iPhoneControllerHandle = connectionInfo.getConnHandle();
+            Serial.printf("iPhone controller claimed BLE handle %u\n", iPhoneControllerHandle);
+        } else if (value[0] == kHomePowerResult && value.size() >= 2) {
+            char message[54] = {};
+            const size_t messageLength = min(
+                static_cast<size_t>(value.size() - 2), sizeof(message) - 1);
+            memcpy(message, value.data() + 2, messageLength);
+            if (value[1] == 0) {
+                Serial.println("Apple Home command received by iPhone");
+                displayRemoteActionStatus("Home command received");
+            } else if (value[1] == 1) {
+                Serial.println("Apple Home command succeeded");
+                displayRemoteActionStatus("Home updated");
+            } else {
+                Serial.printf("Apple Home command failed: %s\n",
+                    message[0] != '\0' ? message : "unknown error");
+                displayRemoteActionStatus(message[0] != '\0' ? message : "Home command failed");
+            }
+        } else if (value[0] == kLocalMediaState && value.size() >= 12 &&
+                   value.size() == static_cast<size_t>(12 + value[11]) &&
+                   value[11] < sizeof(LocalMediaStateUpdate::title) &&
+                   localMediaStateQueue != nullptr) {
+            LocalMediaStateUpdate update;
+            update.available = (value[1] & 0x01) != 0;
+            update.playing = (value[1] & 0x02) != 0;
+            update.volume = value[2];
+            update.elapsedMilliseconds = readLittleEndian32(value.data() + 3);
+            update.durationMilliseconds = readLittleEndian32(value.data() + 7);
+            memcpy(update.title, value.data() + 12, value[11]);
+            update.title[value[11]] = '\0';
+            xQueueOverwrite(localMediaStateQueue, &update);
         } else {
             notifyControl(kUploadFailed);
         }
@@ -3466,7 +3808,8 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
 };
 
 class DataCallbacks final : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo&) override {
+    void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connectionInfo) override {
+        bluetoothConnectionHandle = connectionInfo.getConnHandle();
         lastRemoteActivityAt = millis();
         const NimBLEAttValue value = characteristic->getValue();
         if (remoteProfileUpload.active) {
@@ -3479,32 +3822,57 @@ class DataCallbacks final : public NimBLECharacteristicCallbacks {
 
 class ServerCallbacks final : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* server, NimBLEConnInfo& connectionInfo) override {
-        Serial.println("BLE connected");
+        Serial.printf("BLE connected: interval=%.2f ms latency=%u timeout=%u ms, internal RAM=%u largest=%u\n",
+            connectionInfo.getConnInterval() * 1.25f, connectionInfo.getConnLatency(),
+            connectionInfo.getConnTimeout() * 10,
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         bluetoothServer = server;
-        bluetoothConnectionHandle = connectionInfo.getConnHandle();
+        if (bluetoothConnectionHandle == UINT16_MAX) {
+            bluetoothConnectionHandle = connectionInfo.getConnHandle();
+        }
         deviceConnected = true;
+        if (server->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
+            NimBLEDevice::startAdvertising();
+        }
         lastRemoteActivityAt = millis();
         setBluetoothTransferPerformance(false);
         stillFrameDisplayed = false;
         nextFrameAt = millis();
     }
 
-    void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int reason) override {
+    void onConnParamsUpdate(NimBLEConnInfo& connectionInfo) override {
+        Serial.printf("BLE parameters: interval=%.2f ms latency=%u timeout=%u ms\n",
+            connectionInfo.getConnInterval() * 1.25f, connectionInfo.getConnLatency(),
+            connectionInfo.getConnTimeout() * 10);
+    }
+
+    void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connectionInfo, int reason) override {
         Serial.printf("BLE disconnected, reason: %d\n", reason);
-        deviceConnected = false;
-        bluetoothConnectionHandle = UINT16_MAX;
+        const bool activeControllerDisconnected =
+            bluetoothConnectionHandle == connectionInfo.getConnHandle();
+        if (iPhoneControllerHandle == connectionInfo.getConnHandle()) {
+            iPhoneControllerHandle = UINT16_MAX;
+        }
+        deviceConnected = server->getConnectedCount() > 0;
+        if (activeControllerDisconnected) {
+            const std::vector<uint16_t> peers = server->getPeerDevices();
+            bluetoothConnectionHandle = peers.empty() ? UINT16_MAX : peers.front();
+        }
         if (bluetoothStopping) {
             return;
         }
-        if (upload.active) {
+        if (activeControllerDisconnected && upload.active) {
             cancelUpload(false);
             loadAnimation();
         }
-        if (remoteProfileUpload.active) {
+        if (activeControllerDisconnected && remoteProfileUpload.active) {
             cancelRemoteProfileUpload(false);
         }
         splashPending = !animationReady;
-        NimBLEDevice::startAdvertising();
+        if (server->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
+            NimBLEDevice::startAdvertising();
+        }
     }
 };
 
@@ -3524,7 +3892,7 @@ void startBluetooth() {
 
     NimBLEService* service = bluetoothServer->createService(kServiceUuid);
     controlCharacteristic = service->createCharacteristic(
-        kControlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 64);
+        kControlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 96);
     NimBLECharacteristic* dataCharacteristic = service->createCharacteristic(
         kDataUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR, 512);
     controlCharacteristic->setCallbacks(&controlCallbacks);
@@ -3543,7 +3911,9 @@ void startBluetooth() {
 }
 
 void ensureBluetoothAdvertising() {
-    if (bluetoothStopping || bluetoothSuspendedForWifiUpload || deviceConnected ||
+    if (bluetoothStopping || bluetoothSuspendedForWifiUpload ||
+        (bluetoothServer != nullptr &&
+         bluetoothServer->getConnectedCount() >= CONFIG_BT_NIMBLE_MAX_CONNECTIONS) ||
         static_cast<int32_t>(millis() - nextBluetoothAdvertisingCheckAt) < 0) {
         return;
     }
@@ -3572,6 +3942,7 @@ void suspendBluetoothForWifiUpload() {
     deviceConnected = false;
     bluetoothServer = nullptr;
     bluetoothConnectionHandle = UINT16_MAX;
+    iPhoneControllerHandle = UINT16_MAX;
     controlCharacteristic = nullptr;
     bluetoothSuspendedForWifiUpload = true;
     bluetoothSuspendedAt = millis();
@@ -4602,7 +4973,7 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
         return;
     }
 
-    const bool playbackControl = isMacPlayPauseControl(control);
+    const bool playbackControl = isMediaPlayPauseControl(control);
     const bool playbackStateAvailable = playbackControl && control.hasResolvedValue;
     const bool active = control.toggle && !playbackControl
         ? control.toggleOn : pressed;
@@ -4866,36 +5237,24 @@ void displayRemoteControlFeedback(size_t index, bool pressed) {
     if (!remoteControlFrame(page, index, frame) || page.controls[index].slider) {
         return;
     }
-    const int32_t x = frame.x;
-    const int32_t y = frame.y;
-    const int32_t width = frame.width;
-    const int32_t height = frame.height;
-
     if (pressed) {
         const uint8_t qualityInterval = max<uint8_t>(
             1, remoteProfile->buttonQualityRefreshInterval);
         ++remoteButtonPressCount;
         activeRemoteButtonQualityRefresh = remoteButtonPressCount % qualityInterval == 0;
     }
-    M5.Display.setEpdMode(activeRemoteButtonQualityRefresh
-        ? epd_mode_t::epd_text : epd_mode_t::epd_fastest);
-    M5.Display.startWrite();
+    // Touch processing only records the newest visual state. E-paper must not
+    // delay command dispatch or prevent the next press/release from being read.
+    const uint32_t bit = 1UL << index;
+    remoteFeedbackDirtyMask |= bit;
     if (pressed) {
-        constexpr int32_t radius = 10;
-        for (int32_t inset = 3; inset <= 5; ++inset) {
-            M5.Display.drawRoundRect(
-                x + inset,
-                y + inset,
-                width - inset * 2,
-                height - inset * 2,
-                radius - inset,
-                TFT_BLACK);
-        }
+        remoteFeedbackPressedMask |= bit;
     } else {
-        drawRemoteControl(page, index);
+        remoteFeedbackPressedMask &= ~bit;
     }
-    M5.Display.endWrite();
-    M5.Display.waitDisplay();
+    if (activeRemoteButtonQualityRefresh) {
+        remoteFeedbackQualityMask |= bit;
+    }
     if (!pressed) {
         activeRemoteButtonQualityRefresh = false;
     }
@@ -4912,7 +5271,7 @@ void displayRemoteSliderValue(
     drawRemoteControl(page, index);
     if (index < page.controlCount &&
         (isMediaSeekControl(page.controls[index]) ||
-         isMacPlayPauseControl(page.controls[index]))) {
+         isMediaPlayPauseControl(page.controls[index]))) {
         drawRemoteStatusLine();
     }
     M5.Display.endWrite();
@@ -5053,6 +5412,24 @@ bool isHomeWifiAuthenticationFailure(uint16_t reason) {
         reason == WIFI_REASON_HANDSHAKE_TIMEOUT;
 }
 
+media_timeline::Position currentRemoteMediaPosition(uint32_t now) {
+    if (remoteProfile == nullptr || remotePageIndex >= remoteProfile->pageCount) {
+        return {};
+    }
+    const RemotePage& page = remoteProfile->pages[remotePageIndex];
+    return media_timeline::positionForControls(
+        page.controls, page.controlCount, mediaTimelineState, iPhoneMediaTimelineState,
+        activeRemoteTouchPage == remotePageIndex ? activeRemoteControlIndex : -1, now);
+}
+
+void refreshRemoteMediaPosition() {
+    if (remoteVisible && currentRemoteMediaPosition(millis()) != displayedRemoteMediaPosition) {
+        // Coalesce time changes with other status updates and wait for the panel
+        // to be idle in renderRemoteFeedback(), never in the touch handler.
+        remoteStatusRedrawPending = true;
+    }
+}
+
 void drawRemoteStatusLine() {
     M5.Display.fillRect(24, 110, 492, 28, TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -5092,34 +5469,20 @@ void drawRemoteStatusLine() {
     }
     M5.Display.clearClipRect();
 
-    if (remoteProfile == nullptr || remotePageIndex >= remoteProfile->pageCount ||
-        !mediaTimelineState.available) {
+    displayedRemoteMediaPosition = currentRemoteMediaPosition(millis());
+    if (!displayedRemoteMediaPosition.available) {
         return;
     }
-    const RemotePage& page = remoteProfile->pages[remotePageIndex];
-    for (uint8_t index = 0; index < page.controlCount; ++index) {
-        const RemoteControl& control = page.controls[index];
-        if (!isMediaSeekControl(control)) {
-            continue;
-        }
-        const bool activelyDragging = activeRemoteTouchPage == remotePageIndex &&
-            activeRemoteControlIndex == static_cast<int8_t>(index);
-        if (!mediaTimelineState.playing && !activelyDragging) {
-            return;
-        }
-        const uint32_t elapsedSeconds = mediaTimelineState.durationMilliseconds *
-            constrain(control.action.value, 0, 255) / 255000ULL;
-        const uint32_t durationSeconds = mediaTimelineState.durationMilliseconds / 1000;
-        char timeText[24];
-        snprintf(timeText, sizeof(timeText), "%lu:%02lu / %lu:%02lu",
-            static_cast<unsigned long>(elapsedSeconds / 60),
-            static_cast<unsigned long>(elapsedSeconds % 60),
-            static_cast<unsigned long>(durationSeconds / 60),
-            static_cast<unsigned long>(durationSeconds % 60));
-        M5.Display.setTextDatum(textdatum_t::top_right);
-        M5.Display.drawString(timeText, 516, 116);
-        return;
-    }
+    const uint32_t elapsedSeconds = displayedRemoteMediaPosition.elapsedSeconds;
+    const uint32_t durationSeconds = displayedRemoteMediaPosition.durationSeconds;
+    char timeText[32];
+    snprintf(timeText, sizeof(timeText), "%lu:%02lu / %lu:%02lu",
+        static_cast<unsigned long>(elapsedSeconds / 60),
+        static_cast<unsigned long>(elapsedSeconds % 60),
+        static_cast<unsigned long>(durationSeconds / 60),
+        static_cast<unsigned long>(durationSeconds % 60));
+    M5.Display.setTextDatum(textdatum_t::top_right);
+    M5.Display.drawString(timeText, 516, 116);
 }
 
 int8_t sampleRemoteBatteryLevel() {
@@ -5182,11 +5545,44 @@ void displayRemoteActionStatus(const char* message) {
         return;
     }
     strlcpy(remoteActionStatus, message, sizeof(remoteActionStatus));
-    M5.Display.waitDisplay();
-    M5.Display.setEpdMode(epd_mode_t::epd_text);
+    remoteStatusRedrawPending = true;
+}
+
+void renderRemoteFeedback() {
+    if (!remoteVisible || remoteProfile == nullptr ||
+        (remoteFeedbackDirtyMask == 0 && !remoteStatusRedrawPending) ||
+        M5.Display.displayBusy()) {
+        return;
+    }
+    const RemotePage& page = remoteProfile->pages[remotePageIndex];
+    M5.Display.setEpdMode(remoteFeedbackQualityMask != 0
+        ? epd_mode_t::epd_text : epd_mode_t::epd_fastest);
     M5.Display.startWrite();
-    drawRemoteStatusLine();
+    for (size_t index = 0; index < page.controlCount; ++index) {
+        const uint32_t bit = 1UL << index;
+        if ((remoteFeedbackDirtyMask & bit) == 0) {
+            continue;
+        }
+        RemoteControlFrame frame;
+        if (!remoteControlFrame(page, index, frame)) {
+            continue;
+        }
+        drawRemoteControl(page, index);
+        if ((remoteFeedbackPressedMask & bit) != 0) {
+            for (int32_t inset = 3; inset <= 5; ++inset) {
+                M5.Display.drawRoundRect(frame.x + inset, frame.y + inset,
+                    frame.width - inset * 2, frame.height - inset * 2,
+                    10 - inset, TFT_BLACK);
+            }
+        }
+    }
+    if (remoteStatusRedrawPending) {
+        drawRemoteStatusLine();
+    }
     M5.Display.endWrite();
+    remoteFeedbackDirtyMask = 0;
+    remoteFeedbackQualityMask = 0;
+    remoteStatusRedrawPending = false;
 }
 
 void displayRemoteSleepStatus() {
@@ -5229,6 +5625,10 @@ void displayRemote() {
     activeRemoteControlVisual = false;
     activeRemoteHoldTriggered = false;
     activeRemoteContinuousJog = false;
+    remoteFeedbackDirtyMask = 0;
+    remoteFeedbackPressedMask = 0;
+    remoteFeedbackQualityMask = 0;
+    remoteStatusRedrawPending = false;
     prepareRemoteTextBoxes();
 
     M5.Display.waitDisplay();
@@ -5324,6 +5724,7 @@ void connectHomeWifi() {
         return;
     }
     WiFi.mode(wifiActive ? WIFI_AP_STA : WIFI_STA);
+    // The ESP32 coexistence controller requires modem sleep when BLE starts.
     WiFi.setSleep(true);
     homeWifiState = 1;
     homeWifiAuthenticationRetryPending = false;
@@ -5336,8 +5737,9 @@ void connectHomeWifi() {
     Serial.printf("Connecting to home Wi-Fi: %s\n", remoteProfile->wifiSsid);
 }
 
-bool postJsonResponse(
+bool sendHttpResponse(
     const String& url,
+    const char* method,
     const String& body,
     String& responseBody,
     const char* token = nullptr,
@@ -5356,35 +5758,72 @@ bool postJsonResponse(
         authority.remove(portSeparator);
     }
 
+    IPAddress resolvedAddress;
+    String normalizedAuthority = authority;
+    normalizedAuthority.toLowerCase();
+    if (!resolvedAddress.fromString(authority) && normalizedAuthority.endsWith(".local")) {
+        String mdnsHost = authority.substring(0, authority.length() - 6);
+        resolvedAddress = MDNS.queryHost(mdnsHost, 2000);
+        if (resolvedAddress == INADDR_NONE || resolvedAddress == IPAddress()) {
+            Serial.printf("mDNS lookup failed for %s\n", authority.c_str());
+            return false;
+        }
+    }
+
     WiFiClient client;
     client.setTimeout(4000);
     bool connected = false;
     for (uint8_t attempt = 0; attempt < 2 && !connected; ++attempt) {
-        connected = client.connect(authority.c_str(), port, 3000);
+        connected = resolvedAddress == IPAddress()
+            ? client.connect(authority.c_str(), port, 3000)
+            : client.connect(resolvedAddress, port, 3000);
         if (!connected && attempt == 0) {
             client.stop();
             vTaskDelay(pdMS_TO_TICKS(100));
         }
     }
     if (!connected) {
+        Serial.printf("Remote TCP connect failed: %s:%u, wifi=%d rssi=%d, internal RAM=%u largest=%u\n",
+            authority.c_str(), port, static_cast<int>(WiFi.status()), WiFi.RSSI(),
+            heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         return false;
     }
-    client.printf("POST %s HTTP/1.1\r\n", path.c_str());
-    client.printf("Host: %s\r\n", authority.c_str());
-    client.print("Content-Type: application/json\r\nConnection: close\r\n");
+    // Small control messages should not wait for Nagle/delayed ACK interaction.
+    client.setNoDelay(true);
+    const char* requestMethod = method != nullptr && method[0] != '\0' ? method : "POST";
+    const bool sendsBody = strcmp(requestMethod, "POST") == 0;
+    String headers;
+    headers.reserve(320);
+    headers = String(requestMethod) + " " + path + " HTTP/1.1\r\nHost: " +
+        authority + ":" + String(port) + "\r\nConnection: close\r\n";
     if (token != nullptr && token[0] != '\0') {
-        client.printf("Authorization: Bearer %s\r\n", token);
+        headers += "Authorization: Bearer ";
+        headers += token;
+        headers += "\r\n";
     }
-    client.printf("Content-Length: %u\r\n\r\n", body.length());
-    client.print(body);
+    if (sendsBody) {
+        headers += "Content-Type: application/json\r\n";
+        headers += "Content-Length: " + String(body.length()) + "\r\n";
+    }
+    headers += "\r\n";
+    client.print(headers);
+    if (sendsBody) {
+        client.print(body);
+    }
     const uint32_t responseDeadline = millis() + responseTimeoutMs;
     String statusLine;
     if (!readHttpLine(client, statusLine, responseDeadline)) {
+        Serial.printf("Remote HTTP status timeout: %s:%u\n", authority.c_str(), port);
         client.stop();
         return false;
     }
     const int firstSpace = statusLine.indexOf(' ');
     const int status = firstSpace >= 0 ? statusLine.substring(firstSpace + 1).toInt() : 0;
+    if (status < 200 || status >= 300) {
+        Serial.printf("Remote HTTP %d: %s:%u%s\n",
+            status, authority.c_str(), port, path.c_str());
+    }
     int contentLength = -1;
     while (client.connected() || client.available()) {
         String line;
@@ -5447,28 +5886,290 @@ bool postJsonResponse(
     return status >= 200 && status < 300;
 }
 
-void remoteNetworkTask(void*) {
-    RemoteNetworkRequest request;
-    while (true) {
-        QueueSetMemberHandle_t readyQueue = xQueueSelectFromSet(
-            remoteNetworkQueueSet,
-            portMAX_DELAY);
-        if (readyQueue == nullptr ||
-            xQueueReceive(readyQueue, &request, 0) != pdTRUE) {
+bool normalizeLocalHttpAuthority(const char* rawHost, String& authority) {
+    authority = rawHost == nullptr ? "" : rawHost;
+    authority.trim();
+    if (authority.startsWith("https://")) {
+        return false;
+    }
+    if (authority.startsWith("http://")) {
+        authority.remove(0, 7);
+    }
+    if (authority.isEmpty() || authority.indexOf('/') >= 0 ||
+        authority.indexOf('@') >= 0 || authority.indexOf('#') >= 0 ||
+        authority.indexOf('?') >= 0 || authority.indexOf('\r') >= 0 ||
+        authority.indexOf('\n') >= 0) {
+        return false;
+    }
+    String host = authority;
+    const int portSeparator = host.lastIndexOf(':');
+    if (portSeparator >= 0) {
+        const String portText = host.substring(portSeparator + 1);
+        const long port = portText.toInt();
+        if (port <= 0 || port > 65535 || String(port) != portText) {
+            return false;
+        }
+        host.remove(portSeparator);
+    }
+    String normalizedHost = host;
+    normalizedHost.toLowerCase();
+    IPAddress address;
+    const bool numericAddress = address.fromString(host);
+    return (numericAddress && local_http::isPrivateIPv4(address[0], address[1])) ||
+        local_http::isLocalHostname(normalizedHost.c_str());
+}
+
+bool buildEWeLinkRequestBody(
+    const RemoteAction& action,
+    bool turnOn,
+    String& body) {
+    if (action.computerId[0] == '\0' || action.httpBody[0] == '\0') {
+        return false;
+    }
+    char plaintext[32];
+    snprintf(plaintext, sizeof(plaintext), "{\"switch\":\"%s\"}", turnOn ? "on" : "off");
+    const size_t plaintextLength = strlen(plaintext);
+    const size_t paddedLength = ((plaintextLength / 16) + 1) * 16;
+    if (paddedLength > 48) {
+        return false;
+    }
+    unsigned char padded[48] = {};
+    memcpy(padded, plaintext, plaintextLength);
+    memset(padded + plaintextLength,
+        static_cast<unsigned char>(paddedLength - plaintextLength),
+        paddedLength - plaintextLength);
+
+    unsigned char key[16];
+    if (mbedtls_md5_ret(
+            reinterpret_cast<const unsigned char*>(action.httpBody),
+            strlen(action.httpBody), key) != 0) {
+        return false;
+    }
+    unsigned char iv[16];
+    unsigned char workingIv[16];
+    esp_fill_random(iv, sizeof(iv));
+    memcpy(workingIv, iv, sizeof(iv));
+    unsigned char ciphertext[48] = {};
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    const int keyResult = mbedtls_aes_setkey_enc(&aes, key, 128);
+    const int encryptResult = keyResult == 0
+        ? mbedtls_aes_crypt_cbc(
+            &aes, MBEDTLS_AES_ENCRYPT, paddedLength, workingIv, padded, ciphertext)
+        : keyResult;
+    mbedtls_aes_free(&aes);
+    if (encryptResult != 0) {
+        return false;
+    }
+
+    unsigned char encodedData[96] = {};
+    unsigned char encodedIv[32] = {};
+    size_t encodedDataLength = 0;
+    size_t encodedIvLength = 0;
+    if (mbedtls_base64_encode(
+            encodedData, sizeof(encodedData) - 1, &encodedDataLength,
+            ciphertext, paddedLength) != 0 ||
+        mbedtls_base64_encode(
+            encodedIv, sizeof(encodedIv) - 1, &encodedIvLength,
+            iv, sizeof(iv)) != 0) {
+        return false;
+    }
+    encodedData[encodedDataLength] = '\0';
+    encodedIv[encodedIvLength] = '\0';
+
+    char sequence[20];
+    const uint32_t now = millis();
+    snprintf(sequence, sizeof(sequence), "%010lu%03lu",
+        static_cast<unsigned long>(now / 1000),
+        static_cast<unsigned long>(now % 1000));
+    JsonDocument payload;
+    payload["sequence"] = sequence;
+    payload["deviceid"] = action.computerId;
+    payload["selfApikey"] = "123";
+    payload["encrypt"] = true;
+    payload["iv"] = reinterpret_cast<const char*>(encodedIv);
+    payload["data"] = reinterpret_cast<const char*>(encodedData);
+    body = "";
+    serializeJson(payload, body);
+    return body.length() < kRemoteRequestBodyBytes;
+}
+
+void formatDeviceLogTimestamp(char* output, size_t outputSize) {
+    m5::rtc_datetime_t dateTime;
+    if (M5.Rtc.getDateTime(&dateTime) && dateTime.date.year >= 2020) {
+        snprintf(
+            output,
+            outputSize,
+            "%04d-%02d-%02dT%02d:%02d:%02d",
+            dateTime.date.year,
+            dateTime.date.month,
+            dateTime.date.date,
+            dateTime.time.hours,
+            dateTime.time.minutes,
+            dateTime.time.seconds);
+        return;
+    }
+    const uint32_t now = millis();
+    snprintf(output, outputSize, "uptime+%lu.%03lu", now / 1000, now % 1000);
+}
+
+void logDeviceError(const char* format, ...) {
+    char message[kDeviceErrorMessageBytes];
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+    char timestamp[32];
+    formatDeviceLogTimestamp(timestamp, sizeof(timestamp));
+    Serial.printf("%s [ERROR] %s\n", timestamp, message);
+
+    if (deviceErrorCount == kDeviceErrorCapacity) {
+        memmove(deviceErrors, deviceErrors + 1,
+            sizeof(DeviceErrorEntry) * (kDeviceErrorCapacity - 1));
+        --deviceErrorCount;
+    }
+    DeviceErrorEntry& entry = deviceErrors[deviceErrorCount++];
+    entry = DeviceErrorEntry{};
+    entry.id = nextDeviceErrorId++;
+    if (nextDeviceErrorId == 0) {
+        nextDeviceErrorId = 1;
+    }
+    strlcpy(entry.timestamp, timestamp, sizeof(entry.timestamp));
+    strlcpy(entry.message, message, sizeof(entry.message));
+    entry.pendingTargets = remoteProfile != nullptr && remoteProfile->computerCount > 0
+        ? static_cast<uint8_t>((1U << remoteProfile->computerCount) - 1U)
+        : 0xFF;
+}
+
+void removeDeviceError(uint8_t index) {
+    if (index >= deviceErrorCount) {
+        return;
+    }
+    if (index + 1 < deviceErrorCount) {
+        memmove(deviceErrors + index, deviceErrors + index + 1,
+            sizeof(DeviceErrorEntry) * (deviceErrorCount - index - 1));
+    }
+    --deviceErrorCount;
+}
+
+bool enqueueRemoteRequest(RemoteNetworkRequest& request) {
+    if (!remoteNetworkWorkersReady) {
+        return false;
+    }
+    const auto lane = remote_network::laneFor(
+        request.actionType, request.textRequest || request.deviceLogRequest);
+    RemoteNetworkWorker& worker = remoteNetworkWorkers[static_cast<size_t>(lane)];
+    request.enqueuedAt = millis();
+    xSemaphoreTake(remoteNetworkMutex, portMAX_DELAY);
+    const bool queued = worker.requests->enqueue(request);
+    xSemaphoreGive(remoteNetworkMutex);
+    if (queued) {
+        xTaskNotifyGive(worker.task);
+    }
+    return queued;
+}
+
+void queueDeviceErrorUpload() {
+    const uint32_t now = millis();
+    if (deviceErrorUploadPending) {
+        if (now - deviceErrorUploadStartedAt > 60000) {
+            deviceErrorUploadPending = false;
+            nextDeviceErrorUploadAt = now + kDeviceErrorRetryMs;
+        }
+        return;
+    }
+    if (deviceErrorCount == 0 || remoteProfile == nullptr ||
+        remoteProfile->computerCount == 0 || WiFi.status() != WL_CONNECTED ||
+        !remoteNetworkWorkersReady ||
+        static_cast<int32_t>(now - nextDeviceErrorUploadAt) < 0) {
+        return;
+    }
+    const uint8_t validTargets = static_cast<uint8_t>(
+        (1U << remoteProfile->computerCount) - 1U);
+    for (uint8_t errorIndex = 0; errorIndex < deviceErrorCount; ++errorIndex) {
+        DeviceErrorEntry& entry = deviceErrors[errorIndex];
+        entry.pendingTargets &= validTargets;
+        if (entry.pendingTargets == 0) {
+            removeDeviceError(errorIndex--);
             continue;
         }
+        for (uint8_t computerIndex = 0;
+             computerIndex < remoteProfile->computerCount;
+             ++computerIndex) {
+            if ((entry.pendingTargets & (1U << computerIndex)) == 0) {
+                continue;
+            }
+            RemoteComputer& computer = remoteProfile->computers[computerIndex];
+            if (computer.host[0] == '\0' || computer.token[0] == '\0') {
+                entry.pendingTargets &= static_cast<uint8_t>(~(1U << computerIndex));
+                continue;
+            }
+            JsonDocument document;
+            char deviceName[24];
+            snprintf(deviceName, sizeof(deviceName), "papergif-%04x",
+                static_cast<uint16_t>(ESP.getEfuseMac()));
+            document["deviceName"] = deviceName;
+            JsonObject item = document["entries"].to<JsonArray>().add<JsonObject>();
+            item["timestamp"] = entry.timestamp;
+            item["severity"] = "error";
+            item["message"] = entry.message;
+            String body;
+            serializeJson(document, body);
+
+            RemoteNetworkRequest request;
+            snprintf(request.url, sizeof(request.url), "http://%s:%u/device-log",
+                computer.host, computer.port);
+            strlcpy(request.body, body.c_str(), sizeof(request.body));
+            strlcpy(request.token, computer.token, sizeof(request.token));
+            strlcpy(request.actionType, "deviceLog", sizeof(request.actionType));
+            request.deviceLogRequest = true;
+            request.logComputerIndex = computerIndex;
+            request.logEntryId = entry.id;
+            request.profileRevision = remoteProfileRevision;
+            if (!enqueueRemoteRequest(request)) {
+                nextDeviceErrorUploadAt = now + 1000;
+                return;
+            }
+            deviceErrorUploadPending = true;
+            deviceErrorUploadStartedAt = now;
+            return;
+        }
+    }
+}
+
+void remoteNetworkTask(void* context) {
+    auto& worker = *static_cast<RemoteNetworkWorker*>(context);
+    RemoteNetworkRequest request;
+    while (true) {
+        xSemaphoreTake(remoteNetworkMutex, portMAX_DELAY);
+        const bool received = worker.requests->take(request);
+        xSemaphoreGive(remoteNetworkMutex);
+        if (!received) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+        const uint32_t startedAt = millis();
         String responseBody;
-        const uint32_t responseTimeoutMs = request.textRequest
-            ? 15000
-            : strncmp(request.actionType, "netHome", 7) == 0 ? 35000 : 5000;
-        const bool sent = postJsonResponse(
+        const uint32_t responseTimeoutMs = remote_network::responseTimeoutMs(
+            worker.lane, request.textRequest);
+        const bool sent = sendHttpResponse(
             request.url,
+            request.method,
             request.body,
             responseBody,
             request.token[0] == '\0' ? nullptr : request.token,
             responseTimeoutMs);
+        Serial.printf("Remote network lane=%u queue=%lu ms request=%lu ms -> %s\n",
+            static_cast<unsigned>(worker.lane),
+            static_cast<unsigned long>(startedAt - request.enqueuedAt),
+            static_cast<unsigned long>(millis() - startedAt), sent ? "ok" : "failed");
         if (request.textRequest) {
             memset(remoteTextWorkerResult, 0, sizeof(*remoteTextWorkerResult));
+            strlcpy(
+                remoteTextWorkerResult->url,
+                request.url,
+                sizeof(remoteTextWorkerResult->url));
+            strlcpy(remoteTextWorkerResult->token, request.token, sizeof(remoteTextWorkerResult->token));
             strlcpy(
                 remoteTextWorkerResult->pageId,
                 request.pageId,
@@ -5480,13 +6181,14 @@ void remoteNetworkTask(void*) {
             remoteTextWorkerResult->profileRevision = request.profileRevision;
             remoteTextWorkerResult->sent = sent;
             xQueueOverwrite(remoteTextNetworkResultQueue, remoteTextWorkerResult);
-            if (request.sequence > remoteNetworkCompletedSequence) {
-                remoteNetworkCompletedSequence = request.sequence;
-            }
-            vTaskDelay(pdMS_TO_TICKS(10));
+            xSemaphoreTake(remoteNetworkMutex, portMAX_DELAY);
+            worker.requests->finish();
+            xSemaphoreGive(remoteNetworkMutex);
+            vTaskDelay(1);
             continue;
         }
         RemoteNetworkResult result;
+        strlcpy(result.url, request.url, sizeof(result.url));
         strlcpy(result.actionType, request.actionType, sizeof(result.actionType));
         strlcpy(result.controlId, request.controlId, sizeof(result.controlId));
         result.profileRevision = request.profileRevision;
@@ -5495,6 +6197,9 @@ void remoteNetworkTask(void*) {
         result.toggle = request.toggle;
         result.toggleOnBefore = request.toggleOnBefore;
         result.playPause = request.playPause;
+        result.deviceLogRequest = request.deviceLogRequest;
+        result.logComputerIndex = request.logComputerIndex;
+        result.logEntryId = request.logEntryId;
         result.sent = sent;
         if (result.sent && !responseBody.isEmpty()) {
             JsonDocument response;
@@ -5502,56 +6207,57 @@ void remoteNetworkTask(void*) {
                 result.changed = response["changed"].as<bool>();
             }
         }
-        if (xQueueSend(remoteNetworkResultQueue, &result, 0) != pdPASS) {
-            RemoteNetworkResult discarded;
-            xQueueReceive(remoteNetworkResultQueue, &discarded, 0);
-            xQueueSend(remoteNetworkResultQueue, &result, 0);
-        }
-        if (request.sequence > remoteNetworkCompletedSequence) {
-            remoteNetworkCompletedSequence = request.sequence;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        // Backpressure instead of silently losing another worker's completion.
+        xQueueSend(remoteNetworkResultQueue, &result, portMAX_DELAY);
+        xSemaphoreTake(remoteNetworkMutex, portMAX_DELAY);
+        worker.requests->finish();
+        xSemaphoreGive(remoteNetworkMutex);
+        vTaskDelay(1);
     }
 }
 
 void startRemoteNetworkWorker() {
-    if (remoteNetworkTaskHandle != nullptr) {
+    if (remoteNetworkWorkersReady) {
         return;
     }
-    remoteNetworkRequestQueue = xQueueCreate(
-        kRemoteNetworkQueueCapacity,
-        sizeof(RemoteNetworkRequest));
-    remoteSliderNetworkRequestQueue = xQueueCreate(1, sizeof(RemoteNetworkRequest));
+    remoteNetworkMutex = xSemaphoreCreateMutex();
     remoteNetworkResultQueue = xQueueCreate(
         kRemoteNetworkQueueCapacity,
         sizeof(RemoteNetworkResult));
     remoteTextNetworkResultQueue = xQueueCreate(1, sizeof(RemoteTextNetworkResult));
-    remoteNetworkQueueSet = xQueueCreateSet(kRemoteNetworkQueueCapacity + 1);
     remoteTextWorkerResult = static_cast<RemoteTextNetworkResult*>(heap_caps_calloc(
         1, sizeof(RemoteTextNetworkResult), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     remoteTextUiResult = static_cast<RemoteTextNetworkResult*>(heap_caps_calloc(
         1, sizeof(RemoteTextNetworkResult), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (remoteNetworkRequestQueue == nullptr || remoteSliderNetworkRequestQueue == nullptr ||
-        remoteNetworkResultQueue == nullptr || remoteTextNetworkResultQueue == nullptr ||
-        remoteNetworkQueueSet == nullptr || remoteTextWorkerResult == nullptr ||
-        remoteTextUiResult == nullptr ||
-        xQueueAddToSet(remoteNetworkRequestQueue, remoteNetworkQueueSet) != pdPASS ||
-        xQueueAddToSet(remoteSliderNetworkRequestQueue, remoteNetworkQueueSet) != pdPASS ||
-        xTaskCreatePinnedToCore(
-            remoteNetworkTask,
-            "remote-network",
-            6144,
-            nullptr,
-            tskIDLE_PRIORITY + 1,
-            &remoteNetworkTaskHandle,
-            0) != pdPASS) {
-        if (remoteNetworkRequestQueue != nullptr) {
-            vQueueDelete(remoteNetworkRequestQueue);
-            remoteNetworkRequestQueue = nullptr;
+    bool ready = remoteNetworkMutex != nullptr && remoteNetworkResultQueue != nullptr &&
+        remoteTextNetworkResultQueue != nullptr && remoteTextWorkerResult != nullptr &&
+        remoteTextUiResult != nullptr;
+    const char* names[] = {"remote-controls", "remote-climate", "remote-background"};
+    for (size_t index = 0; ready && index < static_cast<size_t>(remote_network::Lane::count); ++index) {
+        RemoteNetworkWorker& worker = remoteNetworkWorkers[index];
+        worker.lane = static_cast<remote_network::Lane>(index);
+        void* storage = heap_caps_malloc(
+            sizeof(RemoteRequestQueue), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (storage == nullptr) {
+            ready = false;
+            break;
         }
-        if (remoteSliderNetworkRequestQueue != nullptr) {
-            vQueueDelete(remoteSliderNetworkRequestQueue);
-            remoteSliderNetworkRequestQueue = nullptr;
+        worker.requests = new (storage) RemoteRequestQueue();
+        // Socket calls must not starve IDLE0 (and the task watchdog).
+        ready = xTaskCreatePinnedToCore(remoteNetworkTask, names[index], 6144,
+            &worker, tskIDLE_PRIORITY, &worker.task, 0) == pdPASS;
+    }
+    if (!ready) {
+        for (auto& worker : remoteNetworkWorkers) {
+            if (worker.task != nullptr) {
+                vTaskDelete(worker.task);
+                worker.task = nullptr;
+            }
+            if (worker.requests != nullptr) {
+                worker.requests->~RemoteRequestQueue();
+                heap_caps_free(worker.requests);
+                worker.requests = nullptr;
+            }
         }
         if (remoteNetworkResultQueue != nullptr) {
             vQueueDelete(remoteNetworkResultQueue);
@@ -5561,16 +6267,20 @@ void startRemoteNetworkWorker() {
             vQueueDelete(remoteTextNetworkResultQueue);
             remoteTextNetworkResultQueue = nullptr;
         }
-        if (remoteNetworkQueueSet != nullptr) {
-            vQueueDelete(remoteNetworkQueueSet);
-            remoteNetworkQueueSet = nullptr;
+        if (remoteNetworkMutex != nullptr) {
+            vSemaphoreDelete(remoteNetworkMutex);
+            remoteNetworkMutex = nullptr;
         }
         free(remoteTextWorkerResult);
         remoteTextWorkerResult = nullptr;
         free(remoteTextUiResult);
         remoteTextUiResult = nullptr;
-        remoteNetworkTaskHandle = nullptr;
         Serial.println("Remote network worker unavailable");
+    }
+    remoteNetworkWorkersReady = ready;
+    if (ready) {
+        Serial.printf("Remote network: 3 lanes ready, internal RAM free=%u bytes\n",
+            static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
     }
 }
 
@@ -5579,15 +6289,16 @@ bool queueRemoteNetworkRequest(
     const String& body,
     const char* token,
     const RemoteControl& control,
-    bool reportStatus) {
-    if (remoteNetworkRequestQueue == nullptr || remoteSliderNetworkRequestQueue == nullptr ||
-        url.length() >= kRemoteRequestUrlBytes ||
+    bool reportStatus,
+    const char* method = "POST") {
+    if (url.length() >= kRemoteRequestUrlBytes ||
         body.length() >= kRemoteRequestBodyBytes) {
         return false;
     }
     RemoteNetworkRequest request;
     strlcpy(request.url, url.c_str(), sizeof(request.url));
     strlcpy(request.body, body.c_str(), sizeof(request.body));
+    strlcpy(request.method, method, sizeof(request.method));
     strlcpy(request.token, token == nullptr ? "" : token, sizeof(request.token));
     strlcpy(request.actionType, control.action.type, sizeof(request.actionType));
     strlcpy(request.controlId, control.id, sizeof(request.controlId));
@@ -5596,17 +6307,8 @@ bool queueRemoteNetworkRequest(
     request.toggle = control.toggle;
     request.toggleOnBefore = control.toggleOn;
     request.playPause = isMacPlayPauseControl(control);
-    request.sequence = ++remoteNetworkSequence;
     request.profileRevision = remoteProfileRevision;
-    const uint32_t previousAcceptedSequence = remoteNetworkLatestAcceptedSequence;
-    remoteNetworkLatestAcceptedSequence = request.sequence;
-    const bool queued = control.slider
-        ? xQueueOverwrite(remoteSliderNetworkRequestQueue, &request) == pdPASS
-        : xQueueSend(remoteNetworkRequestQueue, &request, 0) == pdPASS;
-    if (!queued && remoteNetworkLatestAcceptedSequence == request.sequence) {
-        remoteNetworkLatestAcceptedSequence = previousAcceptedSequence;
-    }
-    return queued;
+    return enqueueRemoteRequest(request);
 }
 
 bool queueRemoteTextNetworkRequest(
@@ -5614,7 +6316,7 @@ bool queueRemoteTextNetworkRequest(
     const String& body,
     const char* token,
     const char* pageId) {
-    if (remoteTextRequestPending || remoteNetworkRequestQueue == nullptr ||
+    if (remoteTextRequestPending ||
         url.length() >= kRemoteRequestUrlBytes ||
         body.length() >= kRemoteRequestBodyBytes) {
         return false;
@@ -5625,12 +6327,8 @@ bool queueRemoteTextNetworkRequest(
     strlcpy(request.token, token == nullptr ? "" : token, sizeof(request.token));
     strlcpy(request.pageId, pageId, sizeof(request.pageId));
     request.textRequest = true;
-    request.sequence = ++remoteNetworkSequence;
     request.profileRevision = remoteProfileRevision;
-    const uint32_t previousAcceptedSequence = remoteNetworkLatestAcceptedSequence;
-    remoteNetworkLatestAcceptedSequence = request.sequence;
-    if (xQueueSend(remoteNetworkRequestQueue, &request, 0) != pdPASS) {
-        remoteNetworkLatestAcceptedSequence = previousAcceptedSequence;
+    if (!enqueueRemoteRequest(request)) {
         return false;
     }
     remoteTextRequestPending = true;
@@ -5643,10 +6341,33 @@ void pollRemoteNetworkResults() {
     }
     RemoteNetworkResult result;
     while (xQueueReceive(remoteNetworkResultQueue, &result, 0) == pdTRUE) {
+        if (result.deviceLogRequest) {
+            deviceErrorUploadPending = false;
+            nextDeviceErrorUploadAt = millis() + (result.sent ? 250 : kDeviceErrorRetryMs);
+            if (result.sent) {
+                for (uint8_t index = 0; index < deviceErrorCount; ++index) {
+                    if (deviceErrors[index].id != result.logEntryId) {
+                        continue;
+                    }
+                    deviceErrors[index].pendingTargets &=
+                        static_cast<uint8_t>(~(1U << result.logComputerIndex));
+                    if (deviceErrors[index].pendingTargets == 0) {
+                        removeDeviceError(index);
+                    }
+                    break;
+                }
+            }
+            Serial.printf("Device error log upload -> %s\n",
+                result.sent ? "ok" : "retrying");
+            continue;
+        }
         Serial.printf("Remote action %s -> %s\n",
             result.actionType, result.sent ? "ok" : "failed");
         if (result.profileRevision != remoteProfileRevision) {
             continue;
+        }
+        if (!result.sent) {
+            logDeviceError("Remote action %s failed: %s", result.actionType, result.url);
         }
         RemoteControl* matchedControl = nullptr;
         uint8_t matchedPageIndex = 0;
@@ -5679,7 +6400,11 @@ void pollRemoteNetworkResults() {
             displayRemoteActionStatus(result.sent
                 ? (result.changed ? "Sent" : "Already set")
                 : (strncmp(result.actionType, "wled", 4) == 0
-                    ? "WLED unavailable" : "Computer unavailable"));
+                    ? "WLED unavailable"
+                    : (strcmp(result.actionType, "eWeLinkPower") == 0
+                        ? "eWeLink unavailable"
+                    : (strcmp(result.actionType, "localHTTP") == 0
+                        ? "Device unavailable" : "Computer unavailable"))));
         }
     }
     if (remoteTextNetworkResultQueue != nullptr && remoteTextUiResult != nullptr) {
@@ -5690,39 +6415,35 @@ void pollRemoteNetworkResults() {
 }
 
 bool hasPendingRemoteNetworkWork() {
-    return remoteNetworkLatestAcceptedSequence != remoteNetworkCompletedSequence ||
-        (remoteNetworkRequestQueue != nullptr &&
-            uxQueueMessagesWaiting(remoteNetworkRequestQueue) > 0) ||
-        (remoteSliderNetworkRequestQueue != nullptr &&
-            uxQueueMessagesWaiting(remoteSliderNetworkRequestQueue) > 0) ||
-        (remoteNetworkResultQueue != nullptr &&
+    bool pending = false;
+    if (remoteNetworkWorkersReady) {
+        xSemaphoreTake(remoteNetworkMutex, portMAX_DELAY);
+        for (const auto& worker : remoteNetworkWorkers) {
+            pending = pending || worker.requests->hasWork();
+        }
+        xSemaphoreGive(remoteNetworkMutex);
+    }
+    return pending || (remoteNetworkResultQueue != nullptr &&
             uxQueueMessagesWaiting(remoteNetworkResultQueue) > 0) ||
         (remoteTextNetworkResultQueue != nullptr &&
             uxQueueMessagesWaiting(remoteTextNetworkResultQueue) > 0) ||
         remoteTextRequestPending;
 }
 
-RemoteComputer* textBoxComputer(RemoteControl& control) {
-    const char* identifier = control.textComputerId[0] != '\0'
-        ? control.textComputerId : control.action.computerId;
-    if (identifier[0] != '\0') {
-        for (uint8_t index = 0; index < remoteProfile->computerCount; ++index) {
-            if (strcmp(remoteProfile->computers[index].id, identifier) == 0) {
-                return &remoteProfile->computers[index];
-            }
-        }
-    }
-    if (remoteProfile->computerCount > 0) {
-        return &remoteProfile->computers[0];
-    }
-    if (remoteProfile->macHost[0] == '\0' || remoteProfile->macToken[0] == '\0') {
-        return nullptr;
-    }
+RemoteComputer* resolveRemoteComputer(const char* identifier) {
+    if (remoteProfile == nullptr) return nullptr;
+    const int index = remote_computer::indexFor(*remoteProfile, identifier);
+    if (index >= 0) return &remoteProfile->computers[index];
+    if (index != remote_computer::legacy) return nullptr;
     static RemoteComputer legacyComputer;
     strlcpy(legacyComputer.host, remoteProfile->macHost, sizeof(legacyComputer.host));
     legacyComputer.port = remoteProfile->macPort;
     strlcpy(legacyComputer.token, remoteProfile->macToken, sizeof(legacyComputer.token));
     return &legacyComputer;
+}
+
+RemoteComputer* textBoxComputer(RemoteControl& control) {
+    return resolveRemoteComputer(remote_computer::stateComputerId(control));
 }
 
 void appendPaddedNumber(String& output, uint16_t value, uint8_t width, char padding = '0') {
@@ -5866,8 +6587,14 @@ bool isMacTextSource(const RemoteControl& control) {
 }
 
 bool isMediaSeekControl(const RemoteControl& control) {
-    return control.slider && strcmp(control.action.type, "macMedia") == 0 &&
+    return control.slider &&
+        (strcmp(control.action.type, "macMedia") == 0 ||
+         strcmp(control.action.type, "iPhoneMedia") == 0) &&
         strcmp(control.action.text, "seek") == 0;
+}
+
+bool isMacMediaSeekControl(const RemoteControl& control) {
+    return isMediaSeekControl(control) && strcmp(control.action.type, "macMedia") == 0;
 }
 
 bool updateMediaTimelineFromResponse(JsonObject response, uint32_t now) {
@@ -5899,7 +6626,13 @@ uint32_t textBoxRefreshIntervalMs(const RemoteControl& control) {
 }
 
 bool isMacVolumeControl(const RemoteControl& control) {
-    return control.slider && strcmp(control.action.type, "macMedia") == 0 &&
+    return isMediaVolumeControl(control) && strcmp(control.action.type, "macMedia") == 0;
+}
+
+bool isMediaVolumeControl(const RemoteControl& control) {
+    return control.slider &&
+        (strcmp(control.action.type, "macMedia") == 0 ||
+         strcmp(control.action.type, "iPhoneMedia") == 0) &&
         strcmp(control.action.text, "volume") == 0;
 }
 
@@ -5908,7 +6641,7 @@ int quantizedMacVolumeValue(int value) {
     return (percentage * 255 + 50) / 100;
 }
 
-bool shouldSuppressRecentSliderAcknowledgement(
+bool isRecentSliderReleaseAcknowledgement(
     const char* controlId,
     int value,
     uint32_t now) {
@@ -5919,7 +6652,13 @@ bool shouldSuppressRecentSliderAcknowledgement(
 }
 
 bool isMacPlayPauseControl(const RemoteControl& control) {
-    return control.kind == 0 && strcmp(control.action.type, "macMedia") == 0 &&
+    return isMediaPlayPauseControl(control) && strcmp(control.action.type, "macMedia") == 0;
+}
+
+bool isMediaPlayPauseControl(const RemoteControl& control) {
+    return control.kind == 0 &&
+        (strcmp(control.action.type, "macMedia") == 0 ||
+         strcmp(control.action.type, "iPhoneMedia") == 0) &&
         strcmp(control.action.text, "playPause") == 0;
 }
 
@@ -5941,42 +6680,164 @@ void scheduleMediaTimelineResync() {
         RemotePage& page = remoteProfile->pages[pageIndex];
         for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
             RemoteControl& control = page.controls[controlIndex];
-            if (isMacPlayPauseControl(control) || isMediaSeekControl(control)) {
+            if (isMacPlayPauseControl(control) || isMacMediaSeekControl(control)) {
                 control.nextRefreshAt = refreshAt;
             }
         }
     }
 }
 
-void advanceMediaTimeline(uint32_t now) {
-    if (!mediaTimelineState.available || !mediaTimelineState.playing ||
-        mediaTimelineState.stale || now - mediaTimelineState.sampledAt < 1000) {
+void advanceMediaTimelineForType(
+    MediaTimelineState& timeline,
+    const char* actionType,
+    uint32_t now) {
+    if (!timeline.available || !timeline.playing ||
+        timeline.stale || now - timeline.sampledAt < 1000) {
         return;
     }
-    mediaTimelineState.elapsedMilliseconds = min<uint32_t>(
-        mediaTimelineState.durationMilliseconds,
-        mediaTimelineState.elapsedMilliseconds + (now - mediaTimelineState.sampledAt));
-    mediaTimelineState.sampledAt = now;
-    const int nextValue = mediaTimelineState.durationMilliseconds == 0 ? 0
-        : static_cast<int>(mediaTimelineState.elapsedMilliseconds * 255ULL /
-            mediaTimelineState.durationMilliseconds);
+    timeline.elapsedMilliseconds = media_timeline::elapsedAt(timeline, now);
+    timeline.sampledAt = now;
+    const int nextValue = timeline.durationMilliseconds == 0 ? 0
+        : static_cast<int>(timeline.elapsedMilliseconds * 255ULL /
+            timeline.durationMilliseconds);
     for (uint8_t pageIndex = 0; remoteProfile != nullptr &&
         pageIndex < remoteProfile->pageCount; ++pageIndex) {
         RemotePage& page = remoteProfile->pages[pageIndex];
         for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
             RemoteControl& control = page.controls[controlIndex];
-            if (!isMediaSeekControl(control) || control.action.value == nextValue) {
+            if (!isMediaSeekControl(control) ||
+                strcmp(control.action.type, actionType) != 0 ||
+                control.action.value == nextValue) {
                 continue;
             }
-            control.action.value = nextValue;
             const bool activelyDragging = remoteVisible && pageIndex == remotePageIndex &&
                 activeRemoteTouchPage == pageIndex &&
                 activeRemoteControlIndex == static_cast<int8_t>(controlIndex);
-            if (remoteVisible && pageIndex == remotePageIndex && !activelyDragging) {
+            if (activelyDragging) {
+                continue;
+            }
+            control.action.value = nextValue;
+            if (remoteVisible && pageIndex == remotePageIndex) {
                 displayRemoteSliderValue(page, controlIndex);
             }
         }
     }
+}
+
+void advanceMediaTimeline(uint32_t now) {
+    advanceMediaTimelineForType(mediaTimelineState, "macMedia", now);
+    advanceMediaTimelineForType(iPhoneMediaTimelineState, "iPhoneMedia", now);
+}
+
+bool isIPhoneNowPlayingTextBox(const RemotePage& page, const RemoteControl& control) {
+    if (control.kind != 2 || strcmp(control.textSource, "nowPlaying") != 0) {
+        return false;
+    }
+    if (control.referencedControlId[0] != '\0') {
+        for (uint8_t pageIndex = 0; remoteProfile != nullptr &&
+            pageIndex < remoteProfile->pageCount; ++pageIndex) {
+            const RemotePage& candidatePage = remoteProfile->pages[pageIndex];
+            for (uint8_t index = 0; index < candidatePage.controlCount; ++index) {
+                const RemoteControl& candidate = candidatePage.controls[index];
+                if (strcmp(candidate.id, control.referencedControlId) == 0) {
+                    return strcmp(candidate.action.type, "iPhoneMedia") == 0;
+                }
+            }
+        }
+        return false;
+    }
+    bool hasIPhoneMedia = false;
+    bool hasMacMedia = false;
+    for (uint8_t index = 0; index < page.controlCount; ++index) {
+        hasIPhoneMedia = hasIPhoneMedia ||
+            strcmp(page.controls[index].action.type, "iPhoneMedia") == 0;
+        hasMacMedia = hasMacMedia || strcmp(page.controls[index].action.type, "macMedia") == 0;
+    }
+    return hasIPhoneMedia && !hasMacMedia;
+}
+
+void processLocalMediaStateUpdate() {
+    LocalMediaStateUpdate update;
+    if (localMediaStateQueue == nullptr ||
+        xQueueReceive(localMediaStateQueue, &update, 0) != pdTRUE) {
+        return;
+    }
+    localMediaState = update;
+    const uint32_t now = millis();
+    const bool timelineAvailable = update.available && update.durationMilliseconds > 0;
+    iPhoneMediaTimelineState.available = timelineAvailable;
+    iPhoneMediaTimelineState.playing = update.playing;
+    iPhoneMediaTimelineState.stale = !timelineAvailable;
+    iPhoneMediaTimelineState.durationMilliseconds = update.durationMilliseconds;
+    iPhoneMediaTimelineState.elapsedMilliseconds = timelineAvailable
+        ? min(update.elapsedMilliseconds, update.durationMilliseconds) : 0;
+    iPhoneMediaTimelineState.sampledAt = now;
+
+    for (uint8_t pageIndex = 0; remoteProfile != nullptr &&
+        pageIndex < remoteProfile->pageCount; ++pageIndex) {
+        RemotePage& page = remoteProfile->pages[pageIndex];
+        for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+            RemoteControl& control = page.controls[controlIndex];
+            const bool visible = remoteVisible && pageIndex == remotePageIndex;
+            if (strcmp(control.action.type, "iPhoneMedia") == 0) {
+                if (isMediaPlayPauseControl(control)) {
+                    const bool changed = control.hasResolvedValue != update.available ||
+                        control.toggleOn != update.playing;
+                    control.hasResolvedValue = update.available;
+                    control.toggleOn = update.playing;
+                    if (changed && visible) {
+                        displayRemoteSliderValue(page, controlIndex, false);
+                    }
+                } else if (isMediaVolumeControl(control)) {
+                    const bool activelyDragging = visible && activeRemoteTouchPage == pageIndex &&
+                        activeRemoteControlIndex == static_cast<int8_t>(controlIndex);
+                    if (!activelyDragging && control.action.value != update.volume) {
+                        control.action.value = update.volume;
+                        if (visible) {
+                            displayRemoteSliderValue(page, controlIndex, false);
+                        }
+                    }
+                } else if (isMediaSeekControl(control)) {
+                    const bool activelyDragging = visible && activeRemoteTouchPage == pageIndex &&
+                        activeRemoteControlIndex == static_cast<int8_t>(controlIndex);
+                    const char* title = update.available && update.title[0] != '\0'
+                        ? update.title : control.title;
+                    bool changed = control.hasResolvedValue != update.available ||
+                        strcmp(control.resolvedText, title) != 0;
+                    control.hasResolvedValue = update.available;
+                    strlcpy(control.resolvedText, title, sizeof(control.resolvedText));
+                    if (timelineAvailable && !activelyDragging) {
+                        const int nextValue = static_cast<int>(
+                            iPhoneMediaTimelineState.elapsedMilliseconds * 255ULL /
+                            iPhoneMediaTimelineState.durationMilliseconds);
+                        changed = changed || control.action.value != nextValue;
+                        control.action.value = nextValue;
+                    }
+                    if (changed && visible && !activelyDragging) {
+                        displayRemoteSliderValue(page, controlIndex, false);
+                    }
+                }
+                continue;
+            }
+            if (isIPhoneNowPlayingTextBox(page, control)) {
+                const char* text = update.available && update.title[0] != '\0'
+                    ? update.title : control.placeholder;
+                const bool changed = control.hasResolvedValue != update.available ||
+                    strcmp(control.resolvedText, text) != 0;
+                control.hasResolvedValue = update.available;
+                strlcpy(control.resolvedText, text, sizeof(control.resolvedText));
+                control.nextRefreshAt = 0;
+                if (changed && visible) {
+                    redrawRemoteTextBox(page, controlIndex);
+                }
+            }
+        }
+    }
+    Serial.printf("iPhone media synced: %s, %lu/%lu ms, %s\n",
+        update.title[0] != '\0' ? update.title : "unavailable",
+        static_cast<unsigned long>(iPhoneMediaTimelineState.elapsedMilliseconds),
+        static_cast<unsigned long>(iPhoneMediaTimelineState.durationMilliseconds),
+        update.playing ? "playing" : "paused");
 }
 
 void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now) {
@@ -5986,7 +6847,10 @@ void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now)
         RemoteControl& control = page.controls[index];
         const bool volumeControl = isMacVolumeControl(control);
         const bool playbackControl = isMacPlayPauseControl(control);
-        const bool mediaSeekControl = isMediaSeekControl(control);
+        const bool mediaSeekControl = isMacMediaSeekControl(control);
+        if (isIPhoneNowPlayingTextBox(page, control)) {
+            continue;
+        }
         if ((!volumeControl && !playbackControl && !mediaSeekControl &&
             (control.kind != 2 || !isMacTextSource(control))) ||
             control.nextRefreshAt == 0 || static_cast<int32_t>(now - control.nextRefreshAt) < 0 ||
@@ -6024,10 +6888,6 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
     if (result.profileRevision != remoteProfileRevision) {
         return;
     }
-    if (!result.sent) {
-        Serial.println("Text refresh failed: companion request rejected or timed out");
-        return;
-    }
     if (remoteProfile == nullptr) {
         return;
     }
@@ -6042,9 +6902,24 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
         return;
     }
     RemotePage& page = *matchingPage;
+    if (!result.sent) {
+        const uint32_t retryAt = millis() + 2000;
+        for (uint8_t index = 0; index < page.controlCount; ++index) {
+            RemoteControl& control = page.controls[index];
+            if (remote_computer::acceptsResponse(textBoxComputer(control), result.url, result.token) &&
+                control.nextRefreshAt != 0 &&
+                (isMacVolumeControl(control) || isMacPlayPauseControl(control) ||
+                 isMacMediaSeekControl(control) ||
+                 (control.kind == 2 && isMacTextSource(control)))) {
+                control.nextRefreshAt = retryAt;
+            }
+        }
+        logDeviceError("Text refresh failed: %s; retrying in 2 seconds", result.url);
+        return;
+    }
     JsonDocument document;
     if (deserializeJson(document, result.responseBody)) {
-        Serial.println("Text refresh failed: invalid companion response");
+        logDeviceError("Invalid text response from %s", result.url);
         return;
     }
     const uint32_t now = millis();
@@ -6052,11 +6927,14 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
     bool batchChanged = false;
     bool coordinateRedraws[kMaximumRemoteControls] = {};
     bool hasCoordinateRedraw = false;
+    const char* responseUrl = result.url;
+    const char* responseToken = result.token;
     for (JsonObject result : document["items"].as<JsonArray>()) {
         const char* identifier = result["id"] | "";
         for (uint8_t index = 0; index < page.controlCount; ++index) {
             RemoteControl& control = page.controls[index];
-            if (strcmp(control.id, identifier) != 0) {
+            if (strcmp(control.id, identifier) != 0 ||
+                !remote_computer::acceptsResponse(textBoxComputer(control), responseUrl, responseToken)) {
                 continue;
             }
             const bool available = result["available"] | false;
@@ -6069,18 +6947,21 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
                     }
                     const int value = constrain(result["value"].as<int>(), 0, 255);
                     const bool changed = control.action.value != value;
-                    const bool suppressRedraw = shouldSuppressRecentSliderAcknowledgement(
+                    const bool releaseAcknowledged = isRecentSliderReleaseAcknowledgement(
                         control.id, value, now);
                     control.action.value = value;
+                    if (releaseAcknowledged) {
+                        recentSliderReleaseControlId[0] = '\0';
+                    }
                     Serial.printf("Output volume %s: %d%s\n", control.id, value,
                         changed ? ", changed" : ", unchanged");
-                    if (changed) {
+                    if (changed || releaseAcknowledged) {
                         batchChanged = true;
-                        if (!useQualityRefresh && !suppressRedraw) {
-                            displayRemoteSliderValue(page, index, true);
+                        if (!useQualityRefresh) {
+                            displayRemoteSliderValue(page, index);
                         }
                         refreshReferencedTextBoxes(
-                            page, control.id, !useQualityRefresh && !suppressRedraw);
+                            page, control.id, !useQualityRefresh);
                     }
                 }
                 break;
@@ -6111,13 +6992,13 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
                 if (changed) {
                     batchChanged = true;
                     if (!useQualityRefresh) {
-                        displayRemoteSliderValue(page, index, true);
+                        displayRemoteSliderValue(page, index);
                     }
                     refreshReferencedTextBoxes(page, control.id, !useQualityRefresh);
                 }
                 break;
             }
-            if (isMediaSeekControl(control)) {
+            if (isMacMediaSeekControl(control)) {
                 const bool timelineAvailable = updateMediaTimelineFromResponse(result, now);
                 control.nextRefreshAt = timelineAvailable ? 0 : now + 60000;
                 if (!available && control.hasResolvedValue) {
@@ -6204,11 +7085,15 @@ void prepareRemoteTextBoxes() {
     for (uint8_t index = 0; index < page.controlCount; ++index) {
         RemoteControl& control = page.controls[index];
         if (isMacVolumeControl(control) || isMacPlayPauseControl(control) ||
-            isMediaSeekControl(control)) {
+            isMacMediaSeekControl(control)) {
             control.nextRefreshAt = millis();
             continue;
         }
         if (control.kind != 2) {
+            continue;
+        }
+        if (isIPhoneNowPlayingTextBox(page, control)) {
+            control.nextRefreshAt = 0;
             continue;
         }
         resolveLocalTextBox(control);
@@ -6232,7 +7117,10 @@ void pollRemoteTextBoxes() {
         RemoteControl& control = page.controls[index];
         const bool volumeControl = isMacVolumeControl(control);
         const bool playbackControl = isMacPlayPauseControl(control);
-        const bool mediaSeekControl = isMediaSeekControl(control);
+        const bool mediaSeekControl = isMacMediaSeekControl(control);
+        if (isIPhoneNowPlayingTextBox(page, control)) {
+            continue;
+        }
         if ((!volumeControl && !playbackControl && !mediaSeekControl && control.kind != 2) ||
             control.nextRefreshAt == 0 ||
             static_cast<int32_t>(now - control.nextRefreshAt) < 0) {
@@ -6310,7 +7198,8 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
     bool reportStatus) {
     RemoteAction& action = control.action;
     const bool showActionStatus = reportStatus && !control.slider &&
-        strcmp(action.type, "netHomeClimate") != 0;
+        strcmp(action.type, "netHomeClimate") != 0 &&
+        !isMacPlayPauseControl(control);
     if (strcmp(action.type, "netHomeAuto") == 0) {
         resetClimateAutomationController(control);
         if (reportStatus) {
@@ -6332,7 +7221,9 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
 
     JsonDocument document;
     String url;
+    String body;
     const char* token = nullptr;
+    const char* method = "POST";
     if (strncmp(action.type, "wled", 4) == 0) {
         if (action.host[0] == '\0') {
             Serial.printf("Remote action %s failed: WLED host is empty\n", action.type);
@@ -6364,33 +7255,69 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
             Serial.printf("Remote action %s failed: unsupported WLED action\n", action.type);
             return false;
         }
-    } else {
-        const char* macHost = remoteProfile->macHost;
-        uint16_t macPort = remoteProfile->macPort;
-        const char* macToken = remoteProfile->macToken;
-        if (action.computerId[0] != '\0') {
-            RemoteComputer* target = nullptr;
-            for (uint8_t index = 0; index < remoteProfile->computerCount; ++index) {
-                if (strcmp(remoteProfile->computers[index].id, action.computerId) == 0) {
-                    target = &remoteProfile->computers[index];
-                    break;
-                }
-            }
-            if (target == nullptr) {
-                Serial.printf("Remote action %s failed: computer %s not found\n",
-                    action.type, action.computerId);
-                return false;
-            }
-            macHost = target->host;
-            macPort = target->port;
-            macToken = target->token;
+    } else if (strcmp(action.type, "eWeLinkPower") == 0) {
+        String authority;
+        if (!normalizeLocalHttpAuthority(action.host, authority)) {
+            if (showActionStatus) displayRemoteActionStatus("Invalid device address");
+            return false;
         }
+        if (action.computerId[0] == '\0') {
+            if (showActionStatus) displayRemoteActionStatus("Device ID required");
+            return false;
+        }
+        if (action.httpBody[0] == '\0') {
+            if (showActionStatus) displayRemoteActionStatus("Device key required");
+            return false;
+        }
+        const bool turnOn = strcmp(action.text, "on") == 0 ||
+            (strcmp(action.text, "off") != 0 && !control.toggleOn);
+        if (!buildEWeLinkRequestBody(action, turnOn, body)) {
+            if (showActionStatus) displayRemoteActionStatus("Could not encrypt request");
+            return false;
+        }
+        url = "http://" + authority + "/zeroconf/switch";
+    } else if (strcmp(action.type, "localHTTP") == 0) {
+        String authority;
+        if (!normalizeLocalHttpAuthority(action.host, authority)) {
+            if (showActionStatus) displayRemoteActionStatus("Invalid device address");
+            return false;
+        }
+        const String path = action.text;
+        if (!local_http::isAllowedPath(path.c_str())) {
+            if (showActionStatus) displayRemoteActionStatus("Invalid request path");
+            return false;
+        }
+        if (!local_http::isAllowedMethod(action.httpMethod)) {
+            if (showActionStatus) displayRemoteActionStatus("Invalid HTTP method");
+            return false;
+        }
+        method = action.httpMethod;
+        body = strcmp(method, "POST") == 0 ? String(action.httpBody) : String();
+        url = "http://" + authority + path;
+        if (url.length() >= kRemoteRequestUrlBytes) {
+            if (showActionStatus) displayRemoteActionStatus("Request URL too long");
+            return false;
+        }
+    } else {
+        RemoteComputer* target = resolveRemoteComputer(action.computerId);
+        if (target == nullptr) {
+            Serial.printf("Remote action %s failed: computer %s not found\n",
+                action.type, action.computerId);
+            if (reportStatus) displayRemoteActionStatus("Select computer");
+            return false;
+        }
+        const char* macHost = target->host;
+        const uint16_t macPort = target->port;
+        const char* macToken = target->token;
         if (macHost[0] == '\0' || macToken[0] == '\0') {
             Serial.printf("Remote action %s failed: computer host or token is empty\n", action.type);
             return false;
         }
         url = "http://" + String(macHost) + ":" + macPort + "/action";
         token = macToken;
+        Serial.printf("Remote target control=%s command=%s computer=%s host=%s:%u\n",
+            control.id, action.type, target->id[0] != '\0' ? target->id : "legacy",
+            macHost, macPort);
         document["type"] = action.type;
         document["host"] = action.host;
         document["text"] = action.text;
@@ -6405,8 +7332,10 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
             modifiers.add(action.modifiers[index]);
         }
     }
-    String body;
-    serializeJson(document, body);
+    if (strcmp(action.type, "localHTTP") != 0 &&
+        strcmp(action.type, "eWeLinkPower") != 0) {
+        serializeJson(document, body);
+    }
     if (WiFi.status() != WL_CONNECTED) {
         if (queueIfOffline) {
             if (control.slider) {
@@ -6453,14 +7382,104 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
         }
         return false;
     }
-    const bool queued = queueRemoteNetworkRequest(url, body, token, control, reportStatus);
+    const bool queued = queueRemoteNetworkRequest(
+        url, body, token, control, showActionStatus, method);
     if (showActionStatus) {
         displayRemoteActionStatus(queued ? "Sending" : "Queue full");
     }
     return queued;
 }
 
+bool dispatchIPhoneMediaAction(const RemoteControl& control, bool reportStatus) {
+    if (!deviceConnected || controlCharacteristic == nullptr) {
+        if (reportStatus) {
+            displayRemoteActionStatus("iPhone disconnected");
+        }
+        return false;
+    }
+    uint8_t command = 0;
+    if (strcmp(control.action.text, "playPause") == 0) {
+        command = 0x01;
+    } else if (strcmp(control.action.text, "previous") == 0) {
+        command = 0x02;
+    } else if (strcmp(control.action.text, "next") == 0) {
+        command = 0x03;
+    } else if (strcmp(control.action.text, "volumeUp") == 0) {
+        command = 0x04;
+    } else if (strcmp(control.action.text, "volumeDown") == 0) {
+        command = 0x05;
+    } else if (strcmp(control.action.text, "mute") == 0) {
+        command = 0x06;
+    } else if (strcmp(control.action.text, "seek") == 0) {
+        command = 0x07;
+    } else if (strcmp(control.action.text, "volume") == 0) {
+        command = 0x08;
+    } else {
+        if (reportStatus) {
+            displayRemoteActionStatus("Unsupported command");
+        }
+        return false;
+    }
+    const uint8_t response[] = {
+        0x60,
+        command,
+        static_cast<uint8_t>(constrain(control.action.value, 0, 255)),
+    };
+    controlCharacteristic->setValue(response, sizeof(response));
+    notifyIPhoneController();
+    Serial.printf("Sent iPhone media command: %s\n", control.action.text);
+    if (reportStatus) {
+        displayRemoteActionStatus("Sent to iPhone");
+    }
+    return true;
+}
+
+bool dispatchIPhoneHomePowerAction(const RemoteControl& control, bool reportStatus) {
+    if (!deviceConnected || controlCharacteristic == nullptr ||
+        iPhoneControllerHandle == UINT16_MAX) {
+        if (reportStatus) {
+            displayRemoteActionStatus("iPhone disconnected");
+        }
+        return false;
+    }
+    if (strlen(control.action.computerId) != 36 || strlen(control.action.host) != 36) {
+        if (reportStatus) {
+            displayRemoteActionStatus("Home accessory missing");
+        }
+        return false;
+    }
+    uint8_t command = 0;
+    if (strcmp(control.action.text, "toggle") == 0) {
+        command = 0x01;
+    } else if (strcmp(control.action.text, "on") == 0) {
+        command = 0x02;
+    } else if (strcmp(control.action.text, "off") == 0) {
+        command = 0x03;
+    } else {
+        if (reportStatus) {
+            displayRemoteActionStatus("Unsupported command");
+        }
+        return false;
+    }
+    uint8_t response[74] = {0x61, command};
+    memcpy(response + 2, control.action.computerId, 36);
+    memcpy(response + 38, control.action.host, 36);
+    controlCharacteristic->setValue(response, sizeof(response));
+    notifyIPhoneController();
+    Serial.printf("Sent Apple Home power command: %s\n", control.action.text);
+    if (reportStatus) {
+        displayRemoteActionStatus("Sent to iPhone");
+    }
+    return true;
+}
+
 bool dispatchRemoteAction(RemoteControl& control, bool queueIfOffline, bool reportStatus) {
+    if (strcmp(control.action.type, "iPhoneMedia") == 0) {
+        return dispatchIPhoneMediaAction(control, reportStatus);
+    }
+    if (strcmp(control.action.type, "iPhoneHomePower") == 0) {
+        return dispatchIPhoneHomePowerAction(control, reportStatus);
+    }
     if (strcmp(control.action.type, "netHomeTemperatureStep") == 0) {
         return applyRemoteTemperatureStep(control);
     }
@@ -6470,6 +7489,81 @@ bool dispatchRemoteAction(RemoteControl& control, bool queueIfOffline, bool repo
     }
     return dispatched;
 }
+
+bool activateRemoteControl(uint8_t pageIndex, uint8_t controlIndex) {
+    if (remoteProfile == nullptr || pageIndex >= remoteProfile->pageCount) {
+        Serial.printf("Invalid remote page: %u\n", pageIndex);
+        return false;
+    }
+    RemotePage& page = remoteProfile->pages[pageIndex];
+    if (controlIndex >= page.controlCount) {
+        Serial.printf("Invalid remote control: page=%u index=%u\n", pageIndex, controlIndex);
+        return false;
+    }
+    RemoteControl& control = page.controls[controlIndex];
+    if (control.slider) {
+        Serial.println("Serial press does not support sliders");
+        return false;
+    }
+    if (control.kind == 2) {
+        if (control.tapBehavior == 1) {
+            control.nextRefreshAt = millis();
+            return true;
+        }
+        return control.tapBehavior == 2 && dispatchRemoteAction(control);
+    }
+
+    const bool succeeded = dispatchRemoteAction(control);
+    if (succeeded && control.toggle && !isMediaPlayPauseControl(control) && remoteVisible &&
+        remotePageIndex == pageIndex) {
+        control.toggleOn = !control.toggleOn;
+        displayRemoteSliderValue(page, controlIndex, true);
+        persistRemoteToggleStates(*remoteProfile);
+        refreshReferencedTextBoxes(page, control.id);
+    }
+    return succeeded;
+}
+
+#if PAPERGIF_SERIAL_COMMANDS
+void processSerialCommands() {
+    static char command[48];
+    static uint8_t commandLength = 0;
+    while (Serial.available() > 0) {
+        const int input = Serial.read();
+        if (input == '\r') {
+            continue;
+        }
+        if (input != '\n') {
+            if (commandLength < sizeof(command) - 1) {
+                command[commandLength++] = static_cast<char>(input);
+            } else {
+                commandLength = 0;
+                Serial.println("Serial command too long");
+            }
+            continue;
+        }
+
+        command[commandLength] = '\0';
+        unsigned int pageIndex = 0;
+        unsigned int controlIndex = 0;
+        char trailing = '\0';
+        if (sscanf(command, "press %u %u %c", &pageIndex, &controlIndex, &trailing) == 2 &&
+            pageIndex <= UINT8_MAX && controlIndex <= UINT8_MAX) {
+            Serial.printf("Remote control pressed: page=%u index=%u (serial)\n",
+                pageIndex, controlIndex);
+            Serial.printf("Remote control released: page=%u index=%u (serial)\n",
+                pageIndex, controlIndex);
+            activateRemoteControl(static_cast<uint8_t>(pageIndex),
+                static_cast<uint8_t>(controlIndex));
+        } else if (strcmp(command, "help") == 0) {
+            Serial.println("Serial commands: press <page> <index>");
+        } else if (commandLength > 0) {
+            Serial.println("Unknown serial command; enter help");
+        }
+        commandLength = 0;
+    }
+}
+#endif
 
 uint8_t sht30Crc(const uint8_t* data) {
     uint8_t crc = 0xFF;
@@ -6614,6 +7708,7 @@ void pollScheduledRemoteActions() {
                 const bool hasExplicitPowerState = schedule.hasText &&
                     (strcmp(schedule.text, "on") == 0 || strcmp(schedule.text, "off") == 0) &&
                     (strcmp(control.action.type, "wledPower") == 0 ||
+                     strcmp(control.action.type, "iPhoneHomePower") == 0 ||
                      strcmp(control.action.type, "netHomePower") == 0);
                 if (hasExplicitPowerState) {
                     scheduledControl.toggle = false;
@@ -7090,7 +8185,7 @@ void dispatchCapturedWakeTouch() {
             }
         } else if (control.kind == 0 || (control.kind == 2 && control.tapBehavior == 2)) {
             const bool accepted = dispatchRemoteAction(control);
-            if (accepted && control.toggle && !isMacPlayPauseControl(control) && remoteVisible &&
+            if (accepted && control.toggle && !isMediaPlayPauseControl(control) && remoteVisible &&
                 remotePageIndex == wakePageIndex) {
                 control.toggleOn = !control.toggleOn;
                 displayRemoteSliderValue(page, index, true);
@@ -7528,20 +8623,18 @@ void handleTouch() {
                     if (strcmp(control.action.type, "netHomeTemperature") == 0) {
                         control.action.valueTenths = nextValue * 10;
                     }
-                    displayRemoteSliderValue(page, hitControl);
-                    activeRemoteSliderRenderedAt = millis();
                     if (strcmp(control.action.type, "netHomeFan") == 0) {
                         if (changed) {
                             disableMatchingClimateAuto(page, control);
                             scheduleDeferredFanSpeed(control);
                             refreshReferencedTextBoxes(page, control.id);
                         }
-                    } else if (!isMediaSeekControl(control)) {
-                        dispatchRemoteAction(control);
+                    } else if (!isMediaSeekControl(control) && dispatchRemoteAction(control)) {
                         activeRemoteSliderSentAt = millis();
+                        activeRemoteSliderSentValue = control.action.value;
                     }
-                    activeRemoteSliderSentValue = isMediaSeekControl(control)
-                        ? -1 : control.action.value;
+                    displayRemoteSliderValue(page, hitControl);
+                    activeRemoteSliderRenderedAt = millis();
                 } else if (control.kind == 0) {
                     displayRemoteControlFeedback(hitControl, true);
                     if (page.openBuildsContinuous &&
@@ -7586,22 +8679,22 @@ void handleTouch() {
                             control.action.valueTenths = nextValue * 10;
                         }
                         const uint32_t now = millis();
+                        if (strcmp(control.action.type, "netHomeFan") == 0) {
+                            disableMatchingClimateAuto(page, control);
+                            scheduleDeferredFanSpeed(control);
+                            activeRemoteSliderSentValue = control.action.value;
+                        } else if (!isMediaSeekControl(control) &&
+                            now - activeRemoteSliderSentAt >= 180 &&
+                            dispatchRemoteAction(control)) {
+                            activeRemoteSliderSentAt = millis();
+                            activeRemoteSliderSentValue = control.action.value;
+                        }
                         if (now - activeRemoteSliderRenderedAt >= 80) {
                             displayRemoteSliderValue(page, activeRemoteControlIndex);
                             activeRemoteSliderRenderedAt = millis();
                             if (strcmp(control.action.type, "netHomeFan") == 0) {
                                 refreshReferencedTextBoxes(page, control.id);
                             }
-                        }
-                        if (strcmp(control.action.type, "netHomeFan") == 0) {
-                            disableMatchingClimateAuto(page, control);
-                            scheduleDeferredFanSpeed(control);
-                            activeRemoteSliderSentValue = control.action.value;
-                        } else if (!isMediaSeekControl(control) &&
-                            now - activeRemoteSliderSentAt >= 180) {
-                            dispatchRemoteAction(control);
-                            activeRemoteSliderSentAt = millis();
-                            activeRemoteSliderSentValue = control.action.value;
                         }
                     }
                 }
@@ -7610,7 +8703,8 @@ void handleTouch() {
             const uint32_t now = millis();
             const bool repeatsOnHold =
                 (strcmp(control.action.type, "macKey") == 0) ||
-                (strcmp(control.action.type, "macMedia") == 0 &&
+                                ((strcmp(control.action.type, "macMedia") == 0 ||
+                                    strcmp(control.action.type, "iPhoneMedia") == 0) &&
                     (strcmp(control.action.text, "volumeUp") == 0 ||
                      strcmp(control.action.text, "volumeDown") == 0));
             if (control.kind == 0 && !control.toggle &&
@@ -7643,7 +8737,8 @@ void handleTouch() {
                     displayRemoteControlFeedback(releasedControlIndex, false);
                 }
                 if (control.slider) {
-                    if (isMacVolumeControl(control)) {
+                    const bool volumeControl = isMediaVolumeControl(control);
+                    if (volumeControl) {
                         control.action.value = quantizedMacVolumeValue(control.action.value);
                         strlcpy(
                             recentSliderReleaseControlId,
@@ -7652,9 +8747,6 @@ void handleTouch() {
                         recentSliderReleaseValue = control.action.value;
                         recentSliderReleaseAt = millis();
                     }
-                    if (!releasedMediaSeek) {
-                        displayRemoteSliderValue(page, releasedControlIndex, true);
-                    }
                     if (strcmp(control.action.type, "netHomeFan") == 0) {
                         scheduleDeferredFanSpeed(control);
                     } else if (isMediaSeekControl(control)) {
@@ -7662,34 +8754,27 @@ void handleTouch() {
                     } else if (control.action.value != activeRemoteSliderSentValue) {
                         dispatchRemoteAction(control);
                     }
-                    if (isMacVolumeControl(control)) {
+                    if (!releasedMediaSeek && !volumeControl) {
+                        displayRemoteSliderValue(page, releasedControlIndex, true);
+                    }
+                    if (volumeControl) {
                         control.nextRefreshAt = millis() + 250;
                     }
                     persistRemoteSliderPositions(*remoteProfile);
-                    refreshReferencedTextBoxes(page, control.id);
+                    if (!volumeControl) {
+                        refreshReferencedTextBoxes(page, control.id);
+                    }
                 }
                 activeRemoteControlIndex = -1;
                 activeRemoteControlVisual = false;
                 if (releasedMediaSeek) {
                     displayRemoteSliderValue(page, releasedControlIndex, true);
                 }
-                if (shouldActivate && control.kind == 2) {
-                    if (control.tapBehavior == 1) {
-                        control.nextRefreshAt = millis();
-                    } else if (control.tapBehavior == 2) {
-                        dispatchRemoteAction(control);
-                    }
-                } else if (shouldActivate && !control.slider) {
+                if (shouldActivate && !control.slider) {
                     Serial.printf("Remote control released: page=%u index=%d\n",
                         remotePageIndex, releasedControlIndex);
-                    const bool succeeded = dispatchRemoteAction(control);
-                    if (succeeded && control.toggle && !isMacPlayPauseControl(control) && remoteVisible &&
-                        remotePageIndex == activeRemoteTouchPage) {
-                        control.toggleOn = !control.toggleOn;
-                        displayRemoteSliderValue(page, releasedControlIndex, true);
-                        persistRemoteToggleStates(*remoteProfile);
-                        refreshReferencedTextBoxes(page, control.id);
-                    }
+                    activateRemoteControl(remotePageIndex,
+                        static_cast<uint8_t>(releasedControlIndex));
                 }
                 activeRemoteHoldTriggered = false;
             }
@@ -7898,15 +8983,46 @@ bool changedFrameBounds(int32_t& x, int32_t& y, int32_t& width, int32_t& height)
 }
 
 void enterM5PaperDeepSleep(uint64_t microseconds) {
-    M5.Display.waitDisplay();
-    if (digitalRead(kMenuButtonPin) == LOW) {
-        Serial.println("Sleep deferred: center button held");
+    if (sleepAttemptDeferred && millis() - sleepAttemptDeferredAt < 1000) {
+        // The caller clears this flag before an attempt. Preserve the retry
+        // for a displayed still without blocking touch/buttons/HTTP meanwhile.
+        slideshowSleepPending = slideshowEnabled && !remoteVisible && stillFrameDisplayed;
+        return;
+    }
+    sleepAttemptDeferred = false;
+    const auto readWakeInputs = []() {
+        return sleep_wake::Inputs{
+            digitalRead(36) == LOW,
+            M5.Touch.getCount() > 0,
+            digitalRead(kPreviousButtonPin) == LOW ||
+                digitalRead(kMenuButtonPin) == LOW || digitalRead(kNextButtonPin) == LOW};
+    };
+    const auto release = sleep_wake::waitForRelease(
+        []() { return millis(); }, readWakeInputs,
+        []() { M5.update(); }, []() { delay(5); });
+    if (release != sleep_wake::ReleaseResult::ready) {
+        if (release == sleep_wake::ReleaseResult::timedOut) {
+            static bool hasLoggedStuckTouch = false;
+            static uint32_t lastStuckTouchLogAt = 0;
+            if (!hasLoggedStuckTouch || millis() - lastStuckTouchLogAt >= 30000) {
+                logDeviceError("Sleep cancelled: touch IRQ stayed low for 250 ms; keeping inputs active");
+                hasLoggedStuckTouch = true;
+                lastStuckTouchLogAt = millis();
+            }
+        } else {
+            Serial.println("Sleep deferred: touch or side button active");
+        }
+        sleepAttemptDeferredAt = millis();
+        sleepAttemptDeferred = true;
+        slideshowSleepPending = slideshowEnabled && !remoteVisible && stillFrameDisplayed;
         lastRemoteActivityAt = millis();
         return;
     }
-    if (esp_sleep_enable_ext1_wakeup(
+    M5.Display.waitDisplay();
+    if (esp_sleep_enable_ext0_wakeup(GPIO_NUM_36, 0) != ESP_OK ||
+        esp_sleep_enable_ext1_wakeup(
             1ULL << kMenuButtonPin, ESP_EXT1_WAKEUP_ALL_LOW) != ESP_OK) {
-        Serial.println("Button wake could not be armed; sleep cancelled");
+        logDeviceError("Touch/button wake could not be armed; sleep cancelled");
         lastRemoteActivityAt = millis();
         return;
     }
@@ -7916,11 +9032,19 @@ void enterM5PaperDeepSleep(uint64_t microseconds) {
     gpio_set_level(kMainPowerPin, 1);
     gpio_hold_en(kMainPowerPin);
     gpio_deep_sleep_hold_en();
+    const bool recoveryTimer = microseconds == M5.Power.sleep_no_timer;
+    const uint64_t wakeInterval = recoveryTimer
+        ? kRemoteSleepRecoveryIntervalUs
+        : microseconds;
     Serial.printf("Deep sleep armed: touch, center button, timer=%s, battery=%ld%%\n",
-        microseconds == M5.Power.sleep_no_timer ? "off" : "on",
+        recoveryTimer ? "60-second recovery" : "scheduled",
         static_cast<long>(M5.Power.getBatteryLevel()));
     Serial.flush();
-    M5.Power.deepSleep(microseconds, true);
+    // EXT0 touch and EXT1 center-button wake are already armed above. Passing
+    // true enters M5Unified's unbounded GT911 release loop BEFORE its timer is
+    // enabled. A permanently asserted IRQ then defeats even recovery wake.
+    // A touch arriving now instead causes an immediate (safe) EXT0 wake.
+    M5.Power.deepSleep(wakeInterval, false);
     gpio_hold_dis(kMainPowerPin);
     gpio_deep_sleep_hold_dis();
     Serial.println("Deep sleep was refused; restoring remote display");
@@ -8037,11 +9161,13 @@ void displayCurrentFrame() {
 
     const uint32_t renderStartedAt = millis();
     renderInProgress = kRenderMarker;
+    render_diagnostics::mark(render_diagnostics::Stage::readingFrame);
     const uint32_t frameOffset = animationHeader.framesOffset +
         static_cast<uint32_t>(currentFrame) * animationHeader.frameBytes;
     if (!animationFile.seek(frameOffset) ||
         animationFile.read(frameBuffer, animationHeader.frameBytes) != animationHeader.frameBytes) {
         renderInProgress = 0;
+        render_diagnostics::mark(render_diagnostics::Stage::idle);
         closeAnimation();
         return;
     }
@@ -8066,11 +9192,14 @@ void displayCurrentFrame() {
         ? epd_mode_t::epd_text
         : transitionMode;
     if (cleanRefresh) {
+        render_diagnostics::mark(render_diagnostics::Stage::clearing);
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
+        render_diagnostics::mark(render_diagnostics::Stage::waitingClear);
         M5.Display.waitDisplay();
     }
     M5.Display.setEpdMode(contentMode);
+    render_diagnostics::mark(render_diagnostics::Stage::drawingFrame);
     if (cleanRefresh || frameChanged) {
         if (!cleanRefresh) {
             M5.Display.setClipRect(dirtyX, dirtyY, dirtyWidth, dirtyHeight);
@@ -8093,6 +9222,7 @@ void displayCurrentFrame() {
     std::swap(frameBuffer, previousFrameBuffer);
     previousFrameValid = true;
     renderInProgress = 0;
+    render_diagnostics::mark(render_diagnostics::Stage::idle);
 
     if (displayedFrames % 30 == 0) {
         const uint32_t dirtyPixels = cleanRefresh || !frameChanged
@@ -8272,7 +9402,11 @@ void setup() {
     auto config = M5.config();
     config.output_power = false;
     config.clear_display = false;
+    render_diagnostics::start();
+    render_diagnostics::mark(render_diagnostics::Stage::initializing);
     M5.begin(config);
+    render_diagnostics::mark(render_diagnostics::Stage::idle);
+    localMediaStateQueue = xQueueCreate(1, sizeof(LocalMediaStateUpdate));
     startRemoteNetworkWorker();
     gpio_hold_dis(kMainPowerPin);
     gpio_deep_sleep_hold_dis();
@@ -8344,6 +9478,10 @@ void setup() {
             slideshowDeepSleep ? "on" : "off",
             remoteSleepNever ? "never" : "enabled",
             static_cast<unsigned long>(screensaverDelaySeconds()));
+        Serial.printf("Screen saver: style=%s, images below 100%%=%s, interval=%lu s\n",
+            screensaverStyle == ScreensaverStyle::media ? "media" : "snake",
+            imagesOnlyOnBattery ? "on" : "off",
+            static_cast<unsigned long>(slideshowIntervalSeconds()));
     }
 
     updateScreensaverBatteryPolicy();
@@ -8413,6 +9551,10 @@ void setup() {
 
 void loop() {
     M5.update();
+#if PAPERGIF_SERIAL_COMMANDS
+    processSerialCommands();
+#endif
+    processLocalMediaStateUpdate();
     advanceMediaTimeline(millis());
     updateScreensaverBatteryPolicy();
     handleSideButtons();
@@ -8488,16 +9630,13 @@ void loop() {
         static_cast<int32_t>(millis() - remoteActionStatusClearAt) >= 0) {
         remoteActionStatus[0] = '\0';
         remoteActionStatusClearAt = 0;
-        M5.Display.waitDisplay();
-        M5.Display.setEpdMode(epd_mode_t::epd_text);
-        M5.Display.startWrite();
-        drawRemoteStatusLine();
-        M5.Display.endWrite();
+        remoteStatusRedrawPending = true;
     }
     if (remoteVisible && millis() - remoteBatterySampledAt >= 60000) {
         refreshRemoteBatteryIndicator();
     }
     pollRemoteTextBoxes();
+    queueDeviceErrorUpload();
     pollScheduledRemoteActions();
     pollClimateAutomation();
     if (homeWifiAuthenticationRetryPending &&
@@ -8505,7 +9644,7 @@ void loop() {
         homeWifiAuthenticationRetryPending = false;
         connectHomeWifi();
     }
-    if (remoteProfile != nullptr && remoteProfile->configured && !wifiActive &&
+    if (remoteProfile != nullptr && remoteProfile->configured &&
         WiFi.status() != WL_CONNECTED && !homeWifiConnecting &&
         !homeWifiAuthenticationRetryPending &&
         millis() - homeWifiAttemptedAt >= 30000) {
@@ -8518,7 +9657,7 @@ void loop() {
         homeWifiFailureReason = 0;
         homeWifiStatusChanged = true;
         homeWifiNotificationPending = true;
-        Serial.println("Home Wi-Fi connection timed out");
+        logDeviceError("Home Wi-Fi connection timed out");
     }
     if (wifiStopRequested && wifiActive && millis() - wifiStopRequestedAt >= 250) {
         wifiStopRequested = false;
@@ -8583,6 +9722,9 @@ void loop() {
         remoteProfile != nullptr && slideshowEnabled &&
         (screensaverStyle == ScreensaverStyle::geometricSnake || animationReady) &&
         millis() - lastRemoteActivityAt >= screensaverDelayMs()) {
+        Serial.printf("Screen saver entered: battery stills=%s, frames=%u, sleep between images=%s\n",
+            batteryImagesOnly ? "yes" : "no", animationHeader.frameCount,
+            slideshowDeepSleep ? "on" : "off");
         remoteVisible = false;
         screensaverActive = true;
         slideshowSleepPending = false;
@@ -8656,6 +9798,8 @@ void loop() {
         static_cast<int32_t>(millis() - nextFrameAt) >= 0) {
         displayCurrentFrame();
     }
+    refreshRemoteMediaPosition();
+    renderRemoteFeedback();
     const bool animatedPlaybackActive = !batteryStillActive && !remoteVisible && animationReady &&
         animationHeader.frameCount > 1 && !stillFrameDisplayed;
     const bool latencySensitiveWork = upload.active || remoteProfileUpload.active ||

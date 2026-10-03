@@ -73,6 +73,12 @@ final class PaperGIFComputerDiscovery: NSObject, ObservableObject {
     }
 
     private static func resolvedHost(for service: NetService) -> String? {
+        if let record = service.txtRecordData(),
+           let data = NetService.dictionary(fromTXTRecord: record)["host"],
+           let host = String(data: data, encoding: .utf8),
+           !host.isEmpty {
+            return host
+        }
         if let address = service.addresses?.compactMap(numericIPv4Host).first {
             return address
         }

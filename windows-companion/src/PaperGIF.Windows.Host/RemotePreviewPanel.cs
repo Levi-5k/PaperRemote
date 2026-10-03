@@ -6,8 +6,11 @@ namespace PaperGIF.Windows.Host;
 internal sealed class RemotePreviewPanel : Control
 {
     private readonly Dictionary<Guid, Rectangle> controlFrames = [];
+    private readonly Dictionary<Guid, int> controlSlots = [];
     private RemotePage? page;
     private Guid? draggedControlId;
+    private int? draggedSourceSlot;
+    private Point dragStart;
     private Rectangle gridFrame;
 
     public RemotePreviewPanel()
@@ -38,27 +41,37 @@ internal sealed class RemotePreviewPanel : Control
         base.OnMouseDown(eventArgs);
         var match = controlFrames.FirstOrDefault(pair => pair.Value.Contains(eventArgs.Location));
         draggedControlId = match.Key == Guid.Empty ? null : match.Key;
+        draggedSourceSlot = draggedControlId is { } controlId && controlSlots.TryGetValue(controlId, out var slot)
+            ? slot
+            : null;
+        dragStart = eventArgs.Location;
     }
 
     protected override void OnMouseUp(MouseEventArgs eventArgs)
     {
         base.OnMouseUp(eventArgs);
-        if (page?.Layout == RemotePageLayout.OpenBuildsController)
+        if (draggedControlId is not { } controlId || draggedSourceSlot is not { } sourceSlot)
         {
             draggedControlId = null;
-            return;
-        }
-        if (draggedControlId is not { } controlId || !gridFrame.Contains(eventArgs.Location))
-        {
-            draggedControlId = null;
+            draggedSourceSlot = null;
             return;
         }
         var columns = Math.Clamp(page?.GridColumns ?? 2, 1, 12);
         var rows = Math.Clamp(page?.GridRows ?? 8, 1, 16);
-        var column = Math.Clamp((eventArgs.X - gridFrame.Left) * columns / Math.Max(1, gridFrame.Width), 0, columns - 1);
-        var row = Math.Clamp((eventArgs.Y - gridFrame.Top) * rows / Math.Max(1, gridFrame.Height), 0, rows - 1);
-        ControlMoved?.Invoke(this, new ControlMoveEventArgs(controlId, row * columns + column));
+        var columnOffset = (int)Math.Round(
+            (eventArgs.X - dragStart.X) * columns / (double)Math.Max(1, gridFrame.Width),
+            MidpointRounding.AwayFromZero);
+        var rowOffset = (int)Math.Round(
+            (eventArgs.Y - dragStart.Y) * rows / (double)Math.Max(1, gridFrame.Height),
+            MidpointRounding.AwayFromZero);
+        var column = sourceSlot % columns + columnOffset;
+        var row = sourceSlot / columns + rowOffset;
+        if (column >= 0 && column < columns && row >= 0 && row < rows)
+        {
+            ControlMoved?.Invoke(this, new ControlMoveEventArgs(controlId, row * columns + column));
+        }
         draggedControlId = null;
+        draggedSourceSlot = null;
     }
 
     protected override void OnMouseClick(MouseEventArgs eventArgs)
@@ -116,13 +129,14 @@ internal sealed class RemotePreviewPanel : Control
         DrawPageTabs(graphics, screen);
 
         controlFrames.Clear();
+        controlSlots.Clear();
         if (page is null)
         {
             return;
         }
         if (page.Layout == RemotePageLayout.OpenBuildsController)
         {
-            gridFrame = Rectangle.Empty;
+            gridFrame = ScaleFrame(screen, new RectangleF(24, 142, 504, 712));
             DrawOpenBuildsController(graphics, screen, page);
             return;
         }
@@ -188,6 +202,7 @@ internal sealed class RemotePreviewPanel : Control
                 height * 712f / rows - 12);
             var frame = ScaleFrame(screen, canonical);
             controlFrames[control.Id] = frame;
+            controlSlots[control.Id] = slot;
             DrawControl(graphics, frame, control);
         }
 
@@ -292,6 +307,7 @@ internal sealed class RemotePreviewPanel : Control
                 cellWidth * width - 8,
                 cellHeight * height - 8));
             controlFrames[control.Id] = frame;
+            controlSlots[control.Id] = slot;
             DrawControl(graphics, frame, control);
         }
     }

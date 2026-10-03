@@ -24,6 +24,8 @@
 	<string>public.app-category.entertainment</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>LSSupportsGameMode</key>
+	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
@@ -33,11 +35,16 @@
 	<string>paperGIF uses Bluetooth to find your M5Paper and send animations.</string>
 	<key>NSBonjourServices</key>
 	<array>
+		<string>_ewelink._tcp</string>
+		<string>_http._tcp</string>
 		<string>_papergif._tcp</string>
+		<string>_shelly._tcp</string>
 		<string>_wled._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>paperGIF finds companion computers and WLED lights, and connects to your M5Paper on your local network.</string>
+	<string>paperGIF finds companion computers, lights, switches, and your M5Paper on your local network.</string>
+	<key>NSHomeKitUsageDescription</key>
+	<string>paperGIF uses Apple Home to set up Matter accessories.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -47,6 +54,11 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>bluetooth-central</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations~ipad</key>

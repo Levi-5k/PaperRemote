@@ -65,9 +65,11 @@ enum PaperGIFStorage {
 
     nonisolated private static let packageExtension = "pgif"
     nonisolated private static let remoteProfileFilename = "remote-profile.json"
+    nonisolated private static let storageRootName = "paperGIF-v2"
 
     nonisolated static func loadRemoteProfile() -> PaperGIFRemoteProfile {
-        guard let data = try? Data(contentsOf: remoteProfileURL()),
+        guard let url = try? remoteProfileURL(),
+              let data = try? Data(contentsOf: url),
               let profile = try? JSONDecoder().decode(PaperGIFRemoteProfile.self, from: data),
               profile.version == PaperGIFRemoteProfile.currentVersion else {
             return .starter
@@ -78,16 +80,21 @@ enum PaperGIFStorage {
     nonisolated static func saveRemoteProfile(_ profile: PaperGIFRemoteProfile) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        try FileManager.default.createDirectory(
-            at: try storageDirectory(),
-            withIntermediateDirectories: true
-        )
-        try encoder.encode(profile).write(to: remoteProfileURL(), options: .atomic)
+        try encoder.encode(profile).write(to: try remoteProfileURL(), options: .atomic)
     }
 
-    nonisolated private static func remoteProfileURL() -> URL {
-        (try? storageDirectory().appendingPathComponent(remoteProfileFilename)) ??
-            FileManager.default.temporaryDirectory.appendingPathComponent(remoteProfileFilename)
+    nonisolated private static func remoteProfileURL() throws -> URL {
+        let directory = try applicationSupportDirectory()
+            .appendingPathComponent(storageRootName, isDirectory: true)
+            .appendingPathComponent("Remote", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(remoteProfileFilename)
+        if !FileManager.default.fileExists(atPath: url.path),
+           let legacyURL = try? legacyStorageDirectory().appendingPathComponent(remoteProfileFilename),
+           FileManager.default.fileExists(atPath: legacyURL.path) {
+            try? FileManager.default.copyItem(at: legacyURL, to: url)
+        }
+        return url
     }
 
     nonisolated static func save(
@@ -170,17 +177,47 @@ enum PaperGIFStorage {
     }
 
     nonisolated private static func storageDirectory() throws -> URL {
-        let baseURL = try FileManager.default.url(
+        let directory = try applicationSupportDirectory()
+            .appendingPathComponent(storageRootName, isDirectory: true)
+            .appendingPathComponent("Media", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        migrateLegacyMediaIfNeeded(to: directory)
+        return directory
+    }
+
+    nonisolated private static func applicationSupportDirectory() throws -> URL {
+        try FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
         )
-        let directory = baseURL
+    }
+
+    nonisolated private static func legacyStorageDirectory() throws -> URL {
+        try applicationSupportDirectory()
             .appendingPathComponent("paperGIF", isDirectory: true)
             .appendingPathComponent("Library", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+    }
+
+    nonisolated private static func migrateLegacyMediaIfNeeded(to directory: URL) {
+        guard let legacyDirectory = try? legacyStorageDirectory(),
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: legacyDirectory,
+                  includingPropertiesForKeys: nil,
+                  options: [.skipsHiddenFiles]
+              ) else { return }
+        let mediaExtensions = Set([packageExtension, "txt", "source", "json"])
+        for sourceURL in files {
+            let filename = sourceURL.lastPathComponent
+            let stem = sourceURL.deletingPathExtension().lastPathComponent
+            guard filename != remoteProfileFilename,
+                  UUID(uuidString: stem) != nil,
+                  mediaExtensions.contains(sourceURL.pathExtension) else { continue }
+            let destinationURL = directory.appendingPathComponent(filename)
+            guard !FileManager.default.fileExists(atPath: destinationURL.path) else { continue }
+            try? FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        }
     }
 
     nonisolated private static func packageURL(for id: UUID, in directory: URL) -> URL {
