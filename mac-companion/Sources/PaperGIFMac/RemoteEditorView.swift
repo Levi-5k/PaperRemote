@@ -351,6 +351,7 @@ private struct RemoteEditorView: View {
                     control: binding,
                     pages: store.profile.pages,
                     computers: store.profile.computers,
+                    modules: moduleCatalog.installedModules.filter { $0.runtime != nil },
                     temperatureUnit: store.profile.temperatureUnit,
                     discovery: discovery,
                     canUseButtonLayout: store.canChangeSelectedControl(to: .button),
@@ -657,6 +658,7 @@ private struct ControlInspector: View {
     @ObservedObject private var homeAccessories = HomeAccessoryCatalog.shared
     let pages: [RemotePage]
     let computers: [RemoteComputer]
+    let modules: [PaperModuleManifest]
     let temperatureUnit: RemoteTemperatureUnit
     @ObservedObject var discovery: WLEDDiscovery
     let canUseButtonLayout: Bool
@@ -1137,10 +1139,29 @@ private struct ControlInspector: View {
                 .foregroundStyle(.secondary)
         case .module:
             LabeledContent("Module") {
-                Text(control.action.host)
+                Picker("", selection: moduleIDBinding) {
+                    Text("Choose a module").tag("")
+                    if !control.action.host.isEmpty, !modules.contains(where: { $0.id == control.action.host }) {
+                        Text("\(control.action.host) (not installed)").tag(control.action.host)
+                    }
+                    ForEach(modules) { module in Text(module.name).tag(module.id) }
+                }
+                .labelsHidden()
             }
-            LabeledContent("Command") {
-                Text(control.action.text)
+            if let actions = modules.first(where: { $0.id == control.action.host })?.runtime?.actions {
+                LabeledContent("Command") {
+                    Picker("", selection: $control.action.text) {
+                        ForEach(actions, id: \.self) { action in
+                            Text(action.prefix(1).uppercased() + action.dropFirst()).tag(action)
+                        }
+                    }
+                    .labelsHidden()
+                }
+            }
+            if modules.isEmpty {
+                Text("Install a module with commands, such as Matter Switch, from the Modules tab.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         case .page:
             LabeledContent("Page") {
@@ -1209,7 +1230,7 @@ private struct ControlInspector: View {
 
     private var isMacAction: Bool {
         [.macMedia, .macKey, .macOpen, .macShortcut, .macScript,
-         .openBuilds,
+         .openBuilds, .module,
          .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
          .netHomeMode, .netHomeFan, .netHomeAuto]
             .contains(control.action.type)
@@ -1750,6 +1771,22 @@ private struct ControlInspector: View {
         )
     }
 
+    private var moduleIDBinding: Binding<String> {
+        Binding(
+            get: { control.action.host },
+            set: { moduleID in
+                control.action.host = moduleID
+                guard let module = modules.first(where: { $0.id == moduleID }) else { return }
+                control.action.text = Self.defaultModuleCommand(for: module)
+            }
+        )
+    }
+
+    static func defaultModuleCommand(for module: PaperModuleManifest) -> String {
+        let actions = module.runtime?.actions ?? []
+        return actions.contains("toggle") ? "toggle" : actions.first ?? ""
+    }
+
     private var actionTypeBinding: Binding<RemoteActionType> {
         Binding(
             get: { control.action.type },
@@ -1824,7 +1861,13 @@ private struct ControlInspector: View {
                         minimumCycleMinutes: 10
                     )
                 case .module:
-                    control.action = RemoteAction(type: type, host: host, computerID: computerID)
+                    let module = modules.first
+                    control.action = RemoteAction(
+                        type: type,
+                        host: module?.id ?? "",
+                        text: module.map { Self.defaultModuleCommand(for: $0) } ?? "",
+                        computerID: computerID
+                    )
                 case .page:
                     control.action = RemoteAction(type: type)
                 }
