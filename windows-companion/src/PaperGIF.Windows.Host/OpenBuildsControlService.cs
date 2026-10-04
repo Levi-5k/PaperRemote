@@ -230,6 +230,34 @@ internal sealed class OpenBuildsControlService : IDisposable
         httpClient.Dispose();
     }
 
+    internal static async Task<bool> IsRunningAsync(string host)
+    {
+        using var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(1_250) };
+        foreach (var endpoint in Endpoints(host))
+        {
+            try
+            {
+                using var response = await client.GetAsync(new Uri(endpoint, "/api/version"));
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+                await using var stream = await response.Content.ReadAsStreamAsync();
+                using var document = await JsonDocument.ParseAsync(stream);
+                if (document.RootElement.TryGetProperty("application", out var application) &&
+                    application.ValueKind == JsonValueKind.String &&
+                    application.GetString() == "OMD")
+                {
+                    return true;
+                }
+            }
+            catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
+            {
+            }
+        }
+        return false;
+    }
+
     internal static IReadOnlyList<Uri> Endpoints(string host)
     {
         var rawTarget = string.IsNullOrWhiteSpace(host) ? "127.0.0.1" : host.Trim();

@@ -52,7 +52,7 @@ public sealed class RemoteEditorStoreTests
     }
 
     [Fact]
-    public void LoopbackOpenBuildsControlsTargetTheAddingComputer()
+    public void LoopbackOpenBuildsControlsTargetTheChosenComputer()
     {
         const string local = "11111111-1111-1111-1111-111111111111";
         RemoteControl Control(RemoteActionType type, string host, string? computerId = null) =>
@@ -61,12 +61,15 @@ public sealed class RemoteEditorStoreTests
         var explicitTarget = Control(RemoteActionType.OpenBuilds, "127.0.0.1", "other");
         var remoteHost = Control(RemoteActionType.OpenBuilds, "192.168.50.40:3000");
         var media = Control(RemoteActionType.MacMedia, "");
+        var readout = Control(RemoteActionType.OpenBuilds, "127.0.0.1");
+        readout.TextBox = new RemoteTextBox { Source = RemoteTextSource.OpenBuildsPosition, SourceText = "127.0.0.1|x|mm" };
 
-        RemoteEditorStore.TargetLocalOpenBuilds([.. loopback, explicitTarget, remoteHost, media], local);
+        RemoteEditorStore.TargetOpenBuilds([.. loopback, explicitTarget, remoteHost, media, readout], local);
 
         Assert.All(loopback, control => Assert.Equal(local, control.Action.ComputerID));
         Assert.Equal("other", explicitTarget.Action.ComputerID);
         Assert.Null(remoteHost.Action.ComputerID);
         Assert.Null(media.Action.ComputerID);
+        Assert.Equal(Guid.Parse(local), readout.TextBox.ComputerID);
     }
 }

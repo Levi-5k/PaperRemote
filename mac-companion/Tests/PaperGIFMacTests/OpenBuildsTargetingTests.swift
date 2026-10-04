@@ -10,24 +10,35 @@ final class OpenBuildsTargetingTests: XCTestCase {
         return RemoteControl(title: "C", symbol: "circle", kind: .button, action: action)
     }
 
-    func testLoopbackOpenBuildsControlsTargetTheAddingComputer() {
+    func testLoopbackOpenBuildsControlsTargetTheChosenComputer() {
         for host in ["127.0.0.1", "localhost", " ", ""] {
-            let targeted = RemoteEditorStore.targetingLocalOpenBuilds(
+            let targeted = RemoteEditorStore.targetingOpenBuilds(
                 control(.openBuilds, host: host),
-                localComputerID: local
+                computerID: local
             )
             XCTAssertEqual(targeted.action.computerID, local, "host '\(host)'")
         }
     }
 
+    func testLoopbackPositionReadoutsTargetTheChosenComputer() {
+        var readout = control(.openBuilds, host: "127.0.0.1")
+        readout.kind = .textBox
+        readout.textBox = RemoteTextBox(source: .openBuildsPosition, sourceText: "127.0.0.1|x|mm")
+        let targeted = RemoteEditorStore.targetingOpenBuilds(readout, computerID: local)
+        XCTAssertEqual(targeted.textBox?.computerID, UUID(uuidString: local))
+
+        readout.textBox?.sourceText = "192.168.50.40:3000|x|mm"
+        XCTAssertNil(RemoteEditorStore.targetingOpenBuilds(readout, computerID: local).textBox?.computerID)
+    }
+
     func testExplicitTargetsRemoteHostsAndOtherActionsAreUnchanged() {
         let explicit = control(.openBuilds, host: "127.0.0.1", computerID: "other")
-        XCTAssertEqual(RemoteEditorStore.targetingLocalOpenBuilds(explicit, localComputerID: local).action.computerID, "other")
+        XCTAssertEqual(RemoteEditorStore.targetingOpenBuilds(explicit, computerID: local).action.computerID, "other")
         let remote = control(.openBuilds, host: "192.168.50.40:3000")
-        XCTAssertNil(RemoteEditorStore.targetingLocalOpenBuilds(remote, localComputerID: local).action.computerID)
+        XCTAssertNil(RemoteEditorStore.targetingOpenBuilds(remote, computerID: local).action.computerID)
         let media = control(.macMedia, host: "")
-        XCTAssertNil(RemoteEditorStore.targetingLocalOpenBuilds(media, localComputerID: local).action.computerID)
+        XCTAssertNil(RemoteEditorStore.targetingOpenBuilds(media, computerID: local).action.computerID)
         let unknownLocal = control(.openBuilds, host: "127.0.0.1")
-        XCTAssertNil(RemoteEditorStore.targetingLocalOpenBuilds(unknownLocal, localComputerID: nil).action.computerID)
+        XCTAssertNil(RemoteEditorStore.targetingOpenBuilds(unknownLocal, computerID: nil).action.computerID)
     }
 }

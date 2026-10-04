@@ -556,10 +556,23 @@ internal sealed class RemoteEditorWindow : Form
         Button? addPage = null;
         if (pageTemplate is not null)
         {
-            addPage = Button("Add Page", (_, _) =>
+            addPage = Button("Add Page", async (_, _) =>
             {
-                store.AddPage(ModuleCatalogService.ClonePage(pageTemplate, module.Id));
-                moduleStatus.Text = $"Added {pageTemplate.Page.Name}.";
+                var page = ModuleCatalogService.ClonePage(pageTemplate, module.Id);
+                if (!page.Controls.Any(control => control.Action.Type == RemoteActionType.OpenBuilds))
+                {
+                    store.AddPage(page);
+                    moduleStatus.Text = $"Added {pageTemplate.Page.Name}.";
+                    return;
+                }
+                addPage!.Enabled = false;
+                moduleStatus.Text = "Looking for OpenBuilds CONTROL on your paired computers...";
+                var computer = await store.OpenBuildsComputerAsync();
+                store.AddPage(page, computer?.Id.ToString());
+                addPage.Enabled = store.Profile.Pages.Count < 8;
+                moduleStatus.Text = computer is null
+                    ? $"Added {pageTemplate.Page.Name} for this PC. OpenBuilds CONTROL wasn't found running on a paired computer."
+                    : $"Added {pageTemplate.Page.Name} for OpenBuilds on {computer.Name}.";
             }, 92);
             addPage.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
             addPage.Location = new Point(14, 112);

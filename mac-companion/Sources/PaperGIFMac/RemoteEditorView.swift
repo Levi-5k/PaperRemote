@@ -500,6 +500,7 @@ private struct ModulesPanel: View {
     @ObservedObject var catalog: ModuleCatalog
     @State private var status = "Browse controls published in the paperGIF GitHub catalog."
     @State private var installingID: String?
+    @State private var findingOpenBuilds = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -560,6 +561,22 @@ private struct ModulesPanel: View {
         }
     }
 
+    private func addModulePage(_ definition: PaperModulePage, module: PaperModuleListing) async {
+        let page = ModuleCatalog.clonePage(definition, moduleID: module.id)
+        guard page.controls.contains(where: { $0.action.type == .openBuilds }) else {
+            store.addPage(page)
+            status = "Added \(definition.page.name)."
+            return
+        }
+        findingOpenBuilds = true
+        status = "Looking for OpenBuilds CONTROL on your paired computers..."
+        let computer = await store.openBuildsComputer()
+        findingOpenBuilds = false
+        store.addPage(page, openBuildsComputerID: computer?.id.uuidString)
+        status = computer.map { "Added \(definition.page.name) for OpenBuilds on \($0.name)." }
+            ?? "Added \(definition.page.name) for this Mac. OpenBuilds CONTROL wasn't found running on a paired computer."
+    }
+
     private func availabilityStatus(for modules: [PaperModuleListing]) -> String {
         let updateCount = modules.filter(catalog.hasUpdate).count
         return updateCount == 0
@@ -606,13 +623,12 @@ private struct ModulesPanel: View {
 
             ForEach(pageTemplates, id: \.id) { definition in
                 Button {
-                    store.addPage(ModuleCatalog.clonePage(definition, moduleID: module.id))
-                    status = "Added \(definition.page.name)."
+                    Task { await addModulePage(definition, module: module) }
                 } label: {
                     Label("Add \(definition.page.name) Page", systemImage: "plus.rectangle.on.rectangle")
                 }
                 .buttonStyle(.bordered)
-                .disabled(store.profile.pages.count >= 8)
+                .disabled(store.profile.pages.count >= 8 || findingOpenBuilds)
                 .help(definition.detail)
             }
         }

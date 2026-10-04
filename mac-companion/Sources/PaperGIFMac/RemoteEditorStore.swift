@@ -187,11 +187,11 @@ final class RemoteEditorStore: ObservableObject {
         selectedControlID = nil
     }
 
-    func addPage(_ page: RemotePage) {
+    func addPage(_ page: RemotePage, openBuildsComputerID: String? = nil) {
         guard profile.pages.count < 8 else { return }
         var page = page
-        let localID = localComputerID
-        page.controls = page.controls.map { Self.targetingLocalOpenBuilds($0, localComputerID: localID) }
+        let targetID = openBuildsComputerID ?? localComputerID
+        page.controls = page.controls.map { Self.targetingOpenBuilds($0, computerID: targetID) }
         profile.pages.append(page)
         selectedPageID = page.id
         selectedControlID = nil
@@ -201,17 +201,41 @@ final class RemoteEditorStore: ObservableObject {
         profile.computers.first(where: { $0.token == localComputer.token })?.id.uuidString
     }
 
-    /// OpenBuilds at 127.0.0.1 means "this computer"; untargeted it would run on the profile's default computer.
-    nonisolated static func targetingLocalOpenBuilds(_ control: RemoteControl, localComputerID: String?) -> RemoteControl {
-        let host = control.action.host.trimmingCharacters(in: .whitespaces)
-        guard let localComputerID,
-              control.action.type == .openBuilds,
-              (control.action.computerID ?? "").isEmpty,
-              ["", "127.0.0.1", "localhost", "::1"].contains(host) else {
-            return control
+    /// The paired computer running OpenBuilds CONTROL, preferring this one.
+    func openBuildsComputer() async -> RemoteComputer? {
+        let computers = profile.computers
+        let running = await withTaskGroup(of: UUID?.self) { group in
+            for computer in computers {
+                group.addTask { await OpenBuildsControlService.isRunning(on: computer.host) ? computer.id : nil }
+            }
+            var ids: Set<UUID> = []
+            for await id in group { if let id { ids.insert(id) } }
+            return ids
         }
+        let localToken = localComputer.token
+        let ordered = computers.filter { $0.token == localToken } + computers.filter { $0.token != localToken }
+        return ordered.first { running.contains($0.id) }
+    }
+
+    private nonisolated static func isLoopback(_ host: String) -> Bool {
+        ["", "127.0.0.1", "localhost", "::1"].contains(host.trimmingCharacters(in: .whitespaces))
+    }
+
+    /// OpenBuilds at 127.0.0.1 means "the computer running it"; untargeted it would use the profile's default computer.
+    nonisolated static func targetingOpenBuilds(_ control: RemoteControl, computerID: String?) -> RemoteControl {
+        guard let computerID else { return control }
         var targeted = control
-        targeted.action.computerID = localComputerID
+        if control.action.type == .openBuilds,
+           (control.action.computerID ?? "").isEmpty,
+           isLoopback(control.action.host) {
+            targeted.action.computerID = computerID
+        }
+        if let textBox = control.textBox,
+           textBox.source == .openBuildsPosition,
+           textBox.computerID == nil,
+           isLoopback(textBox.sourceText.split(separator: "|", omittingEmptySubsequences: false).first.map(String.init) ?? "") {
+            targeted.textBox?.computerID = UUID(uuidString: computerID)
+        }
         return targeted
     }
 
@@ -262,9 +286,15 @@ final class RemoteEditorStore: ObservableObject {
                                 layoutUnits(for: control, on: profile.pages[pageIndex]) <=
                                 profile.pages[pageIndex].gridColumns * profile.pages[pageIndex].gridRows else { return }
         profile.pages[pageIndex].controls.append(
-            Self.targetingLocalOpenBuilds(control, localComputerID: localComputerID)
+            Self.targetingOpenBuilds(control, computerID: existingOpenBuildsComputerID ?? localComputerID)
         )
         selectedControlID = control.id
+    }
+
+    private var existingOpenBuildsComputerID: String? {
+        profile.pages.lazy.flatMap(\.controls).compactMap { control in
+            control.action.type == .openBuilds ? control.action.computerID : nil
+        }.first { !$0.isEmpty }
     }
 
     func canAddControl(ofKind kind: RemoteControlKind) -> Bool {

@@ -99,17 +99,28 @@ internal sealed class RemoteEditorStore : IDisposable
         Commit();
     }
 
-    public void AddPage(RemotePage page)
+    public void AddPage(RemotePage page, string? openBuildsComputerId = null)
     {
         if (Profile.Pages.Count >= 8)
         {
             return;
         }
-        TargetLocalOpenBuilds(page.Controls, LocalComputerId);
+        TargetOpenBuilds(page.Controls, openBuildsComputerId ?? LocalComputerId);
         Profile.Pages.Add(page);
         SelectedPageId = page.Id;
         SelectedControlId = null;
         Commit();
+    }
+
+    // The paired computer running OpenBuilds CONTROL, preferring this one.
+    public async Task<RemoteComputer?> OpenBuildsComputerAsync()
+    {
+        var computers = Profile.Computers.ToList();
+        var running = await Task.WhenAll(computers.Select(computer =>
+            OpenBuildsControlService.IsRunningAsync(computer.Host)));
+        var candidates = computers.Where((_, index) => running[index]).ToList();
+        return candidates.FirstOrDefault(computer => computer.Token == configuration.Token) ??
+            candidates.FirstOrDefault();
     }
 
     public int UpdateModulePages(PaperModuleManifest module)
@@ -180,7 +191,7 @@ internal sealed class RemoteEditorStore : IDisposable
         {
             return false;
         }
-        TargetLocalOpenBuilds([control], LocalComputerId);
+        TargetOpenBuilds([control], ExistingOpenBuildsComputerId ?? LocalComputerId);
         page.Controls.Add(control);
         SelectedControlId = control.Id;
         Commit();
@@ -190,21 +201,35 @@ internal sealed class RemoteEditorStore : IDisposable
     private string? LocalComputerId =>
         Profile.Computers.FirstOrDefault(computer => computer.Token == configuration.Token)?.Id.ToString();
 
-    // OpenBuilds at 127.0.0.1 means "this computer"; untargeted it would run on the profile's default computer.
-    internal static void TargetLocalOpenBuilds(IEnumerable<RemoteControl> controls, string? localComputerId)
+    private string? ExistingOpenBuildsComputerId => Profile.Pages
+        .SelectMany(page => page.Controls)
+        .Where(control => control.Action.Type == RemoteActionType.OpenBuilds)
+        .Select(control => control.Action.ComputerID)
+        .FirstOrDefault(id => !string.IsNullOrEmpty(id));
+
+    private static bool IsLoopback(string? host) =>
+        (host?.Trim() ?? string.Empty) is "" or "127.0.0.1" or "localhost" or "::1";
+
+    // OpenBuilds at 127.0.0.1 means "the computer running it"; untargeted it would use the profile's default computer.
+    internal static void TargetOpenBuilds(IEnumerable<RemoteControl> controls, string? computerId)
     {
-        if (localComputerId is null)
+        if (computerId is null)
         {
             return;
         }
         foreach (var control in controls)
         {
-            var host = control.Action.Host?.Trim() ?? string.Empty;
             if (control.Action.Type == RemoteActionType.OpenBuilds &&
                 string.IsNullOrEmpty(control.Action.ComputerID) &&
-                host is "" or "127.0.0.1" or "localhost" or "::1")
+                IsLoopback(control.Action.Host))
             {
-                control.Action.ComputerID = localComputerId;
+                control.Action.ComputerID = computerId;
+            }
+            if (control.TextBox is { Source: RemoteTextSource.OpenBuildsPosition, ComputerID: null } textBox &&
+                IsLoopback(textBox.SourceText.Split('|')[0]) &&
+                Guid.TryParse(computerId, out var textComputerId))
+            {
+                textBox.ComputerID = textComputerId;
             }
         }
     }
