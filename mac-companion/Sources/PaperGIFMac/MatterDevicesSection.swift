@@ -18,9 +18,10 @@ struct MatterDevicesSection: View {
             }
 
             if manager.devices.isEmpty {
-                Text("No Matter devices yet.")
+                Text("No devices added to this Mac yet. Devices in Apple Home don't appear here automatically; add each one below with a pairing code from the Home app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(manager.devices) { device in
                 HStack {
