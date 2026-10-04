@@ -262,38 +262,118 @@ internal sealed class RemoteEditorStore : IDisposable
     public void MoveControlToSlot(Guid controlId, int requestedSlot)
     {
         var page = SelectedPage;
-        var control = page?.Controls.FirstOrDefault(candidate => candidate.Id == controlId);
-        if (page is null || control is null ||
-            requestedSlot is < 0 || requestedSlot >= page.GridColumns * page.GridRows)
+        if (page is null)
         {
             return;
         }
-        var destination = Placement(control, requestedSlot, page);
-        if (destination is null)
+        var controls = page.Controls.Take(RemoteProfile.MaximumControlsPerPage).ToList();
+        var sourceIndex = controls.FindIndex(candidate => candidate.Id == controlId);
+        if (sourceIndex < 0 || Rearranged(controls, sourceIndex, requestedSlot, page) is not { } slots)
         {
             return;
         }
-        if (page.Layout == RemotePageLayout.OpenBuildsController &&
-            OverlapsOpenBuildsSettings(destination.Value, page.GridColumns, page.GridRows))
+        for (var index = 0; index < slots.Length; index++)
         {
-            return;
+            controls[index].LayoutSlot = slots[index];
         }
-        var destinationCells = Cells(destination.Value, page.GridColumns);
-        foreach (var candidate in page.Controls.Where(candidate => candidate.Id != controlId))
+        Commit();
+    }
+
+    private static GridPlacement?[] Placements(IReadOnlyList<RemoteControl> controls, RemotePage page)
+    {
+        var occupied = new HashSet<int>();
+        var result = new GridPlacement?[controls.Count];
+        bool Place(int index, int slot)
         {
-            if (candidate.LayoutSlot is { } slot &&
-                Placement(candidate, slot, page) is { } placement &&
-                destinationCells.Overlaps(Cells(placement, page.GridColumns)))
+            if (slot < 0 || slot >= page.GridColumns * page.GridRows ||
+                Placement(controls[index], slot, page) is not { } candidate)
             {
-                return;
+                return false;
+            }
+            var cells = Cells(candidate, page.GridColumns);
+            if (occupied.Overlaps(cells))
+            {
+                return false;
+            }
+            occupied.UnionWith(cells);
+            result[index] = candidate;
+            return true;
+        }
+        for (var index = 0; index < controls.Count; index++)
+        {
+            if (controls[index].LayoutSlot is { } slot)
+            {
+                Place(index, slot);
             }
         }
-        if (control.LayoutSlot == destination.Value.Slot)
+        for (var index = 0; index < controls.Count; index++)
         {
-            return;
+            for (var slot = 0; result[index] is null && slot < page.GridColumns * page.GridRows; slot++)
+            {
+                Place(index, slot);
+            }
         }
-        control.LayoutSlot = destination.Value.Slot;
-        Commit();
+        return result;
+    }
+
+    // Final anchor slot for every control, or null if the drop isn't possible.
+    // Dropping onto exactly one other control swaps the two.
+    private static int?[]? Rearranged(
+        IReadOnlyList<RemoteControl> controls, int sourceIndex, int requestedSlot, RemotePage page)
+    {
+        var columns = page.GridColumns;
+        var current = Placements(controls, page);
+        if (current[sourceIndex] is not { } source ||
+            requestedSlot < 0 || requestedSlot >= columns * page.GridRows ||
+            Placement(controls[sourceIndex], requestedSlot, page) is not { } requested ||
+            requested.Slot == source.Slot)
+        {
+            return null;
+        }
+        var requestedCells = Cells(requested, columns);
+        var occupants = Enumerable.Range(0, controls.Count)
+            .Where(index => index != sourceIndex && current[index] is { } placement &&
+                requestedCells.Overlaps(Cells(placement, columns)))
+            .ToList();
+        var slots = current.Select(placement => placement?.Slot).ToArray();
+        switch (occupants.Count)
+        {
+            case 0:
+                slots[sourceIndex] = requested.Slot;
+                break;
+            case 1:
+                slots[sourceIndex] = current[occupants[0]]!.Value.Slot;
+                slots[occupants[0]] = source.Slot;
+                break;
+            default:
+                return null;
+        }
+
+        var occupied = new HashSet<int>();
+        var avoidSettings = page.Layout == RemotePageLayout.OpenBuildsController;
+        for (var index = 0; index < slots.Length; index++)
+        {
+            if (slots[index] is not { } slot)
+            {
+                continue;
+            }
+            if (Placement(controls[index], slot, page) is not { } moved || moved.Slot != slot)
+            {
+                return null;
+            }
+            if (avoidSettings && slot != current[index]?.Slot &&
+                OverlapsOpenBuildsSettings(moved, columns, page.GridRows))
+            {
+                return null;
+            }
+            var cells = Cells(moved, columns);
+            if (occupied.Overlaps(cells))
+            {
+                return null;
+            }
+            occupied.UnionWith(cells);
+        }
+        return slots;
     }
 
     public void Commit()

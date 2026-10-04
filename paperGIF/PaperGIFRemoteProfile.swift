@@ -550,6 +550,57 @@ enum PaperGIFRemoteGrid {
         return result
     }
 
+    /// Final anchor slot for every control, or nil if the drop isn't possible.
+    /// Dropping onto exactly one other control swaps the two.
+    static func rearranged(
+        _ controls: [PaperGIFRemoteControl],
+        moving sourceIndex: Int,
+        to requestedSlot: Int,
+        columns: Int,
+        rows: Int,
+        avoidingOpenBuildsSettings: Bool
+    ) -> [Int?]? {
+        let current = placements(for: controls, columns: columns, rows: rows)
+        guard current.indices.contains(sourceIndex),
+              let source = current[sourceIndex],
+              let requested = placement(
+                  for: controls[sourceIndex], at: requestedSlot, columns: columns, rows: rows
+              ),
+              requested.slot != source.slot else { return nil }
+
+        let requestedCells = cells(for: requested, columns: columns)
+        let occupants = current.indices.filter { index in
+            index != sourceIndex && current[index].map {
+                !requestedCells.isDisjoint(with: cells(for: $0, columns: columns))
+            } == true
+        }
+        var slots = current.map { $0?.slot }
+        switch occupants.count {
+        case 0:
+            slots[sourceIndex] = requested.slot
+        case 1:
+            slots[sourceIndex] = current[occupants[0]]?.slot
+            slots[occupants[0]] = source.slot
+        default:
+            return nil
+        }
+
+        var occupied: Set<Int> = []
+        for index in slots.indices {
+            guard let slot = slots[index] else { continue }
+            guard let moved = placement(for: controls[index], at: slot, columns: columns, rows: rows),
+                  moved.slot == slot else { return nil }
+            if avoidingOpenBuildsSettings, slot != current[index]?.slot,
+               overlapsOpenBuildsSettings(moved, columns: columns, rows: rows) {
+                return nil
+            }
+            let movedCells = cells(for: moved, columns: columns)
+            guard occupied.isDisjoint(with: movedCells) else { return nil }
+            occupied.formUnion(movedCells)
+        }
+        return slots
+    }
+
     static func placement(
         for control: PaperGIFRemoteControl,
         at requestedSlot: Int,

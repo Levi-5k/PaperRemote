@@ -239,6 +239,56 @@ final class RemoteProfileModelTests: XCTestCase {
         ))
     }
 
+    private func jogButtons(_ slots: [Int?]) -> [RemoteControl] {
+        slots.map { slot in
+            var control = RemoteControl(
+                title: "Jog", symbol: "arrow.up", kind: .button, action: RemoteAction(type: .page)
+            )
+            control.gridWidth = 2
+            control.gridHeight = 2
+            control.layoutSlot = slot
+            return control
+        }
+    }
+
+    func testDroppingOntoOneControlSwapsThem() throws {
+        let controls = jogButtons([27, 29, 31])
+        let slots = try XCTUnwrap(RemoteGrid.rearranged(
+            controls, moving: 0, to: 29, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+        ))
+        XCTAssertEqual(slots, [29, 27, 31])
+    }
+
+    func testDroppingIntoFreeSpaceMovesAndPinsAutoPlacedControls() throws {
+        let controls = jogButtons([27, nil])
+        let slots = try XCTUnwrap(RemoteGrid.rearranged(
+            controls, moving: 0, to: 81, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+        ))
+        XCTAssertEqual(slots, [81, 0])
+    }
+
+    func testDropsRejectedOnSettingsRailOrAcrossSeveralControls() {
+        let controls = jogButtons([27, 29, 31])
+        XCTAssertNil(RemoteGrid.rearranged(
+            controls, moving: 0, to: 33, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+        ))
+        XCTAssertNil(RemoteGrid.rearranged(
+            controls, moving: 2, to: 28, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+        ))
+    }
+
+    func testSwapRejectedWhenTheOtherControlWouldNotFit() {
+        var controls = jogButtons([27, nil])
+        controls[1].gridWidth = 3
+        controls[1].gridHeight = 1
+        controls[1].layoutSlot = 18
+        // The 3-wide control can't take slot 27's place without hitting the 2x2 at 29.
+        controls.append(contentsOf: jogButtons([29]))
+        XCTAssertNil(RemoteGrid.rearranged(
+            controls, moving: 0, to: 18, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+        ))
+    }
+
     func testTextBoxAlignmentRoundTripsAndDefaultsLegacyValues() throws {
         let configured = RemoteTextBox(horizontalAlignment: .center, verticalAlignment: .bottom)
         let decoded = try JSONDecoder().decode(

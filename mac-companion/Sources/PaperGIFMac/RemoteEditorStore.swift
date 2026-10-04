@@ -436,34 +436,21 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     func moveControl(_ controlID: UUID, to requestedSlot: Int) {
-        guard let pageIndex = selectedPageIndex,
-              let sourceIndex = profile.pages[pageIndex].controls.firstIndex(where: { $0.id == controlID }) else { return }
+        guard let pageIndex = selectedPageIndex else { return }
         let page = profile.pages[pageIndex]
-        let source = profile.pages[pageIndex].controls[sourceIndex]
-        guard let destination = RemoteGrid.placement(
-            for: source, at: requestedSlot, columns: page.gridColumns, rows: page.gridRows
-        ) else { return }
-        if page.layout == .openBuildsController,
-           RemoteGrid.overlapsOpenBuildsSettings(
-               destination, columns: page.gridColumns, rows: page.gridRows
-           ) {
-            return
+        let controls = Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage))
+        guard let sourceIndex = controls.firstIndex(where: { $0.id == controlID }),
+              let slots = RemoteGrid.rearranged(
+                  controls,
+                  moving: sourceIndex,
+                  to: requestedSlot,
+                  columns: page.gridColumns,
+                  rows: page.gridRows,
+                  avoidingOpenBuildsSettings: page.layout == .openBuildsController
+              ) else { return }
+        for index in slots.indices {
+            profile.pages[pageIndex].controls[index].layoutSlot = slots[index]
         }
-        let destinationSlots = RemoteGrid.cells(for: destination, columns: page.gridColumns)
-        for index in profile.pages[pageIndex].controls.indices where index != sourceIndex {
-            let control = profile.pages[pageIndex].controls[index]
-            guard let placement = RemoteGrid.placement(
-                for: control,
-                at: control.layoutSlot ?? -1,
-                columns: page.gridColumns,
-                rows: page.gridRows
-            ) else { continue }
-            let slots = RemoteGrid.cells(for: placement, columns: page.gridColumns)
-            if !destinationSlots.isDisjoint(with: slots) {
-                return
-            }
-        }
-        profile.pages[pageIndex].controls[sourceIndex].layoutSlot = destination.slot
     }
 
     func send() async {

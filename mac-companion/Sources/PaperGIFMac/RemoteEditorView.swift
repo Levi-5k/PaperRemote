@@ -2524,43 +2524,21 @@ private func remoteBitmapMaskImage(_ hex: String?) -> CGImage? {
 
 private enum RemoteLayout {
     static func frames(for page: RemotePage) -> [CGRect] {
-        let controls = Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage))
-        var occupied: Set<Int> = []
-        var frames = Array(repeating: CGRect.zero, count: controls.count)
-        var placed = Array(repeating: false, count: controls.count)
-
-        func place(_ index: Int, slot: Int) -> Bool {
-            guard let placement = RemoteGrid.placement(
-                for: controls[index], at: slot,
-                columns: page.gridColumns, rows: page.gridRows
-            ) else { return false }
-            let cells = RemoteGrid.cells(for: placement, columns: page.gridColumns)
-            guard occupied.isDisjoint(with: cells) else { return false }
-            occupied.formUnion(cells)
+        RemoteGrid.placements(
+            for: Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage)),
+            columns: page.gridColumns,
+            rows: page.gridRows
+        ).map { placement in
+            guard let placement else { return .zero }
             let row = placement.slot / page.gridColumns
             let column = placement.slot % page.gridColumns
-            frames[index] = CGRect(
+            return CGRect(
                 x: 24 + CGFloat(column) * 504 / CGFloat(page.gridColumns),
                 y: 142 + CGFloat(row) * 712 / CGFloat(page.gridRows),
                 width: CGFloat(placement.span.width) * 504 / CGFloat(page.gridColumns) - 12,
                 height: CGFloat(placement.span.height) * 712 / CGFloat(page.gridRows) - 12
             )
-            placed[index] = true
-            return true
         }
-
-        for index in controls.indices {
-                if let slot = controls[index].layoutSlot,
-                    (0..<(page.gridColumns * page.gridRows)).contains(slot) {
-                _ = place(index, slot: slot)
-            }
-        }
-        for index in controls.indices where !placed[index] {
-            for slot in 0..<(page.gridColumns * page.gridRows) where !placed[index] {
-                _ = place(index, slot: slot)
-            }
-        }
-        return frames
     }
 
     static func translatedSlot(

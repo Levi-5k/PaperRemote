@@ -2190,48 +2190,21 @@ private struct PaperGIFRemoteTabsPreview: View {
     }
 
     private func moveControl(_ controlID: UUID, to requestedSlot: Int) {
-        guard let sourceIndex = page.controls.firstIndex(where: { $0.id == controlID }) else { return }
-        let currentFrames = controlFrames(scale: 1)
-        var controls = page.controls
-        for index in controls.indices {
-            controls[index].layoutSlot = slot(for: currentFrames[index])
+        let controls = Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage))
+        guard let sourceIndex = controls.firstIndex(where: { $0.id == controlID }),
+              let slots = PaperGIFRemoteGrid.rearranged(
+                  controls,
+                  moving: sourceIndex,
+                  to: requestedSlot,
+                  columns: page.gridColumns,
+                  rows: page.gridRows,
+                  avoidingOpenBuildsSettings: page.layout == .openBuildsController
+              ) else { return }
+        var updated = page.controls
+        for index in slots.indices {
+            updated[index].layoutSlot = slots[index]
         }
-
-        let sourceSlot = controls[sourceIndex].layoutSlot ?? 0
-        guard let destination = PaperGIFRemoteGrid.placement(
-            for: controls[sourceIndex],
-            at: requestedSlot,
-            columns: page.gridColumns,
-            rows: page.gridRows
-        ) else { return }
-        if page.layout == .openBuildsController,
-           PaperGIFRemoteGrid.overlapsOpenBuildsSettings(
-               destination,
-               columns: page.gridColumns,
-               rows: page.gridRows
-           ) {
-            return
-        }
-        let destinationSlot = destination.slot
-        guard sourceSlot != destinationSlot else { return }
-        let destinationCells = PaperGIFRemoteGrid.cells(
-            for: destination, columns: page.gridColumns
-        )
-
-        for index in controls.indices where index != sourceIndex {
-            guard let placement = PaperGIFRemoteGrid.placement(
-                for: controls[index],
-                at: controls[index].layoutSlot ?? -1,
-                columns: page.gridColumns,
-                rows: page.gridRows
-            ) else { continue }
-            let slots = PaperGIFRemoteGrid.cells(for: placement, columns: page.gridColumns)
-            if !destinationCells.isDisjoint(with: slots) {
-                return
-            }
-        }
-        controls[sourceIndex].layoutSlot = destinationSlot
-        page.controls = controls
+        page.controls = updated
     }
 
     private func slot(for frame: CGRect, scale: CGFloat = 1) -> Int {
