@@ -703,6 +703,8 @@ void refreshReferencedTextBoxes(
     const char* controlId,
     bool redraw = true);
 bool isMacPlayPauseControl(const RemoteControl& control);
+bool isModuleStateControl(const RemoteControl& control);
+bool applyModuleStateValue(RemoteControl& control, bool available, JsonVariantConst value);
 bool isMacVolumeControl(const RemoteControl& control);
 bool isMediaPlayPauseControl(const RemoteControl& control);
 bool isMediaVolumeControl(const RemoteControl& control);
@@ -3011,6 +3013,15 @@ void configureWifiServer() {
                                 displayRemoteSliderValue(page, controlIndex, false);
                                 refreshReferencedTextBoxes(page, control.id);
                             }
+                        }
+                        continue;
+                    }
+                    if (isModuleStateControl(control) && strcmp(control.id, identifier) == 0) {
+                        control.nextRefreshAt = now + 60000;
+                        if (applyModuleStateValue(control, available, item["value"]) &&
+                            remoteVisible && pageIndex == remotePageIndex) {
+                            displayRemoteSliderValue(page, controlIndex, false);
+                            refreshReferencedTextBoxes(page, control.id);
                         }
                         continue;
                     }
@@ -6318,7 +6329,7 @@ bool queueRemoteNetworkRequest(
     request.slider = control.slider;
     request.toggle = control.toggle;
     request.toggleOnBefore = control.toggleOn;
-    request.playPause = isMacPlayPauseControl(control);
+    request.playPause = isMacPlayPauseControl(control) || isModuleStateControl(control);
     request.profileRevision = remoteProfileRevision;
     return enqueueRemoteRequest(request);
 }
@@ -6667,6 +6678,25 @@ bool isMacPlayPauseControl(const RemoteControl& control) {
     return isMediaPlayPauseControl(control) && strcmp(control.action.type, "macMedia") == 0;
 }
 
+// Module toggles (e.g. Matter Switch) show the device's reported power state, not a press count.
+bool isModuleStateControl(const RemoteControl& control) {
+    return control.kind == 0 && control.toggle && strcmp(control.action.type, "module") == 0;
+}
+
+// Returns true when the shown state changed.
+bool applyModuleStateValue(RemoteControl& control, bool available, JsonVariantConst value) {
+    if (!available || !value.is<int>()) {
+        return false;
+    }
+    const bool isOn = value.as<int>() != 0;
+    if (control.toggleOn == isOn) {
+        return false;
+    }
+    control.toggleOn = isOn;
+    persistRemoteToggleStates(*remoteProfile);
+    return true;
+}
+
 bool isMediaPlayPauseControl(const RemoteControl& control) {
     return control.kind == 0 &&
         (strcmp(control.action.type, "macMedia") == 0 ||
@@ -6858,12 +6888,13 @@ void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now)
     for (uint8_t index = 0; index < page.controlCount; ++index) {
         RemoteControl& control = page.controls[index];
         const bool volumeControl = isMacVolumeControl(control);
+        const bool moduleStateControl = isModuleStateControl(control);
         const bool playbackControl = isMacPlayPauseControl(control);
         const bool mediaSeekControl = isMacMediaSeekControl(control);
         if (isIPhoneNowPlayingTextBox(page, control)) {
             continue;
         }
-        if ((!volumeControl && !playbackControl && !mediaSeekControl &&
+        if ((!volumeControl && !playbackControl && !moduleStateControl && !mediaSeekControl &&
             (control.kind != 2 || !isMacTextSource(control))) ||
             control.nextRefreshAt == 0 || static_cast<int32_t>(now - control.nextRefreshAt) < 0 ||
             textBoxComputer(control) != &computer) {
@@ -6871,6 +6902,13 @@ void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now)
         }
         JsonObject item = items.add<JsonObject>();
         item["id"] = control.id;
+        if (moduleStateControl) {
+            item["source"] = "moduleState";
+            item["sourceText"] = control.action.host;
+            item["placeholder"] = "";
+            control.nextRefreshAt = now + 60000;
+            continue;
+        }
         item["source"] = volumeControl ? "outputVolume"
             : playbackControl ? "playbackState" : control.textSource;
         item["sourceText"] = volumeControl || playbackControl ? "" : control.sourceText;
@@ -6921,7 +6959,7 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
             if (remote_computer::acceptsResponse(textBoxComputer(control), result.url, result.token) &&
                 control.nextRefreshAt != 0 &&
                 (isMacVolumeControl(control) || isMacPlayPauseControl(control) ||
-                 isMacMediaSeekControl(control) ||
+                 isModuleStateControl(control) || isMacMediaSeekControl(control) ||
                  (control.kind == 2 && isMacTextSource(control)))) {
                 control.nextRefreshAt = retryAt;
             }
@@ -6950,6 +6988,17 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
                 continue;
             }
             const bool available = result["available"] | false;
+            if (isModuleStateControl(control)) {
+                control.nextRefreshAt = now + 60000;
+                if (applyModuleStateValue(control, available, result["value"])) {
+                    batchChanged = true;
+                    if (!useQualityRefresh) {
+                        displayRemoteSliderValue(page, index);
+                    }
+                    refreshReferencedTextBoxes(page, control.id, !useQualityRefresh);
+                }
+                break;
+            }
             if (isMacVolumeControl(control)) {
                 control.nextRefreshAt = now + 60000;
                 if (available && result["value"].is<int>()) {
@@ -7097,7 +7146,7 @@ void prepareRemoteTextBoxes() {
     for (uint8_t index = 0; index < page.controlCount; ++index) {
         RemoteControl& control = page.controls[index];
         if (isMacVolumeControl(control) || isMacPlayPauseControl(control) ||
-            isMacMediaSeekControl(control)) {
+            isModuleStateControl(control) || isMacMediaSeekControl(control)) {
             control.nextRefreshAt = millis();
             continue;
         }
@@ -7128,7 +7177,7 @@ void pollRemoteTextBoxes() {
     for (uint8_t index = 0; index < page.controlCount; ++index) {
         RemoteControl& control = page.controls[index];
         const bool volumeControl = isMacVolumeControl(control);
-        const bool playbackControl = isMacPlayPauseControl(control);
+        const bool playbackControl = isMacPlayPauseControl(control) || isModuleStateControl(control);
         const bool mediaSeekControl = isMacMediaSeekControl(control);
         if (isIPhoneNowPlayingTextBox(page, control)) {
             continue;

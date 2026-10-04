@@ -32,6 +32,7 @@ private struct ManageResponse: Encodable {
     let succeeded: Bool
     let message: String?
     let devices: [MatterNode]
+    var on: Bool? = nil
 }
 
 private struct MatterNode: Codable {
@@ -292,6 +293,8 @@ private final class MatterHub {
         switch request.command {
         case "list":
             return ManageResponse(succeeded: true, message: nil, devices: state.nodes)
+        case "state":
+            return readPowerState()
         case "commission":
             guard let setupCode = request.setupCode, !setupCode.isEmpty else {
                 return ManageResponse(succeeded: false, message: "Enter the pairing code.", devices: state.nodes)
@@ -347,6 +350,40 @@ private final class MatterHub {
             return ActionResponse(succeeded: false, changed: false, message: commandError.localizedDescription)
         }
         return ActionResponse(succeeded: true, changed: true, message: "\(node.name): \(command)")
+    }
+
+    /// Reads the OnOff attribute from the device itself so the M5Paper shows real state.
+    private func readPowerState() -> ManageResponse {
+        guard let node = state.nodes.last else {
+            return ManageResponse(succeeded: false, message: "No Matter device has been commissioned", devices: [])
+        }
+        let device = MTRBaseDevice(nodeID: NSNumber(value: node.id), controller: controller)
+        guard let cluster = MTRBaseClusterOnOff(
+            device: device,
+            endpointID: NSNumber(value: node.endpoint),
+            queue: callbackQueue
+        ) else {
+            return ManageResponse(succeeded: false, message: "On/Off cluster unavailable", devices: state.nodes)
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var value: Bool?
+        var readError: Error?
+        cluster.readAttributeOnOff { result, error in
+            value = result?.boolValue
+            readError = error
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 10) == .success else {
+            return ManageResponse(succeeded: false, message: "Matter state read timed out", devices: state.nodes)
+        }
+        guard let value else {
+            return ManageResponse(
+                succeeded: false,
+                message: readError?.localizedDescription ?? "No state reported",
+                devices: state.nodes
+            )
+        }
+        return ManageResponse(succeeded: true, message: nil, devices: state.nodes, on: value)
     }
 
     func nodesJSON() throws -> Data {

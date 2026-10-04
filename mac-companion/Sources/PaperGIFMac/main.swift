@@ -572,6 +572,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var nowPlayingSubscriptions: [String: Set<String>] = [:]
     private var playbackStateSubscriptions: [String: Set<String>] = [:]
     private var outputVolumeSubscriptions: [String: Set<String>] = [:]
+    /// M5Paper host -> control ID -> module ID, for toggle buttons that show a module device's real state.
+    private var moduleStateSubscriptions: [String: [String: String]] = [:]
+    private var lastModuleStates: [String: Bool] = [:]
+    private var moduleStateTimer: DispatchSourceTimer?
+    private let moduleStateQueue = DispatchQueue(label: "paperGIF.companion.module-state", qos: .utility)
     private var nowPlayingNotificationObservers: [NSObjectProtocol] = []
     private var distributedNowPlayingObservers: [NSObjectProtocol] = []
     private var mediaRemoteRegistrationHandle: UnsafeMutableRawPointer?
@@ -1066,6 +1071,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let outputVolumeControlIDs = Set(request.items.lazy
             .filter { $0.source == "outputVolume" }
             .map { String($0.id.prefix(40)) })
+        let moduleStateControls = Dictionary(
+            request.items.filter { $0.source == "moduleState" }
+                .map { (String($0.id.prefix(40)), String($0.sourceText.prefix(64))) },
+            uniquingKeysWith: { _, latest in latest }
+        )
         var permittedScripts: Set<String> = []
         DispatchQueue.main.sync {
             if let subscriberHost, !nowPlayingControlIDs.isEmpty {
@@ -1076,6 +1086,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if let subscriberHost, !outputVolumeControlIDs.isEmpty {
                 outputVolumeSubscriptions[subscriberHost] = outputVolumeControlIDs
+            }
+            if let subscriberHost, !moduleStateControls.isEmpty {
+                moduleStateSubscriptions[subscriberHost] = moduleStateControls
+                startModuleStatePolling()
             }
             permittedScripts = allowedScripts
         }
@@ -1095,7 +1109,24 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let nowPlayingOutput = nowPlayingControlIDs.isEmpty ? nil
             : nowPlayingText()?.trimmingCharacters(in: .whitespacesAndNewlines)
         let volume = outputVolumeControlIDs.isEmpty ? nil : outputVolumeValue()
+        let moduleStates = Dictionary(uniqueKeysWithValues: Set(moduleStateControls.values).map {
+            ($0, moduleState(for: $0))
+        })
+        if !moduleStates.isEmpty {
+            DispatchQueue.main.sync {
+                for case let (moduleID, on?) in moduleStates { lastModuleStates[moduleID] = on }
+            }
+        }
         let items = request.items.map { item -> TextSourceResponse in
+            if item.source == "moduleState" {
+                let on = moduleStates[String(item.sourceText.prefix(64))] ?? nil
+                return TextSourceResponse(
+                    id: String(item.id.prefix(40)),
+                    text: "",
+                    available: on != nil,
+                    value: on.map { $0 ? 1 : 0 }
+                )
+            }
             if item.source == "playbackState" {
                 return TextSourceResponse(
                     id: String(item.id.prefix(40)),
@@ -1168,6 +1199,66 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
         return TextSourceBatchResponse(items: items)
+    }
+
+    /// Blocking; never call on the main thread.
+    private func moduleState(for moduleID: String) -> Bool? {
+        struct StateResponse: Decodable {
+            let succeeded: Bool
+            let on: Bool?
+        }
+        guard let data = try? moduleRuntimeHost.manage(moduleID: moduleID, ModuleManageRequest(command: "state")),
+              let response = try? JSONDecoder().decode(StateResponse.self, from: data),
+              response.succeeded else { return nil }
+        return response.on
+    }
+
+    /// Main thread. Catches changes made outside the M5Paper, e.g. the Home app or the device's own button.
+    private func startModuleStatePolling() {
+        guard moduleStateTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: moduleStateQueue)
+        timer.schedule(deadline: .now() + 5, repeating: 5)
+        timer.setEventHandler { [weak self] in self?.pollModuleStates() }
+        timer.resume()
+        moduleStateTimer = timer
+    }
+
+    private func pollModuleStates() {
+        var subscriptions: [String: [String: String]] = [:]
+        DispatchQueue.main.sync { subscriptions = moduleStateSubscriptions }
+        for moduleID in Set(subscriptions.values.flatMap(\.values)) {
+            guard let on = moduleState(for: moduleID) else { continue }
+            var changed = false
+            DispatchQueue.main.sync {
+                changed = lastModuleStates[moduleID] != on
+                lastModuleStates[moduleID] = on
+            }
+            guard changed else { continue }
+            for (host, controls) in subscriptions {
+                let controlIDs = controls.filter { $0.value == moduleID }.map(\.key)
+                if !controlIDs.isEmpty {
+                    pushModuleState(on, controlIDs: controlIDs, host: host)
+                }
+            }
+        }
+    }
+
+    private func pushModuleState(_ on: Bool, controlIDs: [String], host: String) {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = 80
+        components.path = "/text-source/update"
+        guard let url = components.url,
+              let payload = try? JSONEncoder().encode(TextSourceBatchResponse(items: controlIDs.map {
+                  TextSourceResponse(id: $0, text: "", available: true, value: on ? 1 : 0)
+              })) else { return }
+        var request = URLRequest(url: url, timeoutInterval: 3)
+        request.httpMethod = "POST"
+        request.httpBody = payload
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: request).resume()
     }
 
     private func startNowPlayingObservation() {
