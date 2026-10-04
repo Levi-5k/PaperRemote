@@ -17,6 +17,23 @@ private struct ActionResponse: Codable {
     let message: String?
 }
 
+private struct RequestKind: Decodable {
+    let type: String
+}
+
+// Sent only by the companion app's own UI; device actions are limited to the manifest's runtime actions.
+private struct ManageRequest: Decodable {
+    let command: String
+    let setupCode: String?
+    let name: String?
+}
+
+private struct ManageResponse: Encodable {
+    let succeeded: Bool
+    let message: String?
+    let devices: [MatterNode]
+}
+
 private struct MatterNode: Codable {
     let id: UInt64
     var name: String
@@ -234,6 +251,9 @@ private final class MatterHub {
         }
 
         let nodeID = state.nextNodeID
+        // Never reuse a node ID from a failed attempt; the controller may hold a stale session for it.
+        state.nextNodeID += 1
+        try saveState()
         let delegate = CommissioningDelegate(nodeID: NSNumber(value: nodeID))
         commissioningDelegate = delegate
         controller.setDeviceControllerDelegate(delegate, queue: callbackQueue)
@@ -251,9 +271,28 @@ private final class MatterHub {
         }
         let node = MatterNode(id: nodeID, name: name, endpoint: 1)
         state.nodes.append(node)
-        state.nextNodeID += 1
         try saveState()
         return node
+    }
+
+    func manage(_ request: ManageRequest) -> ManageResponse {
+        switch request.command {
+        case "list":
+            return ManageResponse(succeeded: true, message: nil, devices: state.nodes)
+        case "commission":
+            guard let setupCode = request.setupCode, !setupCode.isEmpty else {
+                return ManageResponse(succeeded: false, message: "Enter the pairing code.", devices: state.nodes)
+            }
+            let trimmedName = String((request.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+            do {
+                let node = try commission(setupCode: setupCode, name: trimmedName.isEmpty ? "Matter switch" : trimmedName)
+                return ManageResponse(succeeded: true, message: "Added \(node.name).", devices: state.nodes)
+            } catch {
+                return ManageResponse(succeeded: false, message: error.localizedDescription, devices: state.nodes)
+            }
+        default:
+            return ManageResponse(succeeded: false, message: "Unsupported request", devices: state.nodes)
+        }
     }
 
     func perform(command: String) -> ActionResponse {
@@ -374,7 +413,7 @@ private func argument(after name: String) -> String? {
     return CommandLine.arguments[index + 1]
 }
 
-private func writeJSONLine(_ response: ActionResponse) {
+private func writeJSONLine<Response: Encodable>(_ response: Response) {
     guard let data = try? JSONEncoder().encode(response) else { return }
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write(Data([0x0A]))
@@ -399,8 +438,16 @@ func runMatterModule() throws {
         writeJSONLine(hub.perform(command: command))
     } else if CommandLine.arguments.contains("--json-lines") {
         while let line = readLine() {
-            guard let data = line.data(using: .utf8),
-                  let request = try? JSONDecoder().decode(ActionRequest.self, from: data),
+            guard let data = line.data(using: .utf8) else { continue }
+            if (try? JSONDecoder().decode(RequestKind.self, from: data))?.type == "manage" {
+                guard let request = try? JSONDecoder().decode(ManageRequest.self, from: data) else {
+                    writeJSONLine(ManageResponse(succeeded: false, message: "Invalid manage request", devices: []))
+                    continue
+                }
+                writeJSONLine(hub.manage(request))
+                continue
+            }
+            guard let request = try? JSONDecoder().decode(ActionRequest.self, from: data),
                   request.type == "module",
                   request.host == "matter-switch" else {
                 writeJSONLine(ActionResponse(succeeded: false, changed: false, message: "Invalid module request"))

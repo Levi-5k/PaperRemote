@@ -544,6 +544,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var configuration = CompanionConfiguration.initial
     private var editorStore: RemoteEditorStore?
     private var moduleCatalog: ModuleCatalog?
+    private var matterDevices: MatterDeviceManager?
     private var editorWindowController: RemoteEditorWindowController?
     private var nowPlayingSubscriptions: [String: Set<String>] = [:]
     private var playbackStateSubscriptions: [String: Set<String>] = [:]
@@ -780,7 +781,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         if editorWindowController == nil {
             editorWindowController = RemoteEditorWindowController(
                 store: controlsEditorStore(),
-                moduleCatalog: controlsModuleCatalog()
+                moduleCatalog: controlsModuleCatalog(),
+                matterDevices: matterDeviceManager()
             )
         }
         editorWindowController?.showWindow(nil)
@@ -802,6 +804,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         editorStore = store
         return store
+    }
+
+    @MainActor private func matterDeviceManager() -> MatterDeviceManager {
+        if let matterDevices {
+            return matterDevices
+        }
+        let manager = MatterDeviceManager(host: moduleRuntimeHost)
+        matterDevices = manager
+        return manager
     }
 
     @MainActor private func controlsModuleCatalog() -> ModuleCatalog {

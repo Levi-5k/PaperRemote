@@ -5,9 +5,9 @@ import SwiftUI
 final class RemoteEditorWindowController: NSWindowController {
     private let store: RemoteEditorStore
 
-    init(store: RemoteEditorStore, moduleCatalog: ModuleCatalog) {
+    init(store: RemoteEditorStore, moduleCatalog: ModuleCatalog, matterDevices: MatterDeviceManager) {
         self.store = store
-        let content = RemoteEditorView(store: store, moduleCatalog: moduleCatalog)
+        let content = RemoteEditorView(store: store, moduleCatalog: moduleCatalog, matterDevices: matterDevices)
         let window = NSWindow(contentViewController: NSHostingController(rootView: content))
         window.title = "paperGIF Controls"
         window.setContentSize(NSSize(width: 1_180, height: 780))
@@ -29,6 +29,7 @@ final class RemoteEditorWindowController: NSWindowController {
 private struct RemoteEditorView: View {
     @ObservedObject var store: RemoteEditorStore
     @ObservedObject var moduleCatalog: ModuleCatalog
+    @ObservedObject var matterDevices: MatterDeviceManager
     @StateObject private var discovery = WLEDDiscovery()
     @StateObject private var computerDiscovery = ComputerDiscovery()
     @StateObject private var deviceDiscovery = DeviceDiscovery()
@@ -335,7 +336,14 @@ private struct RemoteEditorView: View {
             .padding(12)
             Divider()
             if inspectorTab == .connections {
-                ConnectionsPanel(store: store, computers: computerDiscovery, wled: discovery)
+                ConnectionsPanel(
+                    store: store,
+                    computers: computerDiscovery,
+                    wled: discovery,
+                    matterDevices: moduleCatalog.installedModules.contains { $0.id == MatterDeviceManager.moduleID }
+                        ? matterDevices
+                        : nil
+                )
             } else if inspectorTab == .modules {
                 ModulesPanel(store: store, catalog: moduleCatalog)
             } else if inspectorTab == .control, let binding = selectedControlBinding {

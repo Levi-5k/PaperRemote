@@ -13,6 +13,7 @@ struct ConnectionsPanel: View {
     @ObservedObject var store: RemoteEditorStore
     @ObservedObject var computers: ComputerDiscovery
     @ObservedObject var wled: WLEDDiscovery
+    let matterDevices: MatterDeviceManager?
 
     @State private var selectedComputerID: UUID?
     @State private var computerName = ""
@@ -275,6 +276,13 @@ struct ConnectionsPanel: View {
                     }
                     if let wledStatus {
                         Text(wledStatus).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                if let matterDevices {
+                    Divider()
+                    section("MATTER DEVICES", systemImage: "powerplug.fill") {
+                        MatterDevicesSection(manager: matterDevices)
                     }
                 }
 

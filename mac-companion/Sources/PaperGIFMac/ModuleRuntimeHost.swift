@@ -15,7 +15,15 @@ struct ModuleActionResponse: Codable {
     let message: String?
 }
 
-final class ModuleRuntimeHost {
+/// Management requests come only from this app's UI, never from M5Paper actions.
+struct ModuleManageRequest: Encodable {
+    let type = "manage"
+    let command: String
+    var setupCode: String?
+    var name: String?
+}
+
+final class ModuleRuntimeHost: @unchecked Sendable {
     private struct RuntimeProcess {
         let process: Process
         let input: FileHandle
@@ -89,6 +97,26 @@ final class ModuleRuntimeHost {
         }
     }
 
+    /// Blocks until the module replies; call off the main thread.
+    func manage(moduleID: String, _ request: ModuleManageRequest) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let runtimeName = runtimeByModule[moduleID] else {
+            throw ModuleRuntimeError.moduleNotLoaded(moduleID)
+        }
+        do {
+            let runtime = try process(named: runtimeName)
+            try runtime.input.write(contentsOf: try JSONEncoder().encode(request) + Data([0x0A]))
+            guard let line = try runtime.output.readLine(maximumBytes: 64 * 1024) else {
+                throw ModuleRuntimeError.noResponse
+            }
+            return line
+        } catch {
+            stopProcess(runtimeName)
+            throw error
+        }
+    }
+
     private func process(named name: String) throws -> RuntimeProcess {
         if let runtime = processes[name], runtime.process.isRunning {
             return runtime
@@ -139,11 +167,17 @@ final class ModuleRuntimeHost {
 
 private enum ModuleRuntimeError: LocalizedError {
     case executableNotFound(String)
+    case moduleNotLoaded(String)
+    case noResponse
 
     var errorDescription: String? {
         switch self {
         case .executableNotFound(let name):
             "The signed runtime for module \(name) is not installed."
+        case .moduleNotLoaded(let id):
+            "The \(id) module is not installed."
+        case .noResponse:
+            "Module runtime exited without a response"
         }
     }
 }
