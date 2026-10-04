@@ -752,8 +752,9 @@ internal sealed class RemoteEditorWindow : Form
         });
         applicationPicker.Width = 300;
         applicationPicker.DropDownHeight = 400;
-        applicationPicker.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        // WinForms rejects a DropDownList autocomplete mode unless the source is already ListItems.
         applicationPicker.AutoCompleteSource = AutoCompleteSource.ListItems;
+        applicationPicker.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
         applicationTarget.Width = 222;
         applicationTarget.Margin = new Padding(3, 4, 3, 3);
         applicationTarget.PlaceholderText = @"C:\Path\App.exe or https://";

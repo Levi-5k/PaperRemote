@@ -5,8 +5,10 @@ using System.Text.Json;
 
 internal static class Program
 {
+    // Must stay synchronous: [STAThread] is ignored on async Main, and WinForms needs STA for OLE
+    // features such as autocomplete and file dialogs.
     [STAThread]
-    private static async Task Main(string[] args)
+    private static void Main(string[] args)
     {
         System.Windows.Forms.Application.ThreadException += (_, eventArgs) =>
             DiagnosticLog.Error("Unhandled Windows UI exception", eventArgs.Exception);
@@ -22,7 +24,7 @@ internal static class Program
         DiagnosticLog.Info("paperGIF Windows started");
         try
         {
-            await RunAsync(args);
+            Run(args);
         }
         catch (Exception exception)
         {
@@ -31,12 +33,12 @@ internal static class Program
         }
     }
 
-    private static async Task RunAsync(string[] args)
+    private static void Run(string[] args)
     {
         if (args is ["--write-icon", var iconPath])
         {
             using var icon = PaperGifIcon.Create(256);
-            await using var stream = File.Create(iconPath);
+            using var stream = File.Create(iconPath);
             icon.Save(stream);
             return;
         }
@@ -65,9 +67,9 @@ internal static class Program
         builder.Services.AddSingleton<ModuleCatalogService>();
         builder.Services.AddSingleton<HomeAccessoryCatalog>();
 
-        await using var app = builder.Build();
+        using var app = builder.Build();
         ConfigureEndpoints(app, configuration);
-        await app.StartAsync();
+        app.Start();
         using var bonjourAdvertiser = new BonjourAdvertiser(configuration.Port);
 
         System.Windows.Forms.Application.SetHighDpiMode(HighDpiMode.SystemAware);
@@ -84,7 +86,7 @@ internal static class Program
             app.Services.GetRequiredService<ModuleCatalogService>(),
             app.Services.GetRequiredService<HomeAccessoryCatalog>()));
 
-        await app.StopAsync();
+        Task.Run(() => app.StopAsync()).GetAwaiter().GetResult();
     }
 
     internal static void ConfigureEndpoints(
