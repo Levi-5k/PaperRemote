@@ -195,6 +195,7 @@ public sealed class OpenBuildsControllerSettings
     public int JogDistanceTenths { get; set; } = 10;
     public OpenBuildsUnits Units { get; set; } = OpenBuildsUnits.Mm;
     public int JogDistanceThousandths { get; set; } = 1_000;
+    public int? SettingsSlot { get; set; }
 }
 
 public sealed class RemoteProfile

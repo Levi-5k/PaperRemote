@@ -214,29 +214,30 @@ final class RemoteProfileModelTests: XCTestCase {
         ), 117)
     }
 
-    func testOpenBuildsSettingsRailRejectsOverlappingControls() throws {
-        var control = RemoteControl(
-            title: "Move",
-            symbol: "arrow.right",
-            kind: .button,
-            action: RemoteAction(type: .page)
-        )
-        control.gridWidth = 2
-        control.gridHeight = 2
+    private let rail = RemoteGrid.cells(
+        for: RemoteGrid.openBuildsSettingsPlacement(slot: nil, columns: 9, rows: 14), columns: 9
+    )
 
-        let openPlacement = try XCTUnwrap(RemoteGrid.placement(
-            for: control, at: 27, columns: 9, rows: 14
-        ))
-        let railPlacement = try XCTUnwrap(RemoteGrid.placement(
-            for: control, at: 33, columns: 9, rows: 14
-        ))
+    func testOpenBuildsSettingsOccupyWholeCellsWhereTheFixedRailUsedToBe() {
+        let placement = RemoteGrid.openBuildsSettingsPlacement(slot: nil, columns: 9, rows: 14)
+        XCTAssertEqual(placement.slot, 33)
+        XCTAssertEqual(placement.span, RemoteGridSpan(width: 3, height: 9))
+        XCTAssertTrue(rail.contains(33) && rail.contains(107) && !rail.contains(32) && !rail.contains(114))
+        // Out-of-bounds saved slots fall back to the default position.
+        XCTAssertEqual(RemoteGrid.openBuildsSettingsPlacement(slot: 7, columns: 9, rows: 14).slot, 33)
+        XCTAssertEqual(RemoteGrid.openBuildsSettingsPlacement(slot: 45, columns: 9, rows: 14).slot, 45)
+    }
 
-        XCTAssertFalse(RemoteGrid.overlapsOpenBuildsSettings(
-            openPlacement, columns: 9, rows: 14
-        ))
-        XCTAssertTrue(RemoteGrid.overlapsOpenBuildsSettings(
-            railPlacement, columns: 9, rows: 14
-        ))
+    func testOpenBuildsSettingsMoveOnlyIntoFreeCells() {
+        var page = RemotePage(name: "Motion", controls: jogButtons([27]))
+        page.layout = .openBuildsController
+        page.gridColumns = 9
+        page.gridRows = 14
+        page.openBuildsController = RemoteOpenBuildsController()
+        XCTAssertEqual(RemoteGrid.movedOpenBuildsSettings(on: page, controls: page.controls, to: 42), 42)
+        XCTAssertNil(RemoteGrid.movedOpenBuildsSettings(on: page, controls: page.controls, to: 28))
+        // Drops past the edge clamp onto the page.
+        XCTAssertEqual(RemoteGrid.movedOpenBuildsSettings(on: page, controls: page.controls, to: 125), 51)
     }
 
     private func jogButtons(_ slots: [Int?]) -> [RemoteControl] {
@@ -254,7 +255,7 @@ final class RemoteProfileModelTests: XCTestCase {
     func testDroppingOntoOneControlSwapsThem() throws {
         let controls = jogButtons([27, 29, 31])
         let slots = try XCTUnwrap(RemoteGrid.rearranged(
-            controls, moving: 0, to: 29, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+            controls, moving: 0, to: 29, columns: 9, rows: 14, reserved: rail
         ))
         XCTAssertEqual(slots, [29, 27, 31])
     }
@@ -262,7 +263,7 @@ final class RemoteProfileModelTests: XCTestCase {
     func testDroppingIntoFreeSpaceMovesAndPinsAutoPlacedControls() throws {
         let controls = jogButtons([27, nil])
         let slots = try XCTUnwrap(RemoteGrid.rearranged(
-            controls, moving: 0, to: 81, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+            controls, moving: 0, to: 81, columns: 9, rows: 14, reserved: rail
         ))
         XCTAssertEqual(slots, [81, 0])
     }
@@ -270,10 +271,10 @@ final class RemoteProfileModelTests: XCTestCase {
     func testDropsRejectedOnSettingsRailOrAcrossSeveralControls() {
         let controls = jogButtons([27, 29, 31])
         XCTAssertNil(RemoteGrid.rearranged(
-            controls, moving: 0, to: 33, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+            controls, moving: 0, to: 33, columns: 9, rows: 14, reserved: rail
         ))
         XCTAssertNil(RemoteGrid.rearranged(
-            controls, moving: 2, to: 28, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+            controls, moving: 2, to: 28, columns: 9, rows: 14, reserved: rail
         ))
     }
 
@@ -285,7 +286,7 @@ final class RemoteProfileModelTests: XCTestCase {
         // The 3-wide control can't take slot 27's place without hitting the 2x2 at 29.
         controls.append(contentsOf: jogButtons([29]))
         XCTAssertNil(RemoteGrid.rearranged(
-            controls, moving: 0, to: 18, columns: 9, rows: 14, avoidingOpenBuildsSettings: true
+            controls, moving: 0, to: 18, columns: 9, rows: 14, reserved: rail
         ))
     }
 

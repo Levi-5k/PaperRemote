@@ -35,6 +35,11 @@ internal sealed class RemoteEditorWindow : Form
     private readonly ComboBox targetPage = new();
     private readonly ComboBox referencedControl = new();
     private readonly ComboBox textComputer = new();
+    private readonly ComboBox applicationPicker = new();
+    private readonly TextBox applicationTarget = new();
+    private readonly Button browseApplicationButton;
+    private readonly Dictionary<string, ApplicationList> applicationLists = [];
+    private readonly HashSet<string> loadingApplicationLists = [];
     private readonly Label emptyControlHint = new();
     private readonly TextBox actionHost = new();
     private readonly ComboBox actionHttpMethod = new();
@@ -60,6 +65,8 @@ internal sealed class RemoteEditorWindow : Form
     private readonly Control targetPageRow;
     private readonly Control referencedControlRow;
     private readonly Control textComputerRow;
+    private readonly Control applicationPickerRow;
+    private readonly Control applicationTargetRow;
     private readonly PropertyGrid profileProperties = new();
     private readonly ListBox computersList = new();
     private readonly ListBox discoveredList = new();
@@ -78,6 +85,8 @@ internal sealed class RemoteEditorWindow : Form
     private string? automaticallyLoadedDevice;
 
     private sealed record DeviceChoice(string DisplayName, DiscoveredEndpoint? Endpoint);
+
+    private sealed record ApplicationList(IReadOnlyList<RemoteApplication> Applications, string? Error);
 
     public RemoteEditorWindow(
         RemoteEditorStore store,
@@ -108,6 +117,15 @@ internal sealed class RemoteEditorWindow : Form
         referencedControlRow = BuildOptionRow("Value from", referencedControl);
         textComputerRow = BuildOptionRow("Text computer", textComputer);
         homeAccessoryRow = BuildOptionRow("Home accessory", homeAccessory);
+        browseApplicationButton = Button("Browse...", (_, _) => BrowseForApplication(), 72);
+        applicationPickerRow = BuildOptionRow("Application", applicationPicker);
+        applicationTargetRow = BuildOptionRow("Path or URL", new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Margin = Padding.Empty,
+            WrapContents = false,
+            Controls = { applicationTarget, browseApplicationButton },
+        });
         Text = "paperGIF Controls";
         Icon = (Icon)icon.Clone();
         ClientSize = new Size(1000, 720);
@@ -375,6 +393,7 @@ internal sealed class RemoteEditorWindow : Form
             RefreshAll();
         };
         preview.ControlMoved += (_, move) => store.MoveControlToSlot(move.ControlId, move.Slot);
+        preview.SettingsMoved += (_, slot) => store.MoveOpenBuildsSettings(slot);
         panel.Controls.Add(preview);
         panel.Controls.Add(header);
         return panel;
@@ -644,7 +663,6 @@ internal sealed class RemoteEditorWindow : Form
         toolbar.Controls.Add(Button("Down", (_, _) => store.MoveSelectedControl(1), 52));
         toolbar.Controls.Add(Button("Duplicate", (_, _) => store.DuplicateSelectedControl(), 72));
         toolbar.Controls.Add(Button("Delete", (_, _) => store.DeleteSelectedControl(), 58));
-        toolbar.Controls.Add(Button("Choose app", async (_, _) => await ChooseApplicationAsync(), 82));
         toolbar.Controls.Add(Button("Schedules", (_, _) => EditSchedules(), 76));
         targetComputer.Width = 130;
         targetComputer.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -720,6 +738,32 @@ internal sealed class RemoteEditorWindow : Form
                 store.Commit();
             }
         };
+        ConfigureControlOption(applicationPicker, choice =>
+        {
+            if (choice.Value is not null && store.SelectedControl is { Action.Type: RemoteActionType.MacOpen } control)
+            {
+                var application = ApplicationFor(control, choice.Value);
+                SetApplicationTarget(control, choice.Value, application?.Name);
+            }
+        });
+        applicationPicker.Width = 300;
+        applicationPicker.DropDownHeight = 400;
+        applicationPicker.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        applicationPicker.AutoCompleteSource = AutoCompleteSource.ListItems;
+        applicationTarget.Width = 222;
+        applicationTarget.Margin = new Padding(3, 4, 3, 3);
+        applicationTarget.PlaceholderText = @"C:\Path\App.exe or https://";
+        applicationTarget.Leave += (_, _) =>
+        {
+            var target = applicationTarget.Text.Trim();
+            if (!refreshing &&
+                store.SelectedControl is { Action.Type: RemoteActionType.MacOpen } control &&
+                control.Action.Text != target)
+            {
+                SetApplicationTarget(control, target, ApplicationFor(control, target)?.Name);
+                store.Commit();
+            }
+        };
         actionValue.Width = 110;
         actionValue.ValueChanged += (_, _) => SaveActionValue();
         ConfigureControlOption(targetPage, choice =>
@@ -768,6 +812,8 @@ internal sealed class RemoteEditorWindow : Form
         controlOptions.Padding = new Padding(0, 4, 0, 5);
         controlOptions.Controls.AddRange([
             actionComputerRow,
+            applicationPickerRow,
+            applicationTargetRow,
             mediaCommandRow,
             keyCommandRow,
             modifierRow,
@@ -988,6 +1034,7 @@ internal sealed class RemoteEditorWindow : Form
     {
         var control = store.SelectedControl;
         var showActionComputer = control is not null && IsComputerAction(control.Action.Type);
+        var showApplication = control?.Action.Type == RemoteActionType.MacOpen;
         var showMediaCommand = control?.Action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia;
         var showKeyCommand = control?.Action.Type == RemoteActionType.MacKey;
         var showActionHost = control is not null && IsDeviceAction(control.Action.Type);
@@ -1005,6 +1052,7 @@ internal sealed class RemoteEditorWindow : Form
             control.TextBox?.Source is RemoteTextSource.MacScript or
                 RemoteTextSource.MacShortcut or RemoteTextSource.NowPlaying;
         actionComputerRow.Visible = showActionComputer;
+        applicationPickerRow.Visible = applicationTargetRow.Visible = showApplication;
         mediaCommandRow.Visible = showMediaCommand;
         keyCommandRow.Visible = modifierRow.Visible = showKeyCommand;
         actionHostRow.Visible = showActionHost;
@@ -1017,10 +1065,14 @@ internal sealed class RemoteEditorWindow : Form
         targetPageRow.Visible = showTargetPage;
         referencedControlRow.Visible = showReferencedControl;
         textComputerRow.Visible = showTextComputer;
-        controlOptions.Visible = showActionComputer || showMediaCommand || showKeyCommand ||
+        controlOptions.Visible = showActionComputer || showApplication || showMediaCommand || showKeyCommand ||
             showActionHost || showHomeAccessory || showLocalHttp || showActionChoice || showActionValue || showTargetPage ||
             showReferencedControl || showTextComputer;
 
+        if (showApplication && control is not null)
+        {
+            RefreshApplicationOptions(control);
+        }
         SetControlOptions(mediaCommand,
         [
             new("previous", "Previous"),
@@ -1423,43 +1475,121 @@ internal sealed class RemoteEditorWindow : Form
         }
     }
 
-    private async Task ChooseApplicationAsync()
-    {
-        var control = store.SelectedControl;
-        if (control is null)
-        {
-            return;
-        }
-        var computer = Guid.TryParse(control.Action.ComputerID, out var computerId)
+    private RemoteComputer? ApplicationComputer(RemoteControl control) =>
+        Guid.TryParse(control.Action.ComputerID, out var computerId)
             ? store.Profile.Computers.FirstOrDefault(candidate => candidate.Id == computerId)
             : store.Profile.Computers.FirstOrDefault();
+
+    private static string ApplicationListKey(RemoteComputer computer) =>
+        $"{computer.Id}|{computer.Host}|{computer.Port}|{computer.Token}";
+
+    private RemoteApplication? ApplicationFor(RemoteControl control, string path) =>
+        ApplicationComputer(control) is { } computer &&
+        applicationLists.TryGetValue(ApplicationListKey(computer), out var list)
+            ? list.Applications.FirstOrDefault(application =>
+                application.Path.Equals(path, StringComparison.OrdinalIgnoreCase))
+            : null;
+
+    private void RefreshApplicationOptions(RemoteControl control)
+    {
+        var computer = ApplicationComputer(control);
+        var target = control.Action.Text;
+        applicationTarget.Text = target;
+        browseApplicationButton.Enabled = computer is null || store.IsLocalComputer(computer);
+        ApplicationList? list = null;
+        string placeholder;
         if (computer is null)
         {
-            MessageBox.Show(this, "Add or pair a computer first.", "paperGIF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            placeholder = "Pair a computer to list its applications";
+        }
+        else if (!applicationLists.TryGetValue(ApplicationListKey(computer), out list))
+        {
+            placeholder = "Loading applications...";
+            _ = LoadApplicationListAsync(computer);
+        }
+        else
+        {
+            placeholder = list.Error ??
+                (list.Applications.Count == 0 ? $"No applications found on {computer.Name}" : "Choose an application");
+        }
+        var applications = list?.Applications ?? [];
+        var selected = applications.FirstOrDefault(application =>
+            application.Path.Equals(target, StringComparison.OrdinalIgnoreCase));
+        var choices = new List<EditorChoice> { new(null, placeholder) };
+        if (selected is null && !string.IsNullOrWhiteSpace(target))
+        {
+            choices.Add(new(target, "Custom path or URL"));
+        }
+        choices.AddRange(applications.Select(application => new EditorChoice(application.Path, application.Name)));
+        SetControlOptions(applicationPicker, choices, selected?.Path ?? target);
+    }
+
+    private async Task LoadApplicationListAsync(RemoteComputer computer)
+    {
+        var key = ApplicationListKey(computer);
+        if (!loadingApplicationLists.Add(key))
+        {
             return;
         }
         try
         {
-            var applications = await store.LoadApplicationsAsync(computer);
-            var selected = ApplicationPickerDialog.Choose(this, applications);
-            if (selected is null)
-            {
-                return;
-            }
-            control.Action.Type = RemoteActionType.MacOpen;
-            control.Action.Text = selected.Path;
-            control.Action.ComputerID = computer.Id.ToString();
-            control.IconBitmap = selected.IconBitmap;
-            if (string.IsNullOrWhiteSpace(control.Title) || control.Title == "Open App or URL")
-            {
-                control.Title = selected.Name;
-            }
-            store.Commit();
+            applicationLists[key] = new(await store.LoadApplicationsAsync(computer), null);
         }
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
         {
-            MessageBox.Show(this, $"Could not load applications from {computer.Name}: {exception.Message}", "paperGIF", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            applicationLists[key] = new([], $"Couldn't load applications from {computer.Name}");
         }
+        finally
+        {
+            loadingApplicationLists.Remove(key);
+        }
+        if (!IsDisposed)
+        {
+            RefreshAll();
+        }
+    }
+
+    private void SetApplicationTarget(RemoteControl control, string target, string? suggestedTitle)
+    {
+        var previousTitle = ApplicationFor(control, control.Action.Text)?.Name ?? FileTitle(control.Action.Text);
+        control.Action.Text = target;
+        control.IconBitmap = ApplicationFor(control, target)?.IconBitmap;
+        if (!string.IsNullOrWhiteSpace(suggestedTitle) &&
+            (string.IsNullOrWhiteSpace(control.Title) || control.Title == "Open App or URL" || control.Title == previousTitle))
+        {
+            control.Title = suggestedTitle;
+        }
+    }
+
+    private static string? FileTitle(string target) =>
+        Path.IsPathFullyQualified(target) ? Path.GetFileNameWithoutExtension(target) : null;
+
+    private void BrowseForApplication()
+    {
+        if (store.SelectedControl is not { Action.Type: RemoteActionType.MacOpen } control)
+        {
+            return;
+        }
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Choose an application or file",
+            Filter = "Programs and shortcuts (*.exe;*.lnk;*.url;*.bat;*.cmd)|*.exe;*.lnk;*.url;*.bat;*.cmd|All files (*.*)|*.*",
+            DereferenceLinks = false,
+            CheckFileExists = true,
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+        };
+        var current = control.Action.Text;
+        if (FileTitle(current) is not null && Path.GetDirectoryName(current) is { } directory && Directory.Exists(directory))
+        {
+            dialog.InitialDirectory = directory;
+            dialog.FileName = Path.GetFileName(current);
+        }
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+        SetApplicationTarget(control, dialog.FileName, ApplicationFor(control, dialog.FileName)?.Name ?? FileTitle(dialog.FileName));
+        store.Commit();
     }
 
     private void EditSchedules()

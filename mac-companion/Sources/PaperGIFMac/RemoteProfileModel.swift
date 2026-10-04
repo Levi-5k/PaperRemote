@@ -56,6 +56,7 @@ struct RemoteOpenBuildsController: Codable, Equatable, Sendable {
     var jogMode: RemoteJogMode = .incremental
     var units: RemoteOpenBuildsUnits = .millimeters
     var jogDistanceThousandths = 1_000
+    var settingsSlot: Int?
 
     var jogDistanceTenths: Int {
         max(1, (jogDistanceThousandths + 50) / 100)
@@ -76,7 +77,7 @@ struct RemoteOpenBuildsController: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case host, jogSpeed, jogMode, units, jogDistanceTenths, jogDistanceThousandths
+        case host, jogSpeed, jogMode, units, jogDistanceTenths, jogDistanceThousandths, settingsSlot
     }
 
     init(from decoder: Decoder) throws {
@@ -88,11 +89,13 @@ struct RemoteOpenBuildsController: Codable, Equatable, Sendable {
         jogDistanceThousandths = try container.decodeIfPresent(
             Int.self, forKey: .jogDistanceThousandths
         ) ?? (try container.decodeIfPresent(Int.self, forKey: .jogDistanceTenths) ?? 10) * 100
+        settingsSlot = try container.decodeIfPresent(Int.self, forKey: .settingsSlot)
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(host, forKey: .host)
+        try container.encodeIfPresent(settingsSlot, forKey: .settingsSlot)
         try container.encode(jogSpeed, forKey: .jogSpeed)
         try container.encode(jogMode, forKey: .jogMode)
         try container.encode(units, forKey: .units)
@@ -376,26 +379,65 @@ enum RemoteGrid {
         return row * columns + column
     }
 
-    static func overlapsOpenBuildsSettings(
-        _ placement: RemoteGridPlacement,
-        columns: Int,
-        rows: Int
-    ) -> Bool {
-        let row = placement.slot / columns
-        let column = placement.slot % columns
-        let left = 24 + Double(column) * 504 / Double(columns)
-        let top = 142 + Double(row) * 712 / Double(rows)
-        let right = left + Double(placement.span.width) * 504 / Double(columns) - 12
-        let bottom = top + Double(placement.span.height) * 712 / Double(rows) - 12
-        return left < 516 && right > 364 && top < 722 && bottom > 292
+    // The settings panel content is 152x430 pt; it occupies whole cells, matching the firmware.
+    static func openBuildsSettingsSpan(columns: Int, rows: Int) -> RemoteGridSpan {
+        RemoteGridSpan(
+            width: min(columns, (164 * columns + 503) / 504),
+            height: min(rows, (442 * rows + 711) / 712)
+        )
+    }
+
+    static func openBuildsSettingsPlacement(slot: Int?, columns: Int, rows: Int) -> RemoteGridPlacement {
+        let span = openBuildsSettingsSpan(columns: columns, rows: rows)
+        if let slot, slot >= 0,
+           slot % columns + span.width <= columns,
+           slot / columns + span.height <= rows {
+            return RemoteGridPlacement(slot: slot, span: span)
+        }
+        let row = min((150 * rows + 711) / 712, rows - span.height)
+        return RemoteGridPlacement(slot: row * columns + columns - span.width, span: span)
+    }
+
+    static func openBuildsSettingsPlacement(for page: RemotePage) -> RemoteGridPlacement? {
+        guard page.layout == .openBuildsController else { return nil }
+        return openBuildsSettingsPlacement(
+            slot: page.openBuildsController?.settingsSlot,
+            columns: page.gridColumns,
+            rows: page.gridRows
+        )
+    }
+
+    static func reservedCells(for page: RemotePage) -> Set<Int> {
+        openBuildsSettingsPlacement(for: page).map { cells(for: $0, columns: page.gridColumns) } ?? []
+    }
+
+    /// New settings-panel slot (clamped onto the page), or nil if it would cover a control.
+    static func movedOpenBuildsSettings(
+        on page: RemotePage,
+        controls: [RemoteControl],
+        to requestedSlot: Int
+    ) -> Int? {
+        guard let current = openBuildsSettingsPlacement(for: page) else { return nil }
+        let columns = page.gridColumns
+        let rows = page.gridRows
+        let span = current.span
+        let column = min(max(requestedSlot % columns, 0), columns - span.width)
+        let row = min(max(requestedSlot / columns, 0), rows - span.height)
+        let moved = RemoteGridPlacement(slot: row * columns + column, span: span)
+        guard moved.slot != current.slot else { return nil }
+        let controlCells = placements(
+            for: controls, columns: columns, rows: rows, reserved: reservedCells(for: page)
+        ).compactMap { $0 }.reduce(into: Set<Int>()) { $0.formUnion(cells(for: $1, columns: columns)) }
+        return cells(for: moved, columns: columns).isDisjoint(with: controlCells) ? moved.slot : nil
     }
 
     static func placements(
         for controls: [RemoteControl],
         columns: Int,
-        rows: Int
+        rows: Int,
+        reserved: Set<Int> = []
     ) -> [RemoteGridPlacement?] {
-        var occupied: Set<Int> = []
+        var occupied = reserved
         var result = [RemoteGridPlacement?](repeating: nil, count: controls.count)
 
         func place(_ index: Int, at slot: Int) {
@@ -425,9 +467,9 @@ enum RemoteGrid {
         to requestedSlot: Int,
         columns: Int,
         rows: Int,
-        avoidingOpenBuildsSettings: Bool
+        reserved: Set<Int> = []
     ) -> [Int?]? {
-        let current = placements(for: controls, columns: columns, rows: rows)
+        let current = placements(for: controls, columns: columns, rows: rows, reserved: reserved)
         guard current.indices.contains(sourceIndex),
               let source = current[sourceIndex],
               let requested = placement(
@@ -452,15 +494,11 @@ enum RemoteGrid {
             return nil
         }
 
-        var occupied: Set<Int> = []
+        var occupied = reserved
         for index in slots.indices {
             guard let slot = slots[index] else { continue }
             guard let moved = placement(for: controls[index], at: slot, columns: columns, rows: rows),
                   moved.slot == slot else { return nil }
-            if avoidingOpenBuildsSettings, slot != current[index]?.slot,
-               overlapsOpenBuildsSettings(moved, columns: columns, rows: rows) {
-                return nil
-            }
             let movedCells = cells(for: moved, columns: columns)
             guard occupied.isDisjoint(with: movedCells) else { return nil }
             occupied.formUnion(movedCells)

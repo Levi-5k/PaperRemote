@@ -352,12 +352,12 @@ struct paperGIFTests {
             for: control, at: 33, columns: 9, rows: 14
         ))
 
-        #expect(!PaperGIFRemoteGrid.overlapsOpenBuildsSettings(
-            openPlacement, columns: 9, rows: 14
-        ))
-        #expect(PaperGIFRemoteGrid.overlapsOpenBuildsSettings(
-            railPlacement, columns: 9, rows: 14
-        ))
+        let rail = PaperGIFRemoteGrid.cells(
+            for: PaperGIFRemoteGrid.openBuildsSettingsPlacement(slot: nil, columns: 9, rows: 14),
+            columns: 9
+        )
+        #expect(PaperGIFRemoteGrid.cells(for: openPlacement, columns: 9).isDisjoint(with: rail))
+        #expect(!PaperGIFRemoteGrid.cells(for: railPlacement, columns: 9).isDisjoint(with: rail))
     }
 
     @Test func remoteDevicePayloadIncludesClockWithoutChangingStoredProfile() throws {

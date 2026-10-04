@@ -306,7 +306,7 @@ internal sealed class RemoteEditorStore : IDisposable
 
     private static GridPlacement?[] Placements(IReadOnlyList<RemoteControl> controls, RemotePage page)
     {
-        var occupied = new HashSet<int>();
+        var occupied = new HashSet<int>(ReservedCells(page));
         var result = new GridPlacement?[controls.Count];
         bool Place(int index, int slot)
         {
@@ -374,8 +374,7 @@ internal sealed class RemoteEditorStore : IDisposable
                 return null;
         }
 
-        var occupied = new HashSet<int>();
-        var avoidSettings = page.Layout == RemotePageLayout.OpenBuildsController;
+        var occupied = new HashSet<int>(ReservedCells(page));
         for (var index = 0; index < slots.Length; index++)
         {
             if (slots[index] is not { } slot)
@@ -383,11 +382,6 @@ internal sealed class RemoteEditorStore : IDisposable
                 continue;
             }
             if (Placement(controls[index], slot, page) is not { } moved || moved.Slot != slot)
-            {
-                return null;
-            }
-            if (avoidSettings && slot != current[index]?.Slot &&
-                OverlapsOpenBuildsSettings(moved, columns, page.GridRows))
             {
                 return null;
             }
@@ -581,6 +575,8 @@ internal sealed class RemoteEditorStore : IDisposable
         }
     }
 
+    public bool IsLocalComputer(RemoteComputer computer) => computer.Token == configuration.Token;
+
     public async Task<IReadOnlyList<RemoteApplication>> LoadApplicationsAsync(RemoteComputer computer)
     {
         using var request = new HttpRequestMessage(
@@ -768,7 +764,8 @@ internal sealed class RemoteEditorStore : IDisposable
         ],
     };
 
-    private static int LayoutUnits(RemotePage page) => page.Controls.Sum(control => LayoutUnits(control, page));
+    private static int LayoutUnits(RemotePage page) =>
+        ReservedCells(page).Count + page.Controls.Sum(control => LayoutUnits(control, page));
 
     private static int LayoutUnits(RemoteControl control, RemotePage page)
     {
@@ -817,15 +814,60 @@ internal sealed class RemoteEditorStore : IDisposable
         return cells;
     }
 
-    private static bool OverlapsOpenBuildsSettings(GridPlacement placement, int columns, int rows)
+    // The settings panel content is 152x430 px; it occupies whole cells, matching the firmware.
+    internal static (int Slot, int Width, int Height)? OpenBuildsSettingsBlock(RemotePage page)
     {
-        var row = placement.Slot / columns;
-        var column = placement.Slot % columns;
-        var left = 24 + column * 504d / columns;
-        var top = 142 + row * 712d / rows;
-        var right = left + placement.Width * 504d / columns - 12;
-        var bottom = top + placement.Height * 712d / rows - 12;
-        return left < 516 && right > 364 && top < 722 && bottom > 292;
+        if (page.Layout != RemotePageLayout.OpenBuildsController)
+        {
+            return null;
+        }
+        var columns = page.GridColumns;
+        var rows = page.GridRows;
+        var width = Math.Min(columns, (164 * columns + 503) / 504);
+        var height = Math.Min(rows, (442 * rows + 711) / 712);
+        if (page.OpenBuildsController?.SettingsSlot is { } slot && slot >= 0 &&
+            slot % columns + width <= columns && slot / columns + height <= rows)
+        {
+            return (slot, width, height);
+        }
+        var row = Math.Min((150 * rows + 711) / 712, rows - height);
+        return (row * columns + columns - width, width, height);
+    }
+
+    internal static HashSet<int> ReservedCells(RemotePage page) =>
+        OpenBuildsSettingsBlock(page) is { } block
+            ? Cells(new GridPlacement(block.Slot, block.Width, block.Height), page.GridColumns)
+            : [];
+
+    public void MoveOpenBuildsSettings(int requestedSlot)
+    {
+        var page = SelectedPage;
+        if (page is null || OpenBuildsSettingsBlock(page) is not { } current)
+        {
+            return;
+        }
+        var columns = page.GridColumns;
+        var column = Math.Clamp(requestedSlot % columns, 0, columns - current.Width);
+        var row = Math.Clamp(requestedSlot / columns, 0, page.GridRows - current.Height);
+        var moved = new GridPlacement(row * columns + column, current.Width, current.Height);
+        if (moved.Slot == current.Slot)
+        {
+            return;
+        }
+        var controls = page.Controls.Take(RemoteProfile.MaximumControlsPerPage).ToList();
+        var placements = Placements(controls, page);
+        var movedCells = Cells(moved, columns);
+        if (placements.Any(placement => placement is { } existing && movedCells.Overlaps(Cells(existing, columns))))
+        {
+            return;
+        }
+        for (var index = 0; index < placements.Length; index++)
+        {
+            controls[index].LayoutSlot = placements[index]?.Slot;
+        }
+        page.OpenBuildsController ??= new OpenBuildsControllerSettings();
+        page.OpenBuildsController.SettingsSlot = moved.Slot;
+        Commit();
     }
 
     internal static string? LocalIpv4Address()

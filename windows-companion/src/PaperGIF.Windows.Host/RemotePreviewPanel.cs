@@ -10,6 +10,9 @@ internal sealed class RemotePreviewPanel : Control
     private RemotePage? page;
     private Guid? draggedControlId;
     private int? draggedSourceSlot;
+    private bool draggingSettings;
+    private Rectangle settingsFrame;
+    private int settingsSlot = -1;
     private Point dragStart;
     private Rectangle gridFrame;
 
@@ -35,6 +38,7 @@ internal sealed class RemotePreviewPanel : Control
     public IReadOnlyList<string> PageNames { get; set; } = [];
     public event EventHandler<Guid>? ControlSelected;
     public event EventHandler<ControlMoveEventArgs>? ControlMoved;
+    public event EventHandler<int>? SettingsMoved;
 
     protected override void OnMouseDown(MouseEventArgs eventArgs)
     {
@@ -44,16 +48,23 @@ internal sealed class RemotePreviewPanel : Control
         draggedSourceSlot = draggedControlId is { } controlId && controlSlots.TryGetValue(controlId, out var slot)
             ? slot
             : null;
+        draggingSettings = draggedControlId is null && settingsSlot >= 0 &&
+            settingsFrame.Contains(eventArgs.Location);
+        if (draggingSettings)
+        {
+            draggedSourceSlot = settingsSlot;
+        }
         dragStart = eventArgs.Location;
     }
 
     protected override void OnMouseUp(MouseEventArgs eventArgs)
     {
         base.OnMouseUp(eventArgs);
-        if (draggedControlId is not { } controlId || draggedSourceSlot is not { } sourceSlot)
+        if ((draggedControlId is null && !draggingSettings) || draggedSourceSlot is not { } sourceSlot)
         {
             draggedControlId = null;
             draggedSourceSlot = null;
+            draggingSettings = false;
             return;
         }
         var columns = Math.Clamp(page?.GridColumns ?? 2, 1, 12);
@@ -68,10 +79,18 @@ internal sealed class RemotePreviewPanel : Control
         var row = sourceSlot / columns + rowOffset;
         if (column >= 0 && column < columns && row >= 0 && row < rows)
         {
-            ControlMoved?.Invoke(this, new ControlMoveEventArgs(controlId, row * columns + column));
+            if (draggingSettings)
+            {
+                SettingsMoved?.Invoke(this, row * columns + column);
+            }
+            else if (draggedControlId is { } controlId)
+            {
+                ControlMoved?.Invoke(this, new ControlMoveEventArgs(controlId, row * columns + column));
+            }
         }
         draggedControlId = null;
         draggedSourceSlot = null;
+        draggingSettings = false;
     }
 
     protected override void OnMouseClick(MouseEventArgs eventArgs)
@@ -130,6 +149,7 @@ internal sealed class RemotePreviewPanel : Control
 
         controlFrames.Clear();
         controlSlots.Clear();
+        settingsSlot = -1;
         if (page is null)
         {
             return;
@@ -184,6 +204,17 @@ internal sealed class RemotePreviewPanel : Control
         var columns = Math.Clamp(controllerPage.GridColumns, 1, 12);
         var rows = Math.Clamp(controllerPage.GridRows, 1, 16);
         var occupied = new bool[columns * rows];
+        var block = RemoteEditorStore.OpenBuildsSettingsBlock(controllerPage);
+        float ox = 364, oy = 292;
+        if (block is { } settingsBlock && columns == controllerPage.GridColumns && rows == controllerPage.GridRows)
+        {
+            MarkOccupied(settingsBlock.Slot, settingsBlock.Width, settingsBlock.Height, occupied, columns);
+            settingsSlot = settingsBlock.Slot;
+            ox = 24 + settingsBlock.Slot % columns * 504f / columns;
+            oy = 142 + settingsBlock.Slot / columns * 712f / rows;
+            settingsFrame = ScaleFrame(screen, new RectangleF(ox, oy, 152, 430));
+        }
+        RectangleF At(float x, float y, float width, float height) => new(ox + x - 364, oy + y - 292, width, height);
         foreach (var control in controllerPage.Controls.Take(RemoteProfile.MaximumControlsPerPage))
         {
             var (width, height) = Span(control, columns, rows);
@@ -207,22 +238,22 @@ internal sealed class RemotePreviewPanel : Control
         }
 
         var settings = controllerPage.OpenBuildsController ?? new OpenBuildsControllerSettings();
-        var rail = ScaleFrame(screen, new RectangleF(364, 292, 152, 430));
+        var rail = ScaleFrame(screen, At(364, 292, 152, 430));
         using var labelFont = new Font("Segoe UI Variable Text Semibold", Math.Max(6, screen.Width / 55f));
         using var detailFont = new Font("Segoe UI Variable Text", Math.Max(6, screen.Width / 58f));
         graphics.DrawString("UNITS", labelFont, Brushes.Black, rail.Left, rail.Top);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 326, 72, 42)),
+        DrawControllerChip(graphics, ScaleFrame(screen, At(364, 326, 72, 42)),
             "MM", settings.Units == OpenBuildsUnits.Mm, detailFont);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 326, 72, 42)),
+        DrawControllerChip(graphics, ScaleFrame(screen, At(444, 326, 72, 42)),
             "IN", settings.Units == OpenBuildsUnits.In, detailFont);
 
-        var speedLabel = ScaleFrame(screen, new RectangleF(364, 386, 152, 24));
+        var speedLabel = ScaleFrame(screen, At(364, 386, 152, 24));
         graphics.DrawString("JOG SPEED", labelFont, Brushes.Black, speedLabel);
         var speedText = $"{settings.JogSpeed} {(settings.Units == OpenBuildsUnits.In ? "in" : "mm")}/min";
         var speedSize = graphics.MeasureString(speedText, detailFont);
         graphics.DrawString(speedText, detailFont, Brushes.Black, rail.Right - speedSize.Width, speedLabel.Top);
 
-        var track = ScaleFrame(screen, new RectangleF(364, 416, 152, 38));
+        var track = ScaleFrame(screen, At(364, 416, 152, 38));
         using var trackOutline = new Pen(Color.Black, 1);
         EditorTheme.DrawRoundedRectangle(graphics, trackOutline, track, 5);
         var minimumSpeed = settings.Units == OpenBuildsUnits.In ? 4 : 100;
@@ -233,19 +264,19 @@ internal sealed class RemotePreviewPanel : Control
         fill.Width = Math.Max(2, (int)(fill.Width * progress));
         EditorTheme.FillRoundedRectangle(graphics, Brushes.Black, fill, 4);
 
-        var modeLabel = ScaleFrame(screen, new RectangleF(364, 474, 152, 24));
+        var modeLabel = ScaleFrame(screen, At(364, 474, 152, 24));
         graphics.DrawString("JOG MODE", labelFont, Brushes.Black, modeLabel);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(364, 502, 72, 42)),
+        DrawControllerChip(graphics, ScaleFrame(screen, At(364, 502, 72, 42)),
             "STEP", settings.JogMode == RemoteJogMode.Incremental, detailFont);
-        DrawControllerChip(graphics, ScaleFrame(screen, new RectangleF(444, 502, 72, 42)),
+        DrawControllerChip(graphics, ScaleFrame(screen, At(444, 502, 72, 42)),
             "HOLD", settings.JogMode == RemoteJogMode.Continuous, detailFont);
 
-        var distanceLabel = ScaleFrame(screen, new RectangleF(364, 568, 152, 24));
+        var distanceLabel = ScaleFrame(screen, At(364, 568, 152, 24));
         graphics.DrawString(settings.JogMode == RemoteJogMode.Continuous
             ? "RELEASE TO STOP" : "STEP DISTANCE", labelFont, Brushes.Black, distanceLabel);
         if (settings.JogMode == RemoteJogMode.Continuous)
         {
-            var help = ScaleFrame(screen, new RectangleF(364, 612, 152, 70));
+            var help = ScaleFrame(screen, At(364, 612, 152, 70));
             graphics.DrawString("Motion stops\nwhen released.", detailFont, Brushes.Black, help);
         }
         else
@@ -255,7 +286,7 @@ internal sealed class RemotePreviewPanel : Control
                 : new[] { (100, "0.1"), (1_000, "1"), (10_000, "10"), (100_000, "100") };
             for (var index = 0; index < distances.Length; index++)
             {
-                var chip = ScaleFrame(screen, new RectangleF(
+                var chip = ScaleFrame(screen, At(
                     364 + index % 2 * 80, 598 + index / 2 * 56, 72, 42));
                 DrawControllerChip(graphics, chip, distances[index].Item2,
                     settings.JogDistanceThousandths == distances[index].Item1, detailFont);

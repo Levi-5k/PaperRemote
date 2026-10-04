@@ -31,6 +31,7 @@
 #include "remote_computer.h"
 #include "remote_network_queue.h"
 #include "remote_schedule.h"
+#include "remote_text_layout.h"
 #include "screensaver_battery.h"
 #include "sleep_wake.h"
 #include "render_diagnostics.h"
@@ -374,6 +375,7 @@ struct RemotePage {
     bool openBuildsContinuous = false;
     bool openBuildsUseInches = false;
     uint32_t openBuildsJogDistanceThousandths = 1000;
+    int16_t openBuildsSettingsSlot = -1;
     RemoteControl controls[kMaximumRemoteControls];
     uint8_t controlCount = 0;
 };
@@ -1536,6 +1538,7 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
                 controllerJson["jogDistanceThousandths"] |
                     ((controllerJson["jogDistanceTenths"] | 10) * 100),
                 1, 100000);
+            page.openBuildsSettingsSlot = constrain(controllerJson["settingsSlot"] | -1, -1, 191);
         }
         for (JsonObject controlJson : pageJson["controls"].as<JsonArray>()) {
             if (page.controlCount >= kMaximumRemoteControls) {
@@ -4339,6 +4342,36 @@ struct RemoteControlFrame {
     int32_t height;
 };
 
+struct OpenBuildsSettingsBlock {
+    int32_t column;
+    int32_t row;
+    int32_t columns;
+    int32_t rows;
+    int32_t x;
+    int32_t y;
+};
+
+// The settings panel content is 152x430 px; it occupies whole grid cells.
+OpenBuildsSettingsBlock openBuildsSettingsBlock(const RemotePage& page) {
+    const int32_t gridColumns = page.gridColumns;
+    const int32_t gridRows = page.gridRows;
+    OpenBuildsSettingsBlock block = {};
+    block.columns = min<int32_t>(gridColumns, (164 * gridColumns + 503) / 504);
+    block.rows = min<int32_t>(gridRows, (442 * gridRows + 711) / 712);
+    const int32_t slot = page.openBuildsSettingsSlot;
+    if (slot >= 0 && slot % gridColumns + block.columns <= gridColumns &&
+        slot / gridColumns + block.rows <= gridRows) {
+        block.column = slot % gridColumns;
+        block.row = slot / gridColumns;
+    } else {
+        block.column = gridColumns - block.columns;
+        block.row = min<int32_t>((150 * gridRows + 711) / 712, gridRows - block.rows);
+    }
+    block.x = 24 + block.column * 504 / gridColumns;
+    block.y = 142 + block.row * 712 / gridRows;
+    return block;
+}
+
 bool remoteControlFrame(const RemotePage& page, size_t targetIndex, RemoteControlFrame& frame) {
     constexpr int32_t left = 24;
     constexpr int32_t top = 142;
@@ -4348,6 +4381,14 @@ bool remoteControlFrame(const RemotePage& page, size_t targetIndex, RemoteContro
     bool occupied[16][12] = {};
     bool placed[kMaximumRemoteControls] = {};
     RemoteControlFrame frames[kMaximumRemoteControls] = {};
+    if (page.openBuildsController) {
+        const OpenBuildsSettingsBlock block = openBuildsSettingsBlock(page);
+        for (int32_t row = block.row; row < block.row + block.rows; ++row) {
+            for (int32_t column = block.column; column < block.column + block.columns; ++column) {
+                occupied[row][column] = true;
+            }
+        }
+    }
 
     auto place = [&](size_t index, uint8_t row, uint8_t column) {
         const RemoteControl& control = page.controls[index];
@@ -4677,105 +4718,56 @@ bool layoutRemoteText(
     uint8_t horizontalAlignment,
     uint8_t verticalAlignment,
     bool draw) {
-    const int32_t lineHeight = M5.Display.fontHeight() + 4;
-    if (lineHeight > height) {
-        return false;
-    }
-    int16_t lineWidths[193] = {};
-    uint16_t lineCount = 1;
-    const int32_t spaceWidth = M5.Display.textWidth(" ");
-    const String content(text);
-    const auto performLayout = [&](bool render, int32_t verticalOffset) {
-        int32_t cursorX = 0;
-        int32_t cursorY = verticalOffset;
-        uint16_t lineIndex = 0;
-        const auto alignedX = [&]() {
-            if (horizontalAlignment == 1) {
-                return (width - lineWidths[lineIndex]) / 2;
-            }
-            return horizontalAlignment == 2 ? width - lineWidths[lineIndex] : 0;
-        };
-        const auto nextLine = [&]() {
-            if (!render) {
-                lineWidths[lineIndex] = cursorX;
-            }
-            cursorX = 0;
-            cursorY += lineHeight;
-            ++lineIndex;
-            return cursorY - verticalOffset + lineHeight <= height;
-        };
-        const auto renderWord = [&](const String& word) {
-            if (word.isEmpty()) {
-                return true;
-            }
-            const int32_t wordWidth = M5.Display.textWidth(word);
-            if (wordWidth <= width) {
-                if (cursorX > 0 && cursorX + wordWidth > width && !nextLine()) {
-                    return false;
-                }
-                if (render) {
-                    M5.Display.drawString(word, x + alignedX() + cursorX, y + cursorY);
-                }
-                cursorX += wordWidth;
-                return true;
-            }
-            for (size_t index = 0; index < word.length(); ++index) {
-                const String character(word[index]);
-                const int32_t characterWidth = M5.Display.textWidth(character);
-                if (cursorX > 0 && cursorX + characterWidth > width && !nextLine()) {
-                    return false;
-                }
-                if (render) {
-                    M5.Display.drawString(character, x + alignedX() + cursorX, y + cursorY);
-                }
-                cursorX += characterWidth;
-            }
-            return true;
-        };
-
-        String word;
-        for (size_t index = 0; index <= content.length(); ++index) {
-            const char character = index < content.length() ? content[index] : '\0';
-            if (character != ' ' && character != '\n' && character != '\0') {
-                word += character;
-                continue;
-            }
-            if (!renderWord(word)) {
-                return false;
-            }
-            word = "";
-            if (character == '\n' && index + 1 < content.length()) {
-                if (!nextLine()) {
-                    return false;
-                }
-            } else if (character == ' ' && cursorX > 0) {
-                if (cursorX + spaceWidth > width) {
-                    if (!nextLine()) {
-                        return false;
-                    }
-                } else {
-                    cursorX += spaceWidth;
-                }
-            }
-        }
-        if (!render) {
-            lineWidths[lineIndex] = cursorX;
-            lineCount = lineIndex + 1;
-        }
+    const int32_t lineHeight = M5.Display.fontHeight() +
+        max<int32_t>(1, static_cast<int32_t>(ceilf(4 * M5.Display.getTextSizeY())));
+    // Profile strings are at most 192 bytes. Stack-local scratch avoids both
+    // heap churn during size search and new static/internal-DRAM allocations.
+    char span[193];
+    const auto copySpan = [&](size_t start, size_t bytes) {
+        if (bytes >= sizeof(span)) return false;
+        memcpy(span, text + start, bytes);
+        span[bytes] = '\0';
         return true;
     };
-
-    if (!performLayout(false, 0)) {
+    const auto measure = [&](size_t start, size_t bytes) -> int32_t {
+        return copySpan(start, bytes) ? M5.Display.textWidth(span) : -1;
+    };
+    size_t lineCount = 0;
+    if (!remote_text_layout::wrap(text, width, height, lineHeight, measure,
+        [](size_t, size_t, int32_t, size_t) {}, lineCount)) {
         return false;
     }
-    if (!draw) {
-        return true;
-    }
+    if (!draw) return true;
     const int32_t textHeight = lineCount * lineHeight;
     const int32_t verticalOffset = verticalAlignment == 1
         ? (height - textHeight) / 2
         : verticalAlignment == 2 ? height - textHeight : 0;
-    return performLayout(true, verticalOffset);
+    return remote_text_layout::wrap(text, width, height, lineHeight, measure,
+        [&](size_t start, size_t bytes, int32_t lineWidth, size_t line) {
+            if (!bytes || !copySpan(start, bytes)) return;
+            const int32_t offsetX = horizontalAlignment == 1
+                ? (width - lineWidth) / 2 : horizontalAlignment == 2 ? width - lineWidth : 0;
+            M5.Display.drawString(span, x + offsetX, y + verticalOffset + line * lineHeight);
+        }, lineCount);
+}
+
+void drawFittedRemoteTitle(const char* text, int32_t x, int32_t y,
+                          int32_t width, int32_t height, uint8_t alignment) {
+    const float previousX = M5.Display.getTextSizeX();
+    const float previousY = M5.Display.getTextSizeY();
+    M5.Display.setFont(&fonts::FreeSansBold9pt7b);
+    // 1/16 increments through 2.625x (~24pt). Measure the actual display font
+    // at every candidate, including bearings, wrapped lines and scaled spacing.
+    const int step = remote_text_layout::largestFit(42, [&](int candidate) {
+        M5.Display.setTextSize(candidate / 16.0f);
+        return layoutRemoteText(text, 0, 0, width, height, alignment, 1, false);
+    });
+    if (step > 0) {
+        M5.Display.setTextSize(step / 16.0f);
+        M5.Display.setTextDatum(textdatum_t::top_left);
+        layoutRemoteText(text, x, y, width, height, alignment, 1, true);
+    }
+    M5.Display.setTextSize(previousX, previousY);
 }
 
 void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = false) {
@@ -4791,37 +4783,6 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
     const int32_t y = frame.y;
     const int32_t width = frame.width;
     const int32_t height = frame.height;
-
-    if (page.openBuildsController && strcmp(control.action.type, "openBuilds") == 0 &&
-        control.kind == 0) {
-        const uint32_t foreground = pressed ? TFT_WHITE : TFT_BLACK;
-        const uint32_t background = pressed ? TFT_BLACK : TFT_WHITE;
-        M5.Display.fillRoundRect(x, y, width, height, 8, background);
-        if (!pressed) {
-            M5.Display.drawRoundRect(x, y, width, height, 8, foreground);
-        }
-        M5.Display.setTextColor(foreground, background);
-        M5.Display.setFont(&fonts::FreeSansBold9pt7b);
-        if (control.gridHeight == 1) {
-            drawRemoteControlIcon(control.symbol,
-                control.hasIconBitmap ? control.iconBitmap : nullptr,
-                control.iconDimension,
-                x + 24, y + height / 2, control.hasIconBitmap ? 28 : 18,
-                foreground, background);
-            M5.Display.setTextDatum(textdatum_t::middle_left);
-            M5.Display.drawString(control.title, x + 46, y + height / 2);
-        } else {
-            drawRemoteControlIcon(control.symbol,
-                control.hasIconBitmap ? control.iconBitmap : nullptr,
-                control.iconDimension,
-                x + width / 2, y + 40, control.hasIconBitmap ? 42 : 30,
-                foreground, background);
-            M5.Display.setTextDatum(textdatum_t::middle_center);
-            M5.Display.drawCenterString(control.title, x + width / 2, y + 76);
-        }
-        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        return;
-    }
 
     if (control.kind == 2) {
         constexpr int32_t radius = 10;
@@ -4927,6 +4888,8 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
                 TFT_WHITE);
         }
         M5.Display.drawRoundRect(x, y, width, height, radius, TFT_BLACK);
+        const auto sliderLayout = remote_text_layout::buttonLayout(width, height,
+            control.hasIconBitmap || control.symbol[0] != '\0', true);
         const auto drawSliderContent = [&](uint32_t foreground, uint32_t background) {
             M5.Display.setTextColor(foreground);
             if (mediaSeekControl) {
@@ -4962,16 +4925,17 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
                     true);
                 return;
             }
-            M5.Display.setFont(&fonts::FreeSansBold12pt7b);
-            drawRemoteControlIcon(control.symbol,
-                control.hasIconBitmap ? control.iconBitmap : nullptr,
-                control.iconDimension,
-                x + 28, y + height / 2, control.hasIconBitmap ? 32 : 18,
-                foreground, background);
-            M5.Display.setTextDatum(textdatum_t::middle_left);
-            M5.Display.drawString(control.title, x + 50, y + height / 2);
+            if (sliderLayout.iconSize > 0) {
+                drawRemoteControlIcon(control.symbol,
+                    control.hasIconBitmap ? control.iconBitmap : nullptr,
+                    control.iconDimension,
+                    x + sliderLayout.iconX, y + sliderLayout.iconY, sliderLayout.iconSize,
+                    foreground, background);
+            }
+            auto titleArea = sliderLayout.title;
             if (strcmp(control.action.type, "netHomeTemperature") == 0 ||
                 strcmp(control.action.type, "netHomeFan") == 0) {
+                const auto valueArea = remote_text_layout::reserveValue(titleArea);
                 char valueText[24];
                 if (strcmp(control.action.type, "netHomeTemperature") == 0) {
                     const bool fahrenheit = remoteProfile != nullptr && remoteProfile->useFahrenheit;
@@ -4982,23 +4946,34 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
                 } else if (strcmp(control.action.type, "netHomeFan") == 0) {
                     snprintf(valueText, sizeof(valueText), "%d%%", control.action.value);
                 }
-                M5.Display.setTextDatum(textdatum_t::middle_right);
-                M5.Display.drawString(valueText, x + width - 18, y + height / 2);
+                drawFittedRemoteTitle(valueText, x + valueArea.x, y + valueArea.y,
+                    valueArea.width, valueArea.height, 2);
             }
+            drawFittedRemoteTitle(control.title, x + titleArea.x, y + titleArea.y,
+                titleArea.width, titleArea.height, 0);
         };
+        const auto& content = sliderLayout.content;
+        if (content.width <= 0 || content.height <= 0) return;
+        M5.Display.setClipRect(x + content.x, y + content.y, content.width, content.height);
         drawSliderContent(TFT_BLACK, TFT_WHITE);
         if (fillWidth > 0 && !outlinedSlider) {
-            M5.Display.setClipRect(x + inset, y + inset, fillWidth, height - inset * 2);
-            drawSliderContent(TFT_WHITE, TFT_BLACK);
-            M5.Display.clearClipRect();
+            const int32_t clippedRight = min<int32_t>(inset + fillWidth, content.x + content.width);
+            if (clippedRight > content.x) {
+                M5.Display.setClipRect(x + content.x, y + content.y,
+                    clippedRight - content.x, content.height);
+                drawSliderContent(TFT_WHITE, TFT_BLACK);
+            }
         }
+        M5.Display.clearClipRect();
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
         return;
     }
 
     const bool playbackControl = isMediaPlayPauseControl(control);
     const bool playbackStateAvailable = playbackControl && control.hasResolvedValue;
-    const bool active = control.toggle && !playbackControl
+    const bool openBuildsButton = page.openBuildsController && control.kind == 0 &&
+        strcmp(control.action.type, "openBuilds") == 0;
+    const bool active = control.toggle && !playbackControl && !openBuildsButton
         ? control.toggleOn : pressed;
     const char* displayedTitle = playbackStateAvailable
         ? (control.toggleOn ? "Pause" : "Play")
@@ -5008,30 +4983,27 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
         : control.symbol;
     const uint32_t foreground = active ? TFT_WHITE : TFT_BLACK;
     const uint32_t background = active ? TFT_BLACK : TFT_WHITE;
-    constexpr int32_t radius = 10;
+    const int32_t radius = min<int32_t>(openBuildsButton ? 8 : 10, min(width, height) / 2);
     M5.Display.fillRoundRect(x, y, width, height, radius, background);
     if (!active) {
         M5.Display.drawRoundRect(x, y, width, height, radius, foreground);
     }
     M5.Display.setTextColor(foreground, background);
-    M5.Display.setFont(&fonts::FreeSansBold12pt7b);
-    if (control.gridHeight == 1) {
+    const auto layout = remote_text_layout::buttonLayout(width, height,
+        (!playbackStateAvailable && control.hasIconBitmap) || displayedSymbol[0] != '\0');
+    if (layout.content.width <= 0 || layout.content.height <= 0) return;
+    M5.Display.setClipRect(x + layout.content.x, y + layout.content.y,
+        layout.content.width, layout.content.height);
+    if (layout.iconSize > 0) {
         drawRemoteControlIcon(displayedSymbol,
             playbackStateAvailable || !control.hasIconBitmap ? nullptr : control.iconBitmap,
             playbackStateAvailable ? 0 : control.iconDimension,
-            x + 28, y + height / 2, !playbackStateAvailable && control.hasIconBitmap ? 32 : 18,
+            x + layout.iconX, y + layout.iconY, layout.iconSize,
             foreground, background);
-        M5.Display.setTextDatum(textdatum_t::middle_left);
-        M5.Display.drawString(displayedTitle, x + 50, y + height / 2);
-    } else {
-        M5.Display.setTextDatum(textdatum_t::middle_center);
-        drawRemoteControlIcon(displayedSymbol,
-            playbackStateAvailable || !control.hasIconBitmap ? nullptr : control.iconBitmap,
-            playbackStateAvailable ? 0 : control.iconDimension,
-            x + width / 2, y + 52, !playbackStateAvailable && control.hasIconBitmap ? 64 : 28,
-            foreground, background);
-        M5.Display.drawCenterString(displayedTitle, x + width / 2, y + 116);
     }
+    drawFittedRemoteTitle(displayedTitle, x + layout.title.x, y + layout.title.y,
+        layout.title.width, layout.title.height, layout.horizontal ? 0 : 1);
+    M5.Display.clearClipRect();
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
 }
 
@@ -5315,38 +5287,40 @@ void drawRemoteIconLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
 }
 
 void drawOpenBuildsControllerSettings(const RemotePage& page) {
-    constexpr int32_t x = 364;
+    const OpenBuildsSettingsBlock block = openBuildsSettingsBlock(page);
+    const int32_t x = block.x;
+    const int32_t y = block.y;
     constexpr int32_t width = 152;
-    M5.Display.fillRect(x, 292, width, 430, TFT_WHITE);
+    M5.Display.fillRect(x, y, width, 430, TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     M5.Display.setTextDatum(textdatum_t::top_left);
     M5.Display.setFont(&fonts::FreeSansBold9pt7b);
-    M5.Display.drawString("UNITS", x, 298);
+    M5.Display.drawString("UNITS", x, y + 6);
     const char* unitLabels[] = {"MM", "IN"};
     for (uint8_t index = 0; index < 2; ++index) {
         const int32_t segmentX = x + index * 80;
         const bool selected = page.openBuildsUseInches == (index == 1);
-        M5.Display.fillRoundRect(segmentX, 326, 72, 42, 7,
+        M5.Display.fillRoundRect(segmentX, y + 34, 72, 42, 7,
             selected ? TFT_BLACK : TFT_WHITE);
         if (!selected) {
-            M5.Display.drawRoundRect(segmentX, 326, 72, 42, 7, TFT_BLACK);
+            M5.Display.drawRoundRect(segmentX, y + 34, 72, 42, 7, TFT_BLACK);
         }
         M5.Display.setTextColor(selected ? TFT_WHITE : TFT_BLACK,
             selected ? TFT_BLACK : TFT_WHITE);
         M5.Display.setTextDatum(textdatum_t::middle_center);
-        M5.Display.drawCenterString(unitLabels[index], segmentX + 36, 347);
+        M5.Display.drawCenterString(unitLabels[index], segmentX + 36, y + 55);
     }
 
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     M5.Display.setTextDatum(textdatum_t::top_left);
-    M5.Display.drawString("JOG SPEED", x, 386);
+    M5.Display.drawString("JOG SPEED", x, y + 94);
     char speedText[20];
     snprintf(speedText, sizeof(speedText), "%u %s/min", page.openBuildsJogSpeed,
         page.openBuildsUseInches ? "in" : "mm");
     M5.Display.setTextDatum(textdatum_t::top_right);
-    M5.Display.drawString(speedText, x + width, 386);
+    M5.Display.drawString(speedText, x + width, y + 94);
 
-    constexpr int32_t sliderY = 416;
+    const int32_t sliderY = y + 124;
     M5.Display.drawRoundRect(x, sliderY, width, 38, 8, TFT_BLACK);
     const uint16_t minimumSpeed = page.openBuildsUseInches ? 4 : 100;
     const uint16_t maximumSpeed = page.openBuildsUseInches ? 400 : 10000;
@@ -5358,8 +5332,8 @@ void drawOpenBuildsControllerSettings(const RemotePage& page) {
     }
 
     M5.Display.setTextDatum(textdatum_t::top_left);
-    M5.Display.drawString("JOG MODE", x, 474);
-    const int32_t segmentY = 502;
+    M5.Display.drawString("JOG MODE", x, y + 182);
+    const int32_t segmentY = y + 210;
     const int32_t segmentWidth = 72;
     const char* modeLabels[] = {"STEP", "HOLD"};
     for (uint8_t index = 0; index < 2; ++index) {
@@ -5378,11 +5352,11 @@ void drawOpenBuildsControllerSettings(const RemotePage& page) {
 
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     M5.Display.setTextDatum(textdatum_t::top_left);
-    M5.Display.drawString(page.openBuildsContinuous ? "RELEASE TO STOP" : "STEP DISTANCE", x, 568);
+    M5.Display.drawString(page.openBuildsContinuous ? "RELEASE TO STOP" : "STEP DISTANCE", x, y + 276);
     if (page.openBuildsContinuous) {
         M5.Display.setFont(&fonts::FreeSans12pt7b);
-        M5.Display.drawString("Motion stops", x, 612);
-        M5.Display.drawString("when released.", x, 644);
+        M5.Display.drawString("Motion stops", x, y + 320);
+        M5.Display.drawString("when released.", x, y + 352);
     } else {
         const uint32_t metricDistances[] = {100, 1000, 10000, 100000};
         const uint32_t inchDistances[] = {1, 10, 100, 1000};
@@ -5392,7 +5366,7 @@ void drawOpenBuildsControllerSettings(const RemotePage& page) {
         const char** labels = page.openBuildsUseInches ? inchLabels : metricLabels;
         for (uint8_t index = 0; index < 4; ++index) {
             const int32_t chipX = x + (index % 2) * 80;
-            const int32_t chipY = 598 + (index / 2) * 56;
+            const int32_t chipY = y + 306 + (index / 2) * 56;
             const bool selected = page.openBuildsJogDistanceThousandths == distances[index];
             M5.Display.fillRoundRect(chipX, chipY, 72, 42, 7,
                 selected ? TFT_BLACK : TFT_WHITE);
@@ -5406,7 +5380,7 @@ void drawOpenBuildsControllerSettings(const RemotePage& page) {
         }
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
         M5.Display.setTextDatum(textdatum_t::top_right);
-        M5.Display.drawString(page.openBuildsUseInches ? "in" : "mm", x + width, 700);
+        M5.Display.drawString(page.openBuildsUseInches ? "in" : "mm", x + width, y + 408);
     }
 }
 
@@ -8563,8 +8537,12 @@ void handleTouch() {
     if (remoteVisible) {
         lastRemoteActivityAt = millis();
         RemotePage& page = remoteProfile->pages[remotePageIndex];
-        if (page.openBuildsController && touch.x >= 354 && touch.x < 526 &&
-            touch.y >= 284 && touch.y < 730) {
+        const OpenBuildsSettingsBlock settings = page.openBuildsController
+            ? openBuildsSettingsBlock(page) : OpenBuildsSettingsBlock{};
+        const int32_t panelX = settings.x;
+        const int32_t panelY = settings.y;
+        if (page.openBuildsController && touch.x >= panelX - 10 && touch.x < panelX + 162 &&
+            touch.y >= panelY - 8 && touch.y < panelY + 438) {
             if (activeRemoteContinuousJog && activeRemoteControlIndex >= 0 &&
                 activeRemoteControlIndex < page.controlCount) {
                 if (cancelOpenBuildsContinuousJog(page.controls[activeRemoteControlIndex])) {
@@ -8573,8 +8551,8 @@ void handleTouch() {
                     activeRemoteControlVisual = false;
                 }
             }
-            if (touch.wasClicked() && touch.y >= 316 && touch.y < 378) {
-                const bool nextUseInches = touch.x >= 440;
+            if (touch.wasClicked() && touch.y >= panelY + 24 && touch.y < panelY + 86) {
+                const bool nextUseInches = touch.x >= panelX + 76;
                 if (nextUseInches != page.openBuildsUseInches) {
                     const uint32_t physicalTenthsMicrons = page.openBuildsUseInches
                         ? page.openBuildsJogDistanceThousandths * 254
@@ -8603,9 +8581,9 @@ void handleTouch() {
                     redrawOpenBuildsControllerSettings(page);
                 }
             } else if ((touch.wasPressed() || touch.isPressed()) &&
-                touch.y >= 406 && touch.y < 466) {
+                touch.y >= panelY + 114 && touch.y < panelY + 174) {
                 const int32_t sliderPosition = constrain(
-                    static_cast<int32_t>(touch.x - 364), static_cast<int32_t>(0), static_cast<int32_t>(152));
+                    static_cast<int32_t>(touch.x - panelX), static_cast<int32_t>(0), static_cast<int32_t>(152));
                 const int32_t minimumSpeed = page.openBuildsUseInches ? 4 : 100;
                 const int32_t maximumSpeed = page.openBuildsUseInches ? 400 : 10000;
                 const int32_t speedStep = page.openBuildsUseInches ? 4 : 100;
@@ -8618,16 +8596,16 @@ void handleTouch() {
                     page.openBuildsJogSpeed = nextSpeed;
                     redrawOpenBuildsControllerSettings(page);
                 }
-            } else if (touch.wasClicked() && touch.y >= 492 && touch.y < 560) {
-                const bool continuous = touch.x >= 440;
+            } else if (touch.wasClicked() && touch.y >= panelY + 200 && touch.y < panelY + 268) {
+                const bool continuous = touch.x >= panelX + 76;
                 if (continuous != page.openBuildsContinuous) {
                     page.openBuildsContinuous = continuous;
                     redrawOpenBuildsControllerSettings(page);
                 }
             } else if (touch.wasClicked() && !page.openBuildsContinuous &&
-                touch.y >= 588 && touch.y < 710) {
-                const uint8_t column = touch.x >= 440 ? 1 : 0;
-                const uint8_t row = touch.y >= 647 ? 1 : 0;
+                touch.y >= panelY + 296 && touch.y < panelY + 418) {
+                const uint8_t column = touch.x >= panelX + 76 ? 1 : 0;
+                const uint8_t row = touch.y >= panelY + 355 ? 1 : 0;
                 const uint32_t metricDistances[] = {100, 1000, 10000, 100000};
                 const uint32_t inchDistances[] = {1, 10, 100, 1000};
                 const uint32_t* distances = page.openBuildsUseInches

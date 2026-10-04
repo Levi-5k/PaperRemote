@@ -1762,7 +1762,8 @@ private struct PaperGIFRemotePageThumbnail: View {
                 let placements = PaperGIFRemoteGrid.placements(
                     for: page.controls,
                     columns: page.gridColumns,
-                    rows: page.gridRows
+                    rows: page.gridRows,
+                    reserved: PaperGIFRemoteGrid.reservedCells(for: page)
                 )
                 ZStack(alignment: .topLeading) {
                     ForEach(Array(page.controls.enumerated()), id: \.element.id) { index, _ in
@@ -1812,6 +1813,7 @@ private struct PaperGIFRemotePagePreview: View {
     let onEditControl: (UUID) -> Void
     @State private var draggedControlID: UUID?
     @State private var dragLocation: CGPoint?
+    @State private var settingsDragLocation: CGPoint?
 
     var body: some View {
         GeometryReader { geometry in
@@ -1845,7 +1847,19 @@ private struct PaperGIFRemotePagePreview: View {
                     .position(x: 270 * scale, y: 106 * scale)
 
                 if page.layout == .openBuildsController {
-                    PaperGIFOpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
+                    if let settings = PaperGIFRemoteGrid.openBuildsSettingsPlacement(for: page) {
+                        let frame = CGRect(
+                            x: (24 + CGFloat(settings.slot % page.gridColumns) * 504 / CGFloat(page.gridColumns)) * scale,
+                            y: (142 + CGFloat(settings.slot / page.gridColumns) * 712 / CGFloat(page.gridRows)) * scale,
+                            width: 152 * scale,
+                            height: 430 * scale
+                        )
+                        PaperGIFOpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
+                            .contentShape(Rectangle())
+                            .position(settingsDragLocation ?? center(of: frame))
+                            .zIndex(settingsDragLocation == nil ? 0 : 1)
+                            .simultaneousGesture(settingsGesture(frame: frame, scale: scale))
+                    }
                     ForEach(Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
                         previewControl(control, frame: frames[index], scale: scale, controllerCompact: true)
                             .contentShape(Rectangle())
@@ -2166,6 +2180,48 @@ private struct PaperGIFRemoteTabsPreview: View {
             }
     }
 
+    private func settingsGesture(frame: CGRect, scale: CGFloat) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.25)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("remotePreview")))
+            .onChanged { value in
+                guard case let .second(true, drag?) = value else { return }
+                settingsDragLocation = CGPoint(
+                    x: frame.midX + drag.translation.width,
+                    y: frame.midY + drag.translation.height
+                )
+            }
+            .onEnded { value in
+                if case let .second(true, drag?) = value,
+                   let destinationSlot = translatedSlot(
+                       from: frame,
+                       translation: drag.translation,
+                       scale: scale
+                   ) {
+                    moveSettings(to: destinationSlot)
+                }
+                settingsDragLocation = nil
+            }
+    }
+
+    private func moveSettings(to requestedSlot: Int) {
+        let controls = Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage))
+        guard let slot = PaperGIFRemoteGrid.movedOpenBuildsSettings(
+            on: page, controls: controls, to: requestedSlot
+        ) else { return }
+        let pinned = PaperGIFRemoteGrid.placements(
+            for: controls, columns: page.gridColumns, rows: page.gridRows,
+            reserved: PaperGIFRemoteGrid.reservedCells(for: page)
+        )
+        var updated = page
+        for index in pinned.indices {
+            updated.controls[index].layoutSlot = pinned[index]?.slot
+        }
+        var controller = updated.openBuildsController ?? PaperGIFOpenBuildsController()
+        controller.settingsSlot = slot
+        updated.openBuildsController = controller
+        page = updated
+    }
+
     private func center(of frame: CGRect) -> CGPoint {
         CGPoint(x: frame.midX, y: frame.midY)
     }
@@ -2198,7 +2254,7 @@ private struct PaperGIFRemoteTabsPreview: View {
                   to: requestedSlot,
                   columns: page.gridColumns,
                   rows: page.gridRows,
-                  avoidingOpenBuildsSettings: page.layout == .openBuildsController
+                  reserved: PaperGIFRemoteGrid.reservedCells(for: page)
               ) else { return }
         var updated = page.controls
         for index in slots.indices {
@@ -2216,7 +2272,8 @@ private struct PaperGIFRemoteTabsPreview: View {
     private func controlFrames(scale: CGFloat) -> [CGRect] {
         let controls = Array(page.controls.prefix(PaperGIFRemoteProfile.maximumControlsPerPage))
         return PaperGIFRemoteGrid.placements(
-            for: controls, columns: page.gridColumns, rows: page.gridRows
+            for: controls, columns: page.gridColumns, rows: page.gridRows,
+            reserved: PaperGIFRemoteGrid.reservedCells(for: page)
         ).map { placement in
             guard let placement else { return .zero }
             let row = placement.slot / page.gridColumns
@@ -2289,8 +2346,8 @@ private struct PaperGIFOpenBuildsSettingsPreview: View {
             }
         }
         .foregroundStyle(.black)
-        .frame(width: 152 * scale, alignment: .topLeading)
-        .position(x: 440 * scale, y: 507 * scale)
+        .frame(width: 152 * scale, height: 430 * scale, alignment: .topLeading)
+        .background(Color.white)
     }
 
     private func chip(_ title: String, selected: Bool) -> some View {

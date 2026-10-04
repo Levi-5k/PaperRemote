@@ -28,6 +28,10 @@ internal sealed class WindowsApplicationCatalog
             foreach (var path in paths)
             {
                 var name = Path.GetFileNameWithoutExtension(path);
+                if (name.StartsWith("Uninstall", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
                 applications.TryAdd(name, new InstalledApplication(name, path, null));
             }
         }

@@ -312,7 +312,8 @@ private struct RemoteEditorView: View {
                         store.selectedControlID = id
                         inspectorTab = .control
                     },
-                    onMove: store.moveControl
+                    onMove: store.moveControl,
+                    onMoveSettings: store.moveOpenBuildsSettings
                 )
                 .padding(.horizontal, 18)
                 .padding(.bottom, 14)
@@ -351,6 +352,7 @@ private struct RemoteEditorView: View {
                     control: binding,
                     pages: store.profile.pages,
                     computers: store.profile.computers,
+                    localComputerToken: store.localComputer.token,
                     modules: moduleCatalog.installedModules.filter { $0.runtime != nil },
                     matterDevices: matterDevices,
                     temperatureUnit: store.profile.temperatureUnit,
@@ -673,8 +675,10 @@ private struct ModulesPanel: View {
 private struct ControlInspector: View {
     @Binding var control: RemoteControl
     @ObservedObject private var homeAccessories = HomeAccessoryCatalog.shared
+    @StateObject private var applicationCatalog = RemoteApplicationCatalog()
     let pages: [RemotePage]
     let computers: [RemoteComputer]
+    let localComputerToken: String
     let modules: [PaperModuleManifest]
     @ObservedObject var matterDevices: MatterDeviceManager
     let temperatureUnit: RemoteTemperatureUnit
@@ -981,7 +985,7 @@ private struct ControlInspector: View {
             }
             .toggleStyle(.checkbox)
         case .macOpen:
-            LabeledContent("Target") { TextField("URL, app bundle ID, or path", text: openTargetBinding) }
+            applicationFields
         case .macShortcut:
             LabeledContent("Name") { TextField("Shortcut name", text: $control.action.text) }
         case .macScript:
@@ -1231,6 +1235,100 @@ private struct ControlInspector: View {
         LabeledContent("NetHome unit") {
             TextField("Room or East bedroom", text: $control.action.host)
         }
+    }
+
+    @ViewBuilder private var applicationFields: some View {
+        LabeledContent("Application") {
+            Picker("", selection: applicationSelectionBinding) {
+                Text(applicationCatalog.isLoading ? "Loading applications…" : "Choose an application").tag("")
+                if !control.action.text.isEmpty, application(at: control.action.text) == nil {
+                    Text("Custom path or URL").tag(control.action.text)
+                }
+                ForEach(applicationCatalog.applications) { application in
+                    Text(application.name).tag(application.path)
+                }
+            }
+            .labelsHidden()
+        }
+        .task(id: applicationComputerKey) {
+            await applicationCatalog.load(from: applicationComputer)
+        }
+        if let message = applicationCatalog.message {
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        LabeledContent("Path or URL") {
+            HStack {
+                TextField("App path, bundle ID, or URL", text: openTargetBinding)
+                Button("Browse…", action: browseForApplication)
+                    .disabled(!targetsThisMac)
+                    .help(targetsThisMac ? "Choose an app or file on this Mac" : "Browsing is only available when targeting this Mac")
+            }
+        }
+    }
+
+    private var applicationComputer: RemoteComputer? {
+        if let computerID = control.action.computerID,
+           let computer = computers.first(where: { $0.id.uuidString == computerID }) {
+            return computer
+        }
+        return computers.first
+    }
+
+    private var applicationComputerKey: String? {
+        applicationComputer.map { "\($0.id.uuidString)|\($0.host)|\($0.port)|\($0.token)" }
+    }
+
+    private var targetsThisMac: Bool {
+        applicationComputer.map { $0.token == localComputerToken } ?? true
+    }
+
+    private func application(at path: String) -> RemoteApplicationCatalog.Application? {
+        applicationCatalog.applications.first { $0.path == path }
+    }
+
+    private var applicationSelectionBinding: Binding<String> {
+        Binding(
+            get: { control.action.text },
+            set: { path in
+                guard !path.isEmpty else { return }
+                setApplicationTarget(path, suggestedTitle: application(at: path)?.name)
+            }
+        )
+    }
+
+    private func setApplicationTarget(_ target: String, suggestedTitle: String?) {
+        let previousTitle = application(at: control.action.text)?.name ?? Self.fileTitle(control.action.text)
+        control.action.text = target
+        control.iconBitmap = application(at: target)?.iconBitmap
+        let title = control.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let suggestedTitle, !suggestedTitle.isEmpty,
+           title.isEmpty || title == "Open App or URL" || title == previousTitle {
+            control.title = suggestedTitle
+        }
+    }
+
+    private static func fileTitle(_ target: String) -> String? {
+        let isPath = target.hasPrefix("/") || target.dropFirst().hasPrefix(":\\")
+        guard isPath, let name = target.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last else { return nil }
+        return (String(name) as NSString).deletingPathExtension
+    }
+
+    private func browseForApplication() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose an Application or File"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.directoryURL = control.action.text.hasPrefix("/")
+            ? URL(fileURLWithPath: control.action.text).deletingLastPathComponent()
+            : URL(fileURLWithPath: "/Applications", isDirectory: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let path = url.standardizedFileURL.path
+        setApplicationTarget(path, suggestedTitle: application(at: path)?.name ?? Self.fileTitle(path))
     }
 
     @ViewBuilder private var wledDeviceFields: some View {
@@ -1702,7 +1800,7 @@ private struct ControlInspector: View {
             get: { control.action.text },
             set: {
                 control.action.text = $0
-                control.iconBitmap = nil
+                control.iconBitmap = application(at: $0)?.iconBitmap
             }
         )
     }
@@ -2127,6 +2225,7 @@ private struct DevicePreview: View {
     let selectedControlID: UUID?
     let onSelect: (UUID) -> Void
     let onMove: (UUID, Int) -> Void
+    let onMoveSettings: (Int) -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -2147,7 +2246,21 @@ private struct DevicePreview: View {
                 .padding(.top, 55 * scale)
 
                 if page.layout == .openBuildsController {
-                    OpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
+                    if let settings = RemoteGrid.openBuildsSettingsPlacement(for: page) {
+                        let origin = RemoteLayout.origin(of: settings.slot, page: page)
+                        OpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
+                            .position(x: (origin.x + 76) * scale, y: (origin.y + 215) * scale)
+                            .gesture(DragGesture(minimumDistance: 8).onEnded { drag in
+                                guard let slot = RemoteLayout.translatedSlot(
+                                    from: CGRect(origin: origin, size: .zero),
+                                    translation: drag.translation,
+                                    scale: scale,
+                                    page: page
+                                ) else { return }
+                                onMoveSettings(slot)
+                            })
+                            .help("Drag to move the jog settings")
+                    }
                     ForEach(Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
                         let frame = frames[index]
                         PreviewControl(
@@ -2282,8 +2395,9 @@ private struct OpenBuildsSettingsPreview: View {
             }
         }
         .foregroundStyle(.black)
-        .frame(width: 152 * scale, alignment: .topLeading)
-        .position(x: 440 * scale, y: 507 * scale)
+        .frame(width: 152 * scale, height: 430 * scale, alignment: .topLeading)
+        .background(Color(red: 0.97, green: 0.965, blue: 0.93))
+        .contentShape(Rectangle())
     }
 
     private func modeChip(_ title: String, selected: Bool) -> some View {
@@ -2475,6 +2589,67 @@ private struct PreviewControl: View {
     }
 }
 
+@MainActor
+private final class RemoteApplicationCatalog: ObservableObject {
+    struct Application: Decodable, Identifiable {
+        let name: String
+        let path: String
+        let iconBitmap: String?
+
+        var id: String { path }
+    }
+
+    @Published private(set) var applications: [Application] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var message: String?
+
+    private var loadedKey: String?
+
+    func load(from computer: RemoteComputer?) async {
+        guard let computer else {
+            applications = []
+            message = "Pair a computer to list its applications."
+            loadedKey = nil
+            return
+        }
+        let key = "\(computer.id.uuidString)|\(computer.host)|\(computer.port)|\(computer.token)"
+        guard loadedKey != key else { return }
+        loadedKey = key
+        applications = []
+        message = nil
+        isLoading = true
+        defer { isLoading = false }
+
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = computer.host
+        components.port = computer.port
+        components.path = "/applications"
+        guard let url = components.url else {
+            message = "This computer address isn't valid."
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue("Bearer \(computer.token)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                message = "Couldn't load applications from \(computer.name)."
+                return
+            }
+            applications = try JSONDecoder().decode([Application].self, from: data)
+            if applications.isEmpty {
+                message = "No applications were found on \(computer.name)."
+            }
+        } catch {
+            // Allow a retry the next time the field appears.
+            loadedKey = nil
+            message = "Couldn't reach \(computer.name). Make sure its paperGIF companion is running."
+        }
+    }
+}
+
 private struct RemoteBitmapIcon: View {
     let symbol: String
     let bitmap: String?
@@ -2543,7 +2718,8 @@ private enum RemoteLayout {
         RemoteGrid.placements(
             for: Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage)),
             columns: page.gridColumns,
-            rows: page.gridRows
+            rows: page.gridRows,
+            reserved: RemoteGrid.reservedCells(for: page)
         ).map { placement in
             guard let placement else { return .zero }
             let row = placement.slot / page.gridColumns
@@ -2555,6 +2731,13 @@ private enum RemoteLayout {
                 height: CGFloat(placement.span.height) * 712 / CGFloat(page.gridRows) - 12
             )
         }
+    }
+
+    static func origin(of slot: Int, page: RemotePage) -> CGPoint {
+        CGPoint(
+            x: 24 + CGFloat(slot % page.gridColumns) * 504 / CGFloat(page.gridColumns),
+            y: 142 + CGFloat(slot / page.gridColumns) * 712 / CGFloat(page.gridRows)
+        )
     }
 
     static func translatedSlot(

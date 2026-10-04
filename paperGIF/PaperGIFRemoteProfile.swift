@@ -57,6 +57,7 @@ struct PaperGIFOpenBuildsController: Codable, Equatable, Sendable {
     var jogMode: PaperGIFRemoteJogMode = .incremental
     var units: PaperGIFOpenBuildsUnits = .millimeters
     var jogDistanceThousandths = 1_000
+    var settingsSlot: Int?
 
     var jogDistanceTenths: Int {
         max(1, (jogDistanceThousandths + 50) / 100)
@@ -77,7 +78,7 @@ struct PaperGIFOpenBuildsController: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case host, jogSpeed, jogMode, units, jogDistanceTenths, jogDistanceThousandths
+        case host, jogSpeed, jogMode, units, jogDistanceTenths, jogDistanceThousandths, settingsSlot
     }
 
     init(from decoder: Decoder) throws {
@@ -89,11 +90,13 @@ struct PaperGIFOpenBuildsController: Codable, Equatable, Sendable {
         jogDistanceThousandths = try container.decodeIfPresent(
             Int.self, forKey: .jogDistanceThousandths
         ) ?? (try container.decodeIfPresent(Int.self, forKey: .jogDistanceTenths) ?? 10) * 100
+        settingsSlot = try container.decodeIfPresent(Int.self, forKey: .settingsSlot)
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(host, forKey: .host)
+        try container.encodeIfPresent(settingsSlot, forKey: .settingsSlot)
         try container.encode(jogSpeed, forKey: .jogSpeed)
         try container.encode(jogMode, forKey: .jogMode)
         try container.encode(units, forKey: .units)
@@ -505,28 +508,61 @@ enum PaperGIFRemoteGrid {
         return row * columns + column
     }
 
-    static func overlapsOpenBuildsSettings(
-        _ placement: PaperGIFRemoteGridPlacement,
-        columns: Int,
-        rows: Int
-    ) -> Bool {
-        let row = placement.slot / columns
-        let column = placement.slot % columns
-        let frame = CGRect(
-            x: 24 + CGFloat(column) * 504 / CGFloat(columns),
-            y: 142 + CGFloat(row) * 712 / CGFloat(rows),
-            width: CGFloat(placement.span.width) * 504 / CGFloat(columns) - 12,
-            height: CGFloat(placement.span.height) * 712 / CGFloat(rows) - 12
+    // The settings panel content is 152x430 pt; it occupies whole cells, matching the firmware.
+    static func openBuildsSettingsPlacement(slot: Int?, columns: Int, rows: Int) -> PaperGIFRemoteGridPlacement {
+        let span = PaperGIFRemoteGridSpan(
+            width: min(columns, (164 * columns + 503) / 504),
+            height: min(rows, (442 * rows + 711) / 712)
         )
-        return frame.intersects(CGRect(x: 364, y: 292, width: 152, height: 430))
+        if let slot, slot >= 0,
+           slot % columns + span.width <= columns,
+           slot / columns + span.height <= rows {
+            return PaperGIFRemoteGridPlacement(slot: slot, span: span)
+        }
+        let row = min((150 * rows + 711) / 712, rows - span.height)
+        return PaperGIFRemoteGridPlacement(slot: row * columns + columns - span.width, span: span)
+    }
+
+    static func openBuildsSettingsPlacement(for page: PaperGIFRemotePage) -> PaperGIFRemoteGridPlacement? {
+        guard page.layout == .openBuildsController else { return nil }
+        return openBuildsSettingsPlacement(
+            slot: page.openBuildsController?.settingsSlot,
+            columns: page.gridColumns,
+            rows: page.gridRows
+        )
+    }
+
+    static func reservedCells(for page: PaperGIFRemotePage) -> Set<Int> {
+        openBuildsSettingsPlacement(for: page).map { cells(for: $0, columns: page.gridColumns) } ?? []
+    }
+
+    /// New settings-panel slot (clamped onto the page), or nil if it would cover a control.
+    static func movedOpenBuildsSettings(
+        on page: PaperGIFRemotePage,
+        controls: [PaperGIFRemoteControl],
+        to requestedSlot: Int
+    ) -> Int? {
+        guard let current = openBuildsSettingsPlacement(for: page) else { return nil }
+        let columns = page.gridColumns
+        let rows = page.gridRows
+        let span = current.span
+        let column = min(max(requestedSlot % columns, 0), columns - span.width)
+        let row = min(max(requestedSlot / columns, 0), rows - span.height)
+        let moved = PaperGIFRemoteGridPlacement(slot: row * columns + column, span: span)
+        guard moved.slot != current.slot else { return nil }
+        let controlCells = placements(
+            for: controls, columns: columns, rows: rows, reserved: reservedCells(for: page)
+        ).compactMap { $0 }.reduce(into: Set<Int>()) { $0.formUnion(cells(for: $1, columns: columns)) }
+        return cells(for: moved, columns: columns).isDisjoint(with: controlCells) ? moved.slot : nil
     }
 
     static func placements(
         for controls: [PaperGIFRemoteControl],
         columns: Int = columnCount,
-        rows: Int = rowCount
+        rows: Int = rowCount,
+        reserved: Set<Int> = []
     ) -> [PaperGIFRemoteGridPlacement?] {
-        var occupied: Set<Int> = []
+        var occupied = reserved
         var result = Array<PaperGIFRemoteGridPlacement?>(repeating: nil, count: controls.count)
 
         for index in controls.indices {
@@ -558,9 +594,9 @@ enum PaperGIFRemoteGrid {
         to requestedSlot: Int,
         columns: Int,
         rows: Int,
-        avoidingOpenBuildsSettings: Bool
+        reserved: Set<Int> = []
     ) -> [Int?]? {
-        let current = placements(for: controls, columns: columns, rows: rows)
+        let current = placements(for: controls, columns: columns, rows: rows, reserved: reserved)
         guard current.indices.contains(sourceIndex),
               let source = current[sourceIndex],
               let requested = placement(
@@ -585,15 +621,11 @@ enum PaperGIFRemoteGrid {
             return nil
         }
 
-        var occupied: Set<Int> = []
+        var occupied = reserved
         for index in slots.indices {
             guard let slot = slots[index] else { continue }
             guard let moved = placement(for: controls[index], at: slot, columns: columns, rows: rows),
                   moved.slot == slot else { return nil }
-            if avoidingOpenBuildsSettings, slot != current[index]?.slot,
-               overlapsOpenBuildsSettings(moved, columns: columns, rows: rows) {
-                return nil
-            }
             let movedCells = cells(for: moved, columns: columns)
             guard occupied.isDisjoint(with: movedCells) else { return nil }
             occupied.formUnion(movedCells)

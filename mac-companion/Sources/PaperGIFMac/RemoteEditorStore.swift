@@ -450,7 +450,7 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     func layoutUnitsUsed(on page: RemotePage) -> Int {
-        page.controls.reduce(0) { $0 + layoutUnits(for: $1, on: page) }
+        page.controls.reduce(RemoteGrid.reservedCells(for: page).count) { $0 + layoutUnits(for: $1, on: page) }
     }
 
     func canChangeSelectedControl(to kind: RemoteControlKind) -> Bool {
@@ -476,11 +476,28 @@ final class RemoteEditorStore: ObservableObject {
                   to: requestedSlot,
                   columns: page.gridColumns,
                   rows: page.gridRows,
-                  avoidingOpenBuildsSettings: page.layout == .openBuildsController
+                  reserved: RemoteGrid.reservedCells(for: page)
               ) else { return }
         for index in slots.indices {
             profile.pages[pageIndex].controls[index].layoutSlot = slots[index]
         }
+    }
+
+    func moveOpenBuildsSettings(to requestedSlot: Int) {
+        guard let pageIndex = selectedPageIndex else { return }
+        let page = profile.pages[pageIndex]
+        let controls = Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage))
+        guard let slot = RemoteGrid.movedOpenBuildsSettings(on: page, controls: controls, to: requestedSlot) else { return }
+        let pinned = RemoteGrid.placements(
+            for: controls, columns: page.gridColumns, rows: page.gridRows,
+            reserved: RemoteGrid.reservedCells(for: page)
+        )
+        for index in pinned.indices {
+            profile.pages[pageIndex].controls[index].layoutSlot = pinned[index]?.slot
+        }
+        var controller = page.openBuildsController ?? RemoteOpenBuildsController()
+        controller.settingsSlot = slot
+        profile.pages[pageIndex].openBuildsController = controller
     }
 
     func send() async {
