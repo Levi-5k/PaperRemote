@@ -378,36 +378,45 @@ private struct RemoteEditorView: View {
         return store.profile.pages[index]
     }
 
+    // Bindings look items up by ID: indexes go stale when a device load or sync replaces the profile.
     private var selectedControlBinding: Binding<RemoteControl>? {
         guard let location = store.selectedControlLocation else { return nil }
+        let snapshot = store.profile.pages[location.page].controls[location.control]
         return Binding(
-            get: { store.profile.pages[location.page].controls[location.control] },
-            set: { store.profile.pages[location.page].controls[location.control] = $0 }
+            get: { store.profile.pages.lazy.flatMap(\.controls).first { $0.id == snapshot.id } ?? snapshot },
+            set: { newValue in
+                for pageIndex in store.profile.pages.indices {
+                    if let controlIndex = store.profile.pages[pageIndex].controls.firstIndex(where: { $0.id == snapshot.id }) {
+                        store.profile.pages[pageIndex].controls[controlIndex] = newValue
+                        return
+                    }
+                }
+            }
+        )
+    }
+
+    private func selectedPageBinding<Value>(_ keyPath: WritableKeyPath<RemotePage, Value>) -> Binding<Value>? {
+        guard let index = store.selectedPageIndex else { return nil }
+        let snapshot = store.profile.pages[index]
+        return Binding(
+            get: { store.profile.pages.first { $0.id == snapshot.id }?[keyPath: keyPath] ?? snapshot[keyPath: keyPath] },
+            set: { newValue in
+                guard let current = store.profile.pages.firstIndex(where: { $0.id == snapshot.id }) else { return }
+                store.profile.pages[current][keyPath: keyPath] = newValue
+            }
         )
     }
 
     private var pageNameBinding: Binding<String>? {
-        guard let index = store.selectedPageIndex else { return nil }
-        return Binding(
-            get: { store.profile.pages[index].name },
-            set: { store.profile.pages[index].name = $0 }
-        )
+        selectedPageBinding(\.name)
     }
 
     private var gridColumnsBinding: Binding<Int>? {
-        guard let index = store.selectedPageIndex else { return nil }
-        return Binding(
-            get: { store.profile.pages[index].gridColumns },
-            set: { store.profile.pages[index].gridColumns = $0 }
-        )
+        selectedPageBinding(\.gridColumns)
     }
 
     private var gridRowsBinding: Binding<Int>? {
-        guard let index = store.selectedPageIndex else { return nil }
-        return Binding(
-            get: { store.profile.pages[index].gridRows },
-            set: { store.profile.pages[index].gridRows = $0 }
-        )
+        selectedPageBinding(\.gridRows)
     }
 }
 
