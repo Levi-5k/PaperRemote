@@ -55,6 +55,47 @@ public sealed class CompanionEndpointTests
     }
 
     [Fact]
+    public async Task HomeAccessoriesSharedByIPhoneAreSavedForTheEditor()
+    {
+        await using var host = await TestHost.StartAsync();
+        var accessoryID = Guid.NewGuid().ToString();
+
+        var response = await host.Client.PostAsJsonAsync("/home-accessories", new
+        {
+            accessories = new[]
+            {
+                new
+                {
+                    homeName = "Home", accessoryName = "Desk Lamp", serviceName = "Desk Lamp",
+                    accessoryID, serviceID = Guid.NewGuid().ToString(), isReachable = true,
+                },
+            },
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var saved = Assert.Single(host.HomeAccessories.Accessories);
+        Assert.Equal(accessoryID, saved.AccessoryID);
+        Assert.Equal("Home · Desk Lamp", saved.DisplayName);
+    }
+
+    [Fact]
+    public async Task HomeAccessoriesRejectBadListsAndMissingToken()
+    {
+        await using var host = await TestHost.StartAsync();
+
+        var invalid = await host.Client.PostAsJsonAsync("/home-accessories", new
+        {
+            accessories = new[] { new { homeName = "Home", accessoryName = "A", serviceName = "A", accessoryID = "x", serviceID = "y" } },
+        });
+        host.Client.DefaultRequestHeaders.Authorization = null;
+        var unauthorized = await host.Client.PostAsJsonAsync("/home-accessories", new { accessories = Array.Empty<object>() });
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+        Assert.Empty(host.HomeAccessories.Accessories);
+    }
+
+    [Fact]
     public async Task ApplicationsReturnsCompatibleCatalog()
     {
         await using var host = await TestHost.StartAsync();
@@ -153,6 +194,7 @@ public sealed class CompanionEndpointTests
     {
         public HttpClient Client { get; } = client;
         public WindowsMediaUpdatePublisher Publisher => app.Services.GetRequiredService<WindowsMediaUpdatePublisher>();
+        public HomeAccessoryCatalog HomeAccessories => app.Services.GetRequiredService<HomeAccessoryCatalog>();
 
         public static async Task<TestHost> StartAsync()
         {
@@ -175,6 +217,8 @@ public sealed class CompanionEndpointTests
             builder.Services.AddSingleton<WindowsApplicationCatalog>();
             builder.Services.AddSingleton<NetHomeService>();
             builder.Services.AddSingleton<OpenBuildsControlService>();
+            builder.Services.AddSingleton(new HomeAccessoryCatalog(
+                Path.Combine(Path.GetTempPath(), $"papergif-home-{Guid.NewGuid():N}.json")));
             var app = builder.Build();
             app.Use((context, next) =>
             {

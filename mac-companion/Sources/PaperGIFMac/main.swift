@@ -311,6 +311,28 @@ private final class CompanionServer {
             return
         }
 
+        if header.hasPrefix("POST /home-accessories ") {
+            guard let accessories = HomeAccessoryCatalog.validated(Data(data[headerEnd.upperBound...])) else {
+                respond(connection, status: 400, body: "{\"ok\":false}")
+                return
+            }
+            DispatchQueue.main.async { [weak self, weak connection] in
+                let saved: Bool
+                do {
+                    try HomeAccessoryCatalog.shared.replace(with: accessories)
+                    saved = true
+                } catch {
+                    DiagnosticLog.error("Could not save shared Home accessories", error: error)
+                    saved = false
+                }
+                guard let self, let connection else { return }
+                self.queue.async {
+                    self.respond(connection, status: saved ? 200 : 500, body: saved ? "{\"ok\":true}" : "{\"ok\":false}")
+                }
+            }
+            return
+        }
+
         if header.hasPrefix("POST /device-log ") {
             do {
                 let batch = try JSONDecoder().decode(
@@ -519,6 +541,7 @@ private final class CompanionServer {
         case 401: reason = "Unauthorized"
         case 403: reason = "Forbidden"
         case 408: reason = "Request Timeout"
+        case 500: reason = "Internal Server Error"
         case 503: reason = "Service Unavailable"
         default: reason = "Bad Request"
         }

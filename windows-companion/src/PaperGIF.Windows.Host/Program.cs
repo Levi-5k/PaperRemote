@@ -1,5 +1,6 @@
 using PaperGIF.Windows.Host;
 using PaperGIF.Windows.Core.Models;
+using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 
 internal static class Program
@@ -62,6 +63,7 @@ internal static class Program
         builder.Services.AddSingleton<RemoteEditorStore>();
         builder.Services.AddSingleton<NetworkDiscoveryService>();
         builder.Services.AddSingleton<ModuleCatalogService>();
+        builder.Services.AddSingleton<HomeAccessoryCatalog>();
 
         await using var app = builder.Build();
         ConfigureEndpoints(app, configuration);
@@ -79,7 +81,8 @@ internal static class Program
             app.Services.GetRequiredService<RemoteEditorStore>(),
             app.Services.GetRequiredService<NetworkDiscoveryService>(),
             app.Services.GetRequiredService<NetHomeService>(),
-            app.Services.GetRequiredService<ModuleCatalogService>()));
+            app.Services.GetRequiredService<ModuleCatalogService>(),
+            app.Services.GetRequiredService<HomeAccessoryCatalog>()));
 
         await app.StopAsync();
     }
@@ -117,6 +120,21 @@ internal static class Program
                     statusCode: StatusCodes.Status403Forbidden);
             }
             return Results.Json(new { ok = true, token = configuration.Token });
+        });
+
+        app.MapPost("/home-accessories", async (HttpRequest request, [FromServices] HomeAccessoryCatalog catalog) =>
+        {
+            if (request.ContentLength is not (> 0 and <= HomeAccessoryCatalog.MaximumRequestBytes))
+            {
+                return Results.Json(new { ok = false }, statusCode: StatusCodes.Status400BadRequest);
+            }
+            using var reader = new StreamReader(request.Body);
+            if (HomeAccessoryCatalog.Validate(await reader.ReadToEndAsync()) is not { } accessories)
+            {
+                return Results.Json(new { ok = false }, statusCode: StatusCodes.Status400BadRequest);
+            }
+            catalog.Replace(accessories);
+            return Results.Json(new { ok = true });
         });
 
         app.MapGet("/status", (CompanionActivity activity) => Results.Json(new

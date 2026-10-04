@@ -148,6 +148,12 @@ struct PaperGIFRemoteView: View {
                     bluetoothManager.scanForWiFiNetworks()
                 }
             }
+            .onChange(of: homeManager.powerServices) {
+                Task { await shareHomeAccessories() }
+            }
+            .onChange(of: profile.computers) {
+                Task { await shareHomeAccessories() }
+            }
             .alert("Couldn’t Save Remote", isPresented: Binding(
                 get: { saveError != nil },
                 set: { if !$0 { saveError = nil } }
@@ -1531,6 +1537,29 @@ struct PaperGIFRemoteView: View {
             normalized.removeLast()
         }
         return normalized
+    }
+
+    /// Computers can't read Apple Home, so the iPhone sends its power accessories for their editors' pickers.
+    private func shareHomeAccessories() async {
+        guard homeManager.authorizationStatus.contains(.authorized), !homeManager.isRefreshing else { return }
+        struct Payload: Encodable { let accessories: [PaperGIFHomePowerService] }
+        guard let body = try? JSONEncoder().encode(Payload(accessories: Array(homeManager.powerServices.prefix(128)))) else {
+            return
+        }
+        for computer in profile.computers {
+            var components = URLComponents()
+            components.scheme = "http"
+            components.host = computer.host
+            components.port = computer.port
+            components.path = "/home-accessories"
+            guard let url = components.url else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 8
+            request.setValue("Bearer \(computer.token)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            _ = try? await URLSession.shared.upload(for: request, from: body)
+        }
     }
 
     private func refreshNetHomeUnits() async {

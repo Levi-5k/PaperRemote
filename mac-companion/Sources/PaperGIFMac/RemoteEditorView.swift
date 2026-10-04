@@ -645,6 +645,7 @@ private struct ModulesPanel: View {
 
 private struct ControlInspector: View {
     @Binding var control: RemoteControl
+    @ObservedObject private var homeAccessories = HomeAccessoryCatalog.shared
     let pages: [RemotePage]
     let computers: [RemoteComputer]
     let temperatureUnit: RemoteTemperatureUnit
@@ -911,9 +912,22 @@ private struct ControlInspector: View {
             }
         case .iPhoneHomePower:
             LabeledContent("Home accessory") {
-                Text(control.action.deviceID ?? "Not selected")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Picker("", selection: homeAccessoryBinding) {
+                    Text("Choose Accessory").tag("")
+                    if !homeAccessoryBinding.wrappedValue.isEmpty,
+                       !homeAccessories.accessories.contains(where: { $0.id == homeAccessoryBinding.wrappedValue }) {
+                        Text("Saved accessory (not in shared list)").tag(homeAccessoryBinding.wrappedValue)
+                    }
+                    ForEach(homeAccessories.accessories) { accessory in
+                        Text(accessory.displayName).tag(accessory.id)
+                    }
+                }
+                .labelsHidden()
+            }
+            if homeAccessories.accessories.isEmpty {
+                Text("Open the Remote tab in the paperGIF iPhone app to share your Apple Home accessories with this Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             LabeledContent("Power") {
                 Picker("", selection: $control.action.text) {
@@ -1692,7 +1706,29 @@ private struct ControlInspector: View {
             set: { control.action[keyPath: keyPath] = $0.isEmpty ? nil : $0 }
         )
     }
+/// Same encoding as the iPhone editor: deviceID is the accessory, host is the power service.
+    private var homeAccessoryBinding: Binding<String> {
+        Binding(
+            get: {
+                guard let accessoryID = control.action.deviceID, !accessoryID.isEmpty,
+                      !control.action.host.isEmpty else { return "" }
+                return "\(accessoryID):\(control.action.host)"
+            },
+            set: { selection in
+                guard let accessory = homeAccessories.accessories.first(where: { $0.id == selection }) else {
+                    if selection.isEmpty {
+                        control.action.deviceID = nil
+                        control.action.host = ""
+                    }
+                    return
+                }
+                control.action.deviceID = accessory.accessoryID
+                control.action.host = accessory.serviceID
+            }
+        )
+    }
 
+    
     private func presetBinding(_ presets: [WLEDDiscovery.Preset]) -> Binding<Int> {
         Binding(
             get: { control.action.value },

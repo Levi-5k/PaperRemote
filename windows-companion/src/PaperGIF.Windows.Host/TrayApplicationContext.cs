@@ -28,7 +28,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         RemoteEditorStore editorStore,
         NetworkDiscoveryService discovery,
         NetHomeService netHomeService,
-        ModuleCatalogService moduleCatalog)
+        ModuleCatalogService moduleCatalog,
+        HomeAccessoryCatalog homeAccessories)
     {
         this.configuration = configuration;
         this.activity = activity;
@@ -36,7 +37,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         this.startupRegistration = startupRegistration;
         this.editorStore = editorStore;
         icon = PaperGifIcon.Create(64);
-        window = new RemoteEditorWindow(editorStore, activity, discovery, netHomeService, moduleCatalog, icon);
+        window = new RemoteEditorWindow(editorStore, activity, discovery, netHomeService, moduleCatalog, homeAccessories, icon);
         var openItem = new ToolStripMenuItem(
             "Open paperGIF",
             null,

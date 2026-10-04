@@ -29,6 +29,9 @@ internal sealed class RemoteEditorWindow : Form
     private readonly ComboBox mediaCommand = new();
     private readonly ComboBox keyCommand = new();
     private readonly ComboBox actionChoice = new();
+    private readonly ComboBox homeAccessory = new();
+    private readonly HomeAccessoryCatalog homeAccessories;
+    private readonly Control homeAccessoryRow;
     private readonly ComboBox targetPage = new();
     private readonly ComboBox referencedControl = new();
     private readonly ComboBox textComputer = new();
@@ -82,6 +85,7 @@ internal sealed class RemoteEditorWindow : Form
         NetworkDiscoveryService discovery,
         NetHomeService netHomeService,
         ModuleCatalogService moduleCatalog,
+        HomeAccessoryCatalog homeAccessories,
         Icon icon)
     {
         this.store = store;
@@ -89,6 +93,7 @@ internal sealed class RemoteEditorWindow : Form
         this.discovery = discovery;
         this.netHomeService = netHomeService;
         this.moduleCatalog = moduleCatalog;
+        this.homeAccessories = homeAccessories;
         actionComputerRow = BuildOptionRow("Action computer", targetComputer);
         mediaCommandRow = BuildOptionRow("Media command", mediaCommand);
         keyCommandRow = BuildOptionRow("Key", keyCommand);
@@ -102,6 +107,7 @@ internal sealed class RemoteEditorWindow : Form
         targetPageRow = BuildOptionRow("Destination page", targetPage);
         referencedControlRow = BuildOptionRow("Value from", referencedControl);
         textComputerRow = BuildOptionRow("Text computer", textComputer);
+        homeAccessoryRow = BuildOptionRow("Home accessory", homeAccessory);
         Text = "paperGIF Controls";
         Icon = (Icon)icon.Clone();
         ClientSize = new Size(1000, 720);
@@ -116,6 +122,7 @@ internal sealed class RemoteEditorWindow : Form
         store.Changed += HandleStoreChanged;
         store.StatusChanged += HandleStatusChanged;
         discovery.Changed += HandleDiscoveryChanged;
+        homeAccessories.Changed += HandleStatusChanged;
         _ = discovery.ScanDevicesAsync(store.DeviceAddress);
         RefreshAll();
     }
@@ -168,6 +175,7 @@ internal sealed class RemoteEditorWindow : Form
             store.Changed -= HandleStoreChanged;
             store.StatusChanged -= HandleStatusChanged;
             discovery.Changed -= HandleDiscoveryChanged;
+            homeAccessories.Changed -= HandleStatusChanged;
         }
         base.Dispose(disposing);
     }
@@ -722,6 +730,24 @@ internal sealed class RemoteEditorWindow : Form
                 textBox.ComputerID = Guid.TryParse(choice.Value, out var id) ? id : null;
             }
         });
+        ConfigureControlOption(homeAccessory, choice =>
+        {
+            if (store.SelectedControl is not { } control)
+            {
+                return;
+            }
+            if (choice.Value is null)
+            {
+                control.Action.DeviceID = null;
+                control.Action.Host = string.Empty;
+            }
+            else if (homeAccessories.Accessories.FirstOrDefault(accessory => accessory.Id == choice.Value) is { } accessory)
+            {
+                // Same encoding as the iPhone editor: DeviceID is the accessory, Host is the power service.
+                control.Action.DeviceID = accessory.AccessoryID;
+                control.Action.Host = accessory.ServiceID;
+            }
+        });
         controlOptions.Dock = DockStyle.Top;
         controlOptions.AutoSize = true;
         controlOptions.FlowDirection = FlowDirection.TopDown;
@@ -733,6 +759,7 @@ internal sealed class RemoteEditorWindow : Form
             keyCommandRow,
             modifierRow,
             actionHostRow,
+            homeAccessoryRow,
             actionHttpMethodRow,
             actionPathRow,
             actionHttpBodyRow,
@@ -955,7 +982,8 @@ internal sealed class RemoteEditorWindow : Form
         var showLocalHttpBody = showLocalHttp && control?.Action.HttpMethod == "POST";
         var showActionChoice = control?.Action.Type is RemoteActionType.WledPower or
             RemoteActionType.NetHomePower or RemoteActionType.NetHomeMode or RemoteActionType.NetHomeAuto or
-            RemoteActionType.OpenBuilds;
+            RemoteActionType.OpenBuilds or RemoteActionType.IPhoneHomePower;
+        var showHomeAccessory = control?.Action.Type == RemoteActionType.IPhoneHomePower;
         var showActionValue = control is not null && UsesActionValue(control.Action);
         var showTargetPage = control?.Action.Type == RemoteActionType.Page;
         var showReferencedControl = control?.Kind == RemoteControlKind.TextBox &&
@@ -967,6 +995,7 @@ internal sealed class RemoteEditorWindow : Form
         mediaCommandRow.Visible = showMediaCommand;
         keyCommandRow.Visible = modifierRow.Visible = showKeyCommand;
         actionHostRow.Visible = showActionHost;
+        homeAccessoryRow.Visible = showHomeAccessory;
         actionHttpMethodRow.Visible = showLocalHttp;
         actionPathRow.Visible = showLocalHttp;
         actionHttpBodyRow.Visible = showLocalHttpBody;
@@ -976,7 +1005,7 @@ internal sealed class RemoteEditorWindow : Form
         referencedControlRow.Visible = showReferencedControl;
         textComputerRow.Visible = showTextComputer;
         controlOptions.Visible = showActionComputer || showMediaCommand || showKeyCommand ||
-            showActionHost || showLocalHttp || showActionChoice || showActionValue || showTargetPage ||
+            showActionHost || showHomeAccessory || showLocalHttp || showActionChoice || showActionValue || showTargetPage ||
             showReferencedControl || showTextComputer;
 
         SetControlOptions(mediaCommand,
@@ -1006,7 +1035,7 @@ internal sealed class RemoteEditorWindow : Form
         actionHttpBody.Text = showLocalHttp ? control?.Action.HttpBody ?? string.Empty : string.Empty;
         var actionChoices = control?.Action.Type switch
         {
-            RemoteActionType.WledPower or RemoteActionType.NetHomePower =>
+            RemoteActionType.WledPower or RemoteActionType.NetHomePower or RemoteActionType.IPhoneHomePower =>
                 new[] { new EditorChoice("toggle", "Toggle"), new("on", "On"), new("off", "Off") },
             RemoteActionType.NetHomeMode =>
                 [new("auto", "Auto"), new("cool", "Cool"), new("heat", "Heat"), new("dry", "Dry"), new("fan", "Fan")],
@@ -1047,6 +1076,23 @@ internal sealed class RemoteEditorWindow : Form
             [new(null, "Default computer"), .. store.Profile.Computers.Select(computer =>
                 new EditorChoice(computer.Id.ToString(), computer.Name))],
             control?.TextBox?.ComputerID?.ToString());
+        if (showHomeAccessory && control is not null)
+        {
+            var selectedAccessory = string.IsNullOrEmpty(control.Action.DeviceID) || string.IsNullOrEmpty(control.Action.Host)
+                ? null
+                : $"{control.Action.DeviceID}:{control.Action.Host}";
+            var shared = homeAccessories.Accessories;
+            var accessoryChoices = new List<EditorChoice>
+            {
+                new(null, shared.Count == 0 ? "Open the iPhone app to share Home accessories" : "Choose accessory"),
+            };
+            if (selectedAccessory is not null && shared.All(accessory => accessory.Id != selectedAccessory))
+            {
+                accessoryChoices.Add(new(selectedAccessory, "Saved accessory (not in shared list)"));
+            }
+            accessoryChoices.AddRange(shared.Select(accessory => new EditorChoice(accessory.Id, accessory.DisplayName)));
+            SetControlOptions(homeAccessory, accessoryChoices, selectedAccessory);
+        }
     }
 
     private void ConfigureActionValue(RemoteControl? control)

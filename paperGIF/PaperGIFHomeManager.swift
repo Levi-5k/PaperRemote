@@ -1,7 +1,7 @@
 import Combine
 import HomeKit
 
-struct PaperGIFHomePowerService: Identifiable, Equatable, Sendable {
+struct PaperGIFHomePowerService: Identifiable, Equatable, Sendable, Codable {
     let homeName: String
     let accessoryName: String
     let serviceName: String
