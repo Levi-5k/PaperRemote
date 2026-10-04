@@ -72,9 +72,15 @@ final class MatterDeviceManager: ObservableObject {
             if !response.succeeded || reportSuccess {
                 status = response.message
             }
+            if response.succeeded {
+                if request.command == "commission" { DiagnosticLog.info("Matter device added: \(response.message ?? "")") }
+            } else {
+                DiagnosticLog.error("Matter \(request.command) failed: \(response.message ?? "unknown error")")
+            }
             return response.succeeded
         } catch {
             status = error.localizedDescription
+            DiagnosticLog.error("Matter \(request.command) failed", error: error)
             return false
         }
     }
