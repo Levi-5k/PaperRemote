@@ -26,6 +26,7 @@ private struct ManageRequest: Decodable {
     let command: String
     let setupCode: String?
     let name: String?
+    let device: Int?
 }
 
 private struct ManageResponse: Encodable {
@@ -39,6 +40,23 @@ private struct MatterNode: Codable {
     let id: UInt64
     var name: String
     var endpoint: UInt16
+    /// Short permanent number that M5Paper buttons store in `value`; 0 means "newest device".
+    var number: Int
+
+    init(id: UInt64, name: String, endpoint: UInt16, number: Int) {
+        self.id = id
+        self.name = name
+        self.endpoint = endpoint
+        self.number = number
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UInt64.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        endpoint = try container.decode(UInt16.self, forKey: .endpoint)
+        number = try container.decodeIfPresent(Int.self, forKey: .number) ?? 0
+    }
 }
 
 private struct MatterState: Codable {
@@ -235,6 +253,9 @@ private final class MatterHub {
             state.fabricCreated = true
             try saveState()
         }
+        if Self.assignMissingNumbers(&state.nodes) {
+            try saveState()
+        }
     }
 
     deinit {
@@ -283,7 +304,12 @@ private final class MatterHub {
         if let error = delegate.error {
             throw error
         }
-        let node = MatterNode(id: nodeID, name: name, endpoint: 1)
+        let node = MatterNode(
+            id: nodeID,
+            name: name,
+            endpoint: 1,
+            number: (state.nodes.map(\.number).max() ?? 0) + 1
+        )
         state.nodes.append(node)
         try saveState()
         return node
@@ -294,7 +320,7 @@ private final class MatterHub {
         case "list":
             return ManageResponse(succeeded: true, message: nil, devices: state.nodes)
         case "state":
-            return readPowerState()
+            return readPowerState(deviceNumber: request.device ?? 0)
         case "commission":
             guard let setupCode = request.setupCode, !setupCode.isEmpty else {
                 return ManageResponse(succeeded: false, message: "Enter the pairing code.", devices: state.nodes)
@@ -311,12 +337,29 @@ private final class MatterHub {
         }
     }
 
-    func perform(command: String) -> ActionResponse {
-        guard let node = state.nodes.last else {
+    private static func assignMissingNumbers(_ nodes: inout [MatterNode]) -> Bool {
+        var next = (nodes.map(\.number).max() ?? 0) + 1
+        var changed = false
+        for index in nodes.indices where nodes[index].number <= 0 {
+            nodes[index].number = next
+            next += 1
+            changed = true
+        }
+        return changed
+    }
+
+    private func node(numbered number: Int) -> MatterNode? {
+        number > 0 ? state.nodes.first { $0.number == number } : state.nodes.last
+    }
+
+    func perform(command: String, deviceNumber: Int) -> ActionResponse {
+        guard let node = node(numbered: deviceNumber) else {
             return ActionResponse(
                 succeeded: false,
                 changed: false,
-                message: "No Matter device has been commissioned"
+                message: state.nodes.isEmpty
+                    ? "No Matter device has been commissioned"
+                    : "Matter device #\(deviceNumber) is no longer on this Mac"
             )
         }
         let semaphore = DispatchSemaphore(value: 0)
@@ -353,9 +396,9 @@ private final class MatterHub {
     }
 
     /// Reads the OnOff attribute from the device itself so the M5Paper shows real state.
-    private func readPowerState() -> ManageResponse {
-        guard let node = state.nodes.last else {
-            return ManageResponse(succeeded: false, message: "No Matter device has been commissioned", devices: [])
+    private func readPowerState(deviceNumber: Int) -> ManageResponse {
+        guard let node = node(numbered: deviceNumber) else {
+            return ManageResponse(succeeded: false, message: "No such Matter device", devices: state.nodes)
         }
         let device = MTRBaseDevice(nodeID: NSNumber(value: node.id), controller: controller)
         guard let cluster = MTRBaseClusterOnOff(
@@ -485,7 +528,7 @@ func runMatterModule() throws {
     } else if let command = ["on", "off", "toggle"].first(where: {
         CommandLine.arguments.contains("--\($0)")
     }) {
-        writeJSONLine(hub.perform(command: command))
+        writeJSONLine(hub.perform(command: command, deviceNumber: 0))
     } else if CommandLine.arguments.contains("--json-lines") {
         while let line = readLine() {
             guard let data = line.data(using: .utf8) else { continue }
@@ -503,7 +546,7 @@ func runMatterModule() throws {
                 writeJSONLine(ActionResponse(succeeded: false, changed: false, message: "Invalid module request"))
                 continue
             }
-            writeJSONLine(hub.perform(command: request.text))
+            writeJSONLine(hub.perform(command: request.text, deviceNumber: request.value))
         }
     } else {
         writeJSONLine(ActionResponse(succeeded: false, changed: false, message: "Specify --commission, --list, --on, --off, --toggle, or --json-lines"))

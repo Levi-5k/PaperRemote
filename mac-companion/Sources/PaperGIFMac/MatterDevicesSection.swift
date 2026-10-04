@@ -32,12 +32,9 @@ struct MatterDevicesSection: View {
                 HStack {
                     Label(device.name, systemImage: "powerplug")
                     Spacer()
-                    // The module's buttons don't name a device, so they control the newest one.
-                    if device == manager.devices.last {
-                        Text("Controlled by Matter buttons")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("#\(device.number)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
             }
         }

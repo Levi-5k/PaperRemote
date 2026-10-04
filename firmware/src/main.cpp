@@ -6904,7 +6904,7 @@ void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now)
         item["id"] = control.id;
         if (moduleStateControl) {
             item["source"] = "moduleState";
-            item["sourceText"] = control.action.host;
+            item["sourceText"] = String(control.action.host) + "#" + control.action.value;
             item["placeholder"] = "";
             control.nextRefreshAt = now + 60000;
             continue;

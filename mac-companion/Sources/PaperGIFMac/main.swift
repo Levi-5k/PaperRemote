@@ -1201,13 +1201,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return TextSourceBatchResponse(items: items)
     }
 
-    /// Blocking; never call on the main thread.
-    private func moduleState(for moduleID: String) -> Bool? {
+    /// `source` is "moduleID#deviceNumber" from the M5Paper; device 0 means the module's default. Blocking.
+    private func moduleState(for source: String) -> Bool? {
         struct StateResponse: Decodable {
             let succeeded: Bool
             let on: Bool?
         }
-        guard let data = try? moduleRuntimeHost.manage(moduleID: moduleID, ModuleManageRequest(command: "state")),
+        let parts = source.split(separator: "#", maxSplits: 1).map(String.init)
+        guard let moduleID = parts.first, !moduleID.isEmpty else { return nil }
+        var request = ModuleManageRequest(command: "state")
+        request.device = parts.count == 2 ? Int(parts[1]) : nil
+        guard let data = try? moduleRuntimeHost.manage(moduleID: moduleID, request),
               let response = try? JSONDecoder().decode(StateResponse.self, from: data),
               response.succeeded else { return nil }
         return response.on

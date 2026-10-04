@@ -352,6 +352,7 @@ private struct RemoteEditorView: View {
                     pages: store.profile.pages,
                     computers: store.profile.computers,
                     modules: moduleCatalog.installedModules.filter { $0.runtime != nil },
+                    matterDevices: matterDevices,
                     temperatureUnit: store.profile.temperatureUnit,
                     discovery: discovery,
                     canUseButtonLayout: store.canChangeSelectedControl(to: .button),
@@ -659,6 +660,7 @@ private struct ControlInspector: View {
     let pages: [RemotePage]
     let computers: [RemoteComputer]
     let modules: [PaperModuleManifest]
+    @ObservedObject var matterDevices: MatterDeviceManager
     let temperatureUnit: RemoteTemperatureUnit
     @ObservedObject var discovery: WLEDDiscovery
     let canUseButtonLayout: Bool
@@ -738,9 +740,9 @@ private struct ControlInspector: View {
                 if control.kind != .textBox || control.textBox?.tapBehavior == .action {
                     section(control.kind == .textBox ? "TAP ACTION" : "ACTION") {
                     LabeledContent("Type") {
-                        Picker("", selection: actionTypeBinding) {
-                            ForEach(RemoteActionType.allCases) { type in
-                                Label(type.title, systemImage: type.systemImage).tag(type)
+                        Picker("", selection: actionChoiceBinding) {
+                            ForEach(actionChoices, id: \.self) { choice in
+                                Label(choice.title, systemImage: choice.systemImage).tag(choice)
                             }
                         }
                         .labelsHidden()
@@ -1137,6 +1139,34 @@ private struct ControlInspector: View {
             Text("Humidity assist only extends cooling. The minimum cycle protects the compressor.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        case .module where control.action.host == MatterDeviceManager.moduleID:
+            LabeledContent("Device") {
+                Picker("", selection: matterDeviceBinding) {
+                    if control.action.value == 0 {
+                        Text("Most recently added").tag(0)
+                    } else if !matterDevices.devices.contains(where: { $0.number == control.action.value }) {
+                        Text("Device #\(control.action.value) (not on this Mac)").tag(control.action.value)
+                    }
+                    ForEach(matterDevices.devices) { device in
+                        Text(device.name).tag(device.number)
+                    }
+                }
+                .labelsHidden()
+            }
+            LabeledContent("Power") {
+                Picker("", selection: matterPowerBinding) {
+                    Text("Toggle").tag("toggle")
+                    Text("On").tag("on")
+                    Text("Off").tag("off")
+                }
+                .labelsHidden()
+            }
+            Text(matterDevices.devices.isEmpty
+                ? "Add a device in Connections → Matter Devices first."
+                : "Runs on this Mac over Matter, no iPhone needed. Toggle buttons show the device's real on/off state.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .task { await matterDevices.refresh() }
         case .module:
             LabeledContent("Module") {
                 Picker("", selection: moduleIDBinding) {
@@ -1766,6 +1796,89 @@ private struct ControlInspector: View {
                 control.action.value = value
                 if let preset = presets.first(where: { $0.id == value }) {
                     control.title = preset.name
+                }
+            }
+        )
+    }
+
+    /// Editor-level choices: "Matter device power" is stored as a Matter module action.
+    private enum ActionChoice: Hashable {
+        case action(RemoteActionType)
+        case matterPower
+
+        var title: String {
+            switch self {
+            case .action(let type): type.title
+            case .matterPower: "Matter device power"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .action(let type): type.systemImage
+            case .matterPower: "powerplug.fill"
+            }
+        }
+    }
+
+    private var hasMatterModule: Bool {
+        modules.contains { $0.id == MatterDeviceManager.moduleID }
+    }
+
+    // Apple Home power only works while the iPhone app is open, so Matter power replaces it in the menu.
+    private var actionChoices: [ActionChoice] {
+        RemoteActionType.allCases.flatMap { type -> [ActionChoice] in
+            guard type == .iPhoneHomePower else { return [.action(type)] }
+            var choices: [ActionChoice] = hasMatterModule ? [.matterPower] : []
+            if control.action.type == .iPhoneHomePower || !hasMatterModule {
+                choices.append(.action(type))
+            }
+            return choices
+        }
+    }
+
+    private var actionChoiceBinding: Binding<ActionChoice> {
+        Binding(
+            get: {
+                control.action.type == .module && control.action.host == MatterDeviceManager.moduleID
+                    ? .matterPower : .action(control.action.type)
+            },
+            set: { choice in
+                switch choice {
+                case .action(let type):
+                    actionTypeBinding.wrappedValue = type
+                case .matterPower:
+                    control.iconBitmap = nil
+                    control.action = RemoteAction(
+                        type: .module,
+                        host: MatterDeviceManager.moduleID,
+                        text: "toggle",
+                        value: matterDevices.devices.first?.number ?? 0,
+                        computerID: control.action.computerID
+                    )
+                    if control.kind != .textBox {
+                        control.kind = .button
+                        control.isToggle = true
+                    }
+                }
+            }
+        )
+    }
+
+    private var matterDeviceBinding: Binding<Int> {
+        Binding(
+            get: { control.action.value },
+            set: { control.action.value = $0 }
+        )
+    }
+
+    private var matterPowerBinding: Binding<String> {
+        Binding(
+            get: { control.action.text },
+            set: { command in
+                control.action.text = command
+                if control.kind == .button {
+                    control.isToggle = command == "toggle" ? true : nil
                 }
             }
         )

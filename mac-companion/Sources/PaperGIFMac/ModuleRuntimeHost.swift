@@ -21,6 +21,7 @@ struct ModuleManageRequest: Encodable {
     let command: String
     var setupCode: String?
     var name: String?
+    var device: Int?
 }
 
 final class ModuleRuntimeHost: @unchecked Sendable {

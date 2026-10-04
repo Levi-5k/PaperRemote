@@ -7,6 +7,17 @@ final class MatterDeviceManager: ObservableObject {
     struct Device: Decodable, Identifiable, Equatable {
         let id: UInt64
         let name: String
+        /// Stored in a button's `value` to choose this device.
+        let number: Int
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(UInt64.self, forKey: .id)
+            name = try container.decode(String.self, forKey: .name)
+            number = try container.decodeIfPresent(Int.self, forKey: .number) ?? 0
+        }
+
+        private enum CodingKeys: String, CodingKey { case id, name, number }
     }
 
     private struct Response: Decodable {
