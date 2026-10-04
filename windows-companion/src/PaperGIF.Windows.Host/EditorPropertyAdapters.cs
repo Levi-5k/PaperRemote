@@ -248,6 +248,14 @@ internal sealed class ProfileProperties(RemoteEditorStore store)
         set { store.Profile.ElementRefreshDelayMilliseconds = Math.Clamp(value, 0, 500); store.Commit(); }
     }
 
+    [Category("Display"), DisplayName("Maximum button text size (pt)")]
+    [Description("Button labels fit and center within the control, up to this size (9–24 pt).")]
+    public int MaxButtonTextSize
+    {
+        get => store.Profile.MaxButtonTextSize;
+        set { store.Profile.MaxButtonTextSize = value; store.Commit(); }
+    }
+
     [Category("Display"), DisplayName("Temperature units")]
     public TemperatureUnit TemperatureUnit
     {

@@ -15,10 +15,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly RemoteEditorStore editorStore;
     private readonly RemoteEditorWindow window;
     private readonly Icon icon;
-    private readonly UpdateService updateService = new();
+    private readonly UpdateCoordinator updates;
     private readonly ToolStripMenuItem updateItem;
     private readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 24 * 60 * 60 * 1000 };
-    private bool updateBusy;
+    private bool updateBalloonShown;
 
     public TrayApplicationContext(
         CompanionConfiguration configuration,
@@ -37,7 +37,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         this.startupRegistration = startupRegistration;
         this.editorStore = editorStore;
         icon = PaperGifIcon.Create(64);
-        window = new RemoteEditorWindow(editorStore, activity, discovery, netHomeService, moduleCatalog, homeAccessories, icon);
+        updates = new UpdateCoordinator(editorStore, configuration) { ExitApplication = ExitThread };
+        window = new RemoteEditorWindow(editorStore, activity, discovery, netHomeService, moduleCatalog, homeAccessories, updates, icon);
         var openItem = new ToolStripMenuItem(
             "Open paperGIF",
             null,
@@ -108,8 +109,17 @@ internal sealed class TrayApplicationContext : ApplicationContext
         };
         activity.ActionRecorded += HandleActionRecorded;
         pairingApprovalService.ApprovalRequested += HandleApprovalRequested;
+        updates.Changed += (_, _) => UpdateMenuItemText();
+        notifyIcon.BalloonTipClicked += (_, _) =>
+        {
+            if (updateBalloonShown)
+            {
+                updateBalloonShown = false;
+                window.ShowAndActivate();
+            }
+        };
         _ = CheckForModuleUpdatesAsync(moduleCatalog);
-        updateTimer.Tick += async (_, _) => await CheckForUpdatesAsync(userInitiated: false);
+        updateTimer.Tick += async (_, _) => await RefreshQuietlyAsync();
         updateTimer.Start();
         _ = CheckForUpdatesAfterStartupAsync();
         notifyIcon.ShowBalloonTip(
@@ -135,115 +145,119 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private async Task CheckForUpdatesAfterStartupAsync()
     {
         await Task.Delay(TimeSpan.FromSeconds(15));
-        await CheckForUpdatesAsync(userInitiated: false);
+        await RefreshQuietlyAsync();
     }
 
-    private async Task CheckForUpdatesAsync(bool userInitiated)
+    private static string NotifiedVersionPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "paperGIF",
+        "update-notified.txt");
+
+    // Automatic checks never open dialogs: the tray item changes and a balloon appears once per version.
+    private async Task RefreshQuietlyAsync()
     {
-        if (updateBusy)
+        await updates.RefreshAsync();
+        var release = updates.AppUpdate ?? (updates.FirmwareNeedsUsb ? null : updates.FirmwareUpdate);
+        if (release is null)
         {
             return;
         }
-        updateBusy = true;
-        var installConfirmed = false;
-        SetUpdateStatus("Checking for updates...");
         try
         {
-            var release = await updateService.LatestAsync();
-            var offeredUpdate = false;
-            var currentVersion = UpdateService.CurrentVersion;
-            if (release.Manifest.Windows is { } appAsset && SoftwareVersion.IsNewer(release.Version, currentVersion))
+            if (File.Exists(NotifiedVersionPath) && File.ReadAllText(NotifiedVersionPath).Trim() == release.Version)
             {
-                offeredUpdate = true;
-                if (Confirm(
-                    $"paperGIF {release.Version} is available",
-                    $"You have {currentVersion}. paperGIF will download, verify, install, and restart.\n\n{release.Notes}",
-                    "Install and restart?"))
-                {
-                    installConfirmed = true;
-                    SetUpdateStatus($"Downloading paperGIF {release.Version}...");
-                    var archive = await updateService.DownloadAsync(appAsset, release);
-                    updateService.InstallAppAndExit(archive, release.Version, ExitThread);
-                    return;
-                }
+                return;
             }
-
-            var address = editorStore.DeviceAddress;
-            var deviceVersion = await updateService.DeviceFirmwareVersionAsync(address);
-            if (deviceVersion is not null && release.Manifest.Firmware is { } firmwareAsset &&
-                SoftwareVersion.IsNewer(release.Version, deviceVersion))
-            {
-                offeredUpdate = true;
-                if (deviceVersion == UpdateService.UsbOnlyFirmwareVersion)
-                {
-                    if (userInitiated)
-                    {
-                        MessageBox.Show(
-                            $"This M5Paper's firmware is too old to update over Wi-Fi. Flash firmware {release.Version} over USB once; later updates install from here.",
-                            "M5Paper needs a one-time USB update",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Information);
-                    }
-                }
-                else if (Confirm(
-                    $"M5Paper firmware {release.Version} is available",
-                    $"The M5Paper has {deviceVersion}. Keep it awake and nearby; it restarts when the update finishes.",
-                    "Update the M5Paper now?"))
-                {
-                    installConfirmed = true;
-                    SetUpdateStatus($"Downloading M5Paper firmware {release.Version}...");
-                    var firmware = await updateService.DownloadAsync(firmwareAsset, release);
-                    try
-                    {
-                        SetUpdateStatus($"Installing M5Paper firmware {release.Version}...");
-                        await updateService.InstallFirmwareAsync(firmware, release.Version, address, configuration.Token);
-                    }
-                    finally
-                    {
-                        File.Delete(firmware);
-                    }
-                    DiagnosticLog.Info($"M5Paper firmware updated to {release.Version}");
-                    MessageBox.Show(
-                        $"The M5Paper restarted with firmware {release.Version}.",
-                        "paperGIF",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
-                }
-            }
-
-            if (userInitiated && !offeredUpdate)
-            {
-                var firmwareLine = deviceVersion is null
-                    ? "M5Paper not reachable, so its firmware was not checked"
-                    : $"M5Paper firmware {deviceVersion}";
-                MessageBox.Show(
-                    $"paperGIF {currentVersion}\n{firmwareLine}\nLatest release: {release.Version}",
-                    "paperGIF is up to date",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-            }
+            Directory.CreateDirectory(Path.GetDirectoryName(NotifiedVersionPath)!);
+            File.WriteAllText(NotifiedVersionPath, release.Version);
         }
-        catch (Exception exception) when (exception is UpdateException or HttpRequestException or
-            TaskCanceledException or System.Text.Json.JsonException or IOException or
-            InvalidDataException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            DiagnosticLog.Error("Update failed", exception);
-            if (userInitiated || installConfirmed)
-            {
-                MessageBox.Show(exception.Message, "paperGIF update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
+            DiagnosticLog.Error("Could not record the update notification", exception);
         }
-        finally
+        updateBalloonShown = true;
+        notifyIcon.ShowBalloonTip(
+            10_000,
+            "paperGIF update available",
+            updates.AppUpdate is not null
+                ? $"paperGIF {release.Version} is ready to install. Click to open paperGIF."
+                : $"M5Paper firmware {release.Version} is ready to install. Click to open paperGIF.",
+            ToolTipIcon.Info);
+    }
+
+    // Menu command: checks, then asks about each available update.
+    private async Task CheckForUpdatesAsync(bool userInitiated)
+    {
+        if (updates.IsBusy)
         {
-            updateBusy = false;
-            SetUpdateStatus(null);
+            return;
+        }
+        await updates.RefreshAsync();
+        if (updates.Release is not { } release)
+        {
+            if (userInitiated && updates.Problem is { } problem)
+            {
+                MessageBox.Show(problem, "paperGIF update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            return;
+        }
+        if (updates.AppUpdate is { } appUpdate && Confirm(
+            $"paperGIF {appUpdate.Version} is available",
+            $"You have {UpdateCoordinator.CurrentVersion}. paperGIF will download, verify, install, and restart.\n\n{appUpdate.Notes}",
+            "Install and restart?"))
+        {
+            await updates.InstallAppAsync();
+            ShowUpdateResult("paperGIF update");
+            return;
+        }
+        if (updates.FirmwareNeedsUsb)
+        {
+            MessageBox.Show(
+                $"This M5Paper's firmware is too old to update over Wi-Fi. Flash firmware {release.Version} over USB once; later updates install from here.",
+                "M5Paper needs a one-time USB update",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        else if (updates.FirmwareUpdate is { } firmwareUpdate && Confirm(
+            $"M5Paper firmware {firmwareUpdate.Version} is available",
+            $"The M5Paper has {updates.DeviceFirmware}. It shows its progress on screen and restarts when the update finishes.",
+            "Update the M5Paper now?"))
+        {
+            await updates.InstallFirmwareAsync();
+            ShowUpdateResult("paperGIF update");
+        }
+        else if (userInitiated && updates.AppUpdate is null && updates.FirmwareUpdate is null)
+        {
+            var firmwareLine = updates.DeviceFirmware is null
+                ? "M5Paper not found on the network, so its firmware was not checked"
+                : $"M5Paper firmware {updates.DeviceFirmware}";
+            MessageBox.Show(
+                $"paperGIF {UpdateCoordinator.CurrentVersion}\n{firmwareLine}\nLatest release: {release.Version}",
+                "paperGIF is up to date",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
         }
     }
 
-    private void SetUpdateStatus(string? status)
+    private void ShowUpdateResult(string title)
     {
-        updateItem.Text = status ?? "Check for updates...";
-        updateItem.Enabled = status is null;
+        if (updates.Problem is { } problem)
+        {
+            MessageBox.Show(problem, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        else if (updates.Notice is { } notice)
+        {
+            MessageBox.Show(notice, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+    }
+
+    private void UpdateMenuItemText()
+    {
+        var available = updates.AppUpdate ?? updates.FirmwareUpdate;
+        updateItem.Text = updates.Activity ?? (available is null
+            ? "Check for updates..."
+            : $"Install update {available.Version}...");
+        updateItem.Enabled = !updates.IsBusy;
     }
 
     private static bool Confirm(string title, string message, string question) =>
@@ -258,7 +272,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         activity.ActionRecorded -= HandleActionRecorded;
         pairingApprovalService.ApprovalRequested -= HandleApprovalRequested;
         updateTimer.Dispose();
-        updateService.Dispose();
+        updates.Dispose();
         window.CloseForExit();
         window.Dispose();
         notifyIcon.Visible = false;

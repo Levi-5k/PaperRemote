@@ -183,7 +183,7 @@ internal sealed class NetworkDiscoveryService : IDisposable
         }
     }
 
-    private static async Task<IReadOnlyList<DiscoveredEndpoint>> ProbeNetworkAsync(
+    internal static async Task<IReadOnlyList<DiscoveredEndpoint>> ProbeNetworkAsync(
         string? preferredAddress,
         CancellationToken cancellationToken)
     {

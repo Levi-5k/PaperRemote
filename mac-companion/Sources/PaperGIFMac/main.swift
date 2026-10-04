@@ -124,6 +124,7 @@ private struct CompanionConfiguration: Codable {
 
 private final class CompanionServer {
     private static let maximumConnections = 16
+    private static let keepAliveIdleTimeout: TimeInterval = 75
 
     private let port: UInt16
     private let token: String
@@ -135,6 +136,8 @@ private final class CompanionServer {
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var lifetimes: [ObjectIdentifier: CompanionRequestLifetime] = [:]
     private var respondingConnections: Set<ObjectIdentifier> = []
+    private var keepAliveConnections: Set<ObjectIdentifier> = []
+    private var idleConnections: Set<ObjectIdentifier> = []
     private let queue = DispatchQueue(label: "paperGIF.companion.server")
     private let scheduler = CompanionRequestScheduler()
 
@@ -186,6 +189,8 @@ private final class CompanionServer {
             connections.values.forEach { $0.cancel() }
             connections.removeAll()
             respondingConnections.removeAll()
+            keepAliveConnections.removeAll()
+            idleConnections.removeAll()
         }
     }
 
@@ -210,6 +215,8 @@ private final class CompanionServer {
                 self.lifetimes.removeValue(forKey: identifier)?.cancel()
                 self.connections.removeValue(forKey: identifier)
                 self.respondingConnections.remove(identifier)
+                self.keepAliveConnections.remove(identifier)
+                self.idleConnections.remove(identifier)
             default:
                 break
             }
@@ -223,6 +230,12 @@ private final class CompanionServer {
         guard let deadline = lifetime.nextDeadline else { return }
         queue.asyncAfter(deadline: deadline) { [weak self, weak connection] in
             guard let self, let connection, lifetime.expire() else { return }
+            // An idle kept-alive connection closes quietly; a reply here would be
+            // read as the answer to the client's next request.
+            if self.idleConnections.contains(ObjectIdentifier(connection)) {
+                connection.cancel()
+                return
+            }
             self.respond(connection, status: 408, body: "{\"ok\":false}")
         }
     }
@@ -248,12 +261,30 @@ private final class CompanionServer {
             guard let self,
                   self.connections[ObjectIdentifier(connection)] != nil,
                   !self.respondingConnections.contains(ObjectIdentifier(connection)) else { return }
+            let identifier = ObjectIdentifier(connection)
+            if self.idleConnections.contains(identifier) {
+                guard let data, !data.isEmpty else {
+                    connection.cancel()
+                    return
+                }
+                // The next request on a kept-alive connection gets the normal receive deadline.
+                self.idleConnections.remove(identifier)
+                self.lifetimes[identifier]?.cancel()
+                let lifetime = CompanionRequestLifetime()
+                self.lifetimes[identifier] = lifetime
+                self.scheduleTimeout(connection, lifetime: lifetime)
+            }
             var requestData = buffer
             if let data {
                 requestData.append(data)
             }
             switch HTTPRequestParser.parse(requestData) {
             case let .complete(request):
+                if HTTPRequestParser.requestsKeepAlive(request) {
+                    self.keepAliveConnections.insert(identifier)
+                } else {
+                    self.keepAliveConnections.remove(identifier)
+                }
                 self.handle(request, connection: connection)
             case .invalid:
                 self.respond(connection, status: 400, body: "{\"ok\":false}")
@@ -545,9 +576,24 @@ private final class CompanionServer {
         case 503: reason = "Service Unavailable"
         default: reason = "Bad Request"
         }
-        let response = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-        connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
-            connection.cancel()
+        // Error replies always close, so a half-read request can never leak into the next one.
+        let keepAlive = keepAliveConnections.contains(identifier) && (200..<300).contains(status)
+        let connectionHeader = keepAlive
+            ? "Connection: keep-alive\r\nKeep-Alive: timeout=\(Int(Self.keepAliveIdleTimeout))"
+            : "Connection: close"
+        let response = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\(connectionHeader)\r\n\r\n\(body)"
+        connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] error in
+            guard let self, keepAlive, error == nil,
+                  self.connections[identifier] != nil else {
+                connection.cancel()
+                return
+            }
+            self.respondingConnections.remove(identifier)
+            self.idleConnections.insert(identifier)
+            let lifetime = CompanionRequestLifetime(receiveTimeout: Self.keepAliveIdleTimeout)
+            self.lifetimes[identifier] = lifetime
+            self.scheduleTimeout(connection, lifetime: lifetime)
+            self.receive(connection, buffer: Data())
         })
     }
 }
@@ -806,11 +852,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor @objc private func showControlsEditor() {
-        if editorWindowController == nil {
+        if editorWindowController == nil, let updateService {
             editorWindowController = RemoteEditorWindowController(
                 store: controlsEditorStore(),
                 moduleCatalog: controlsModuleCatalog(),
-                matterDevices: matterDeviceManager()
+                matterDevices: matterDeviceManager(),
+                updates: updateService
             )
         }
         editorWindowController?.showWindow(nil)
@@ -865,14 +912,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor private func startUpdateChecks() {
         let service = UpdateService()
-        service.statusChanged = { [weak self] status in
-            self?.updateMenuItem.title = status ?? "Check for Updates…"
-            self?.updateMenuItem.action = status == nil ? #selector(self?.checkForUpdates) : nil
+        service.menuChanged = { [weak self] title, enabled in
+            self?.updateMenuItem.title = title
+            self?.updateMenuItem.action = enabled ? #selector(self?.checkForUpdates) : nil
         }
         service.firmwareTarget = { [weak self] in
             guard let self else { return nil }
             let store = self.controlsEditorStore()
             return UpdateService.FirmwareTarget(address: store.deviceAddress, token: store.localComputer.token)
+        }
+        service.deviceAddressFound = { [weak self] address in
+            self?.controlsEditorStore().deviceAddress = address
+        }
+        service.openUpdates = { [weak self] in
+            self?.showControlsEditor()
         }
         updateService = service
         service.startAutomaticChecks()

@@ -8,6 +8,57 @@ namespace PaperGIF.Windows.Core.Tests;
 public sealed class RemoteProfileContractTests
 {
     [Fact]
+    public void MissingMaximumButtonTextSizeDefaultsTo24()
+    {
+        const string json = """{"version":6,"pages":[]}""";
+
+        Assert.Equal(24, new RemoteProfile().MaxButtonTextSize);
+        Assert.Equal(24, RemoteProfileJson.Deserialize(json).MaxButtonTextSize);
+        Assert.Equal(24, JsonSerializer.Deserialize<RemoteProfile>(json, RemoteProfileJson.Options)!.MaxButtonTextSize);
+    }
+
+    [Theory]
+    [InlineData(int.MinValue, 9)]
+    [InlineData(-1, 9)]
+    [InlineData(0, 9)]
+    [InlineData(8, 9)]
+    [InlineData(9, 9)]
+    [InlineData(16, 16)]
+    [InlineData(24, 24)]
+    [InlineData(25, 24)]
+    [InlineData(int.MaxValue, 24)]
+    public void MaximumButtonTextSizeIsClampedOnEveryDeserializationPath(int source, int expected)
+    {
+        var json = $$"""{"version":6,"maxButtonTextSize":{{source}},"pages":[]}""";
+
+        Assert.Equal(expected, RemoteProfileJson.Deserialize(json).MaxButtonTextSize);
+        // The store loads nested saved profiles with System.Text.Json directly.
+        Assert.Equal(expected, JsonSerializer.Deserialize<RemoteProfile>(json, RemoteProfileJson.Options)!.MaxButtonTextSize);
+    }
+
+    [Theory]
+    [InlineData(9)]
+    [InlineData(17)]
+    [InlineData(24)]
+    public void MaximumButtonTextSizeRoundTripsWithSharedJsonName(int size)
+    {
+        var profile = new RemoteProfile { MaxButtonTextSize = size };
+        var json = RemoteProfileJson.Serialize(profile);
+        using var document = JsonDocument.Parse(json);
+
+        Assert.Equal(size, document.RootElement.GetProperty("maxButtonTextSize").GetInt32());
+        Assert.Equal(size, RemoteProfileJson.Deserialize(json).MaxButtonTextSize);
+    }
+
+    [Fact]
+    public void DefaultMaximumButtonTextSizeIsIncludedInSerializedProfile()
+    {
+        using var document = JsonDocument.Parse(RemoteProfileJson.Serialize(new RemoteProfile()));
+
+        Assert.Equal(24, document.RootElement.GetProperty("maxButtonTextSize").GetInt32());
+    }
+
+    [Fact]
     public void CanonicalV6FixtureCoversEveryActionType()
     {
         var profile = LoadFixture("remote-profile-v6-all-actions.json");
@@ -21,8 +72,8 @@ public sealed class RemoteProfileContractTests
         Assert.Equal(2, profile.Pages.Count);
         Assert.Equal(RemoteTextSource.NowPlaying, profile.Pages[0].Controls[5].TextBox?.Source);
         Assert.Equal(225, profile.Pages[1].Controls[4].Action.Schedules?[0].ValueTenths);
-        var localHttp = Assert.Single(profile.Pages[1].Controls.Where(
-            control => control.Action.Type == RemoteActionType.LocalHTTP));
+        var localHttp = Assert.Single(profile.Pages[1].Controls,
+            control => control.Action.Type == RemoteActionType.LocalHTTP);
         Assert.Equal("GET", localHttp.Action.HttpMethod);
         Assert.Null(localHttp.Action.HttpBody);
     }

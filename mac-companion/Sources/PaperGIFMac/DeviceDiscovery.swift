@@ -133,7 +133,7 @@ final class DeviceDiscovery: NSObject, ObservableObject {
         return hosts
     }
 
-    nonisolated private static func probeNetwork(preferredAddress: String?) async -> [Device] {
+    nonisolated static func probeNetwork(preferredAddress: String?) async -> [Device] {
         var candidates = localSweepHosts()
         if let preferred = preferredHost(from: preferredAddress) {
             candidates.removeAll { $0 == preferred }

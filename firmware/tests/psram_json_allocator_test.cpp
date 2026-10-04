@@ -1,4 +1,5 @@
 #include "../include/psram_json_allocator.h"
+#include "remote_text_layout.h"
 
 #include <cassert>
 #include <cstdlib>
@@ -72,6 +73,27 @@ int main() {
     }
     assert(allocations.empty());
 
+    // The profile JSON key is nominal points, not a font index or scale. Old
+    // profiles default to 24; clamp before narrowing to the PSRAM uint8 field.
+    for (const char* json : {"{}", "{\"maxButtonTextSize\":-1}",
+                            "{\"maxButtonTextSize\":0}", "{\"maxButtonTextSize\":9}",
+                            "{\"maxButtonTextSize\":12}", "{\"maxButtonTextSize\":17}",
+                            "{\"maxButtonTextSize\":24}", "{\"maxButtonTextSize\":256}"}) {
+        JsonDocument document(&allocator);
+        assert(!deserializeJson(document, json));
+        const int input = document["maxButtonTextSize"] | 24;
+        const uint8_t stored = remote_text_layout::clampMaxButtonTextSize(input);
+        assert(stored == (input < 9 ? 9 : input > 24 ? 24 : input));
+        document["maxButtonTextSize"] = stored;
+        std::string serialized;
+        serializeJson(document, serialized);
+        JsonDocument restored(&allocator);
+        assert(!deserializeJson(restored, serialized));
+        assert(restored["maxButtonTextSize"].is<unsigned>());
+        assert(restored["maxButtonTextSize"].as<unsigned>() == stored);
+    }
+    assert(allocations.empty());
+
     std::ostringstream source;
     source << "{\"version\":6,\"pages\":[";
     for (int page = 0; page < 4; ++page) {
@@ -128,5 +150,5 @@ int main() {
     assert(allocationCalls > 100);
     assert(reallocationCalls > 1);
     std::cout << "PSRAM JSON allocator tests passed: capability routing, large profiles, "
-                 "round trips, allocation failure and cleanup\n";
+                 "round trips, maxButtonTextSize defaults/clamp, allocation failure and cleanup\n";
 }

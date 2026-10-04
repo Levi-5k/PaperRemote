@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <ESPmDNS.h>
 #include <M5Unified.h>
+#include <lgfx/v1/panel/Panel_IT8951.hpp>
 #include <NimBLEDevice.h>
 #include <new>
 #include <SD.h>
@@ -25,8 +26,10 @@
 #include <mbedtls/md5.h>
 #include "geometric_snake.h"
 #include "local_http_policy.h"
+#include "low_power_mode.h"
 #include "media_timeline.h"
 #include "monochrome_damage.h"
+#include "power_policy.h"
 #include "psram_json_allocator.h"
 #include "remote_computer.h"
 #include "remote_icon_raster.h"
@@ -44,6 +47,36 @@
 namespace {
 
 PsramJsonAllocator profileJsonAllocator;
+
+// Gates the IT8951's clocks while the panel is idle; the next panel
+// transaction (draw, busy poll or wait) sends SYS_RUN before anything else.
+class StandbyPanel final : public lgfx::Panel_IT8951 {
+public:
+    void beginTransaction() override {
+        lgfx::Panel_IT8951::beginTransaction();
+        lastUsedAt = millis();
+        if (standby) {
+            standby = false;
+            // Nest the command so its endWrite cannot end the caller's transaction.
+            ++_start_count;
+            lgfx::Panel_IT8951::setPowerSave(false);
+            --_start_count;
+        }
+    }
+
+    void enterStandbyWhenIdle(uint32_t idleMs) {
+        if (standby || getStartCount() != 0 || millis() - lastUsedAt < idleMs ||
+            lgfx::Panel_IT8951::displayBusy()) {
+            return;
+        }
+        lgfx::Panel_IT8951::setPowerSave(true);
+        standby = true;
+    }
+
+private:
+    uint32_t lastUsedAt = 0;
+    bool standby = false;
+};
 
 constexpr char kServiceUuid[] = "7A230001-7D2A-4C7B-9C42-504749460001";
 constexpr char kControlUuid[] = "7A230002-7D2A-4C7B-9C42-504749460001";
@@ -107,6 +140,13 @@ constexpr uint32_t kHeaderBytes = 22;
 constexpr uint32_t kUploadWindowBytes = 16 * 1024;
 constexpr size_t kWifiWriteBufferBytes = 32 * 1024;
 constexpr uint32_t kIdleLoopDelayMs = 10;
+// Without recent input the loop waits longer; touch and button interrupts end the wait early.
+constexpr uint32_t kQuietLoopDelayMs = 50;
+constexpr uint32_t kFastAdvertisingMs = 30000;
+constexpr uint32_t kCpuBoostHoldMs = 3000;
+constexpr uint32_t kPanelStandbyIdleMs = 2000;
+constexpr uint32_t kWifiTxPowerCheckIntervalMs = 60000;
+constexpr uint32_t kBackgroundWakeIPhoneWaitMs = 90000;
 constexpr uint8_t kHomeWifiAuthenticationAttemptLimit = 3;
 constexpr uint32_t kHomeWifiAuthenticationRetryDelayMs = 1500;
 constexpr uint32_t kSlideshowIntervalsSeconds[] = {
@@ -392,6 +432,7 @@ struct RemoteProfile {
     uint8_t computerCount = 0;
     uint32_t screensaverDelayMs = 30000;
     uint8_t buttonQualityRefreshInterval = 10;
+    uint8_t maxButtonTextSize = 24;
     uint16_t elementRefreshDelayMilliseconds = 20;
     bool useFahrenheit = false;
     int16_t timeZoneOffsetMinutes = 0;
@@ -550,6 +591,8 @@ struct FirmwareUpdateSession {
     bool accepting;
     bool succeeded;
     const char* error;
+    uint8_t returnScreen;
+    uint8_t progressStep;
 };
 FirmwareUpdateSession* firmwareUpdate = nullptr;
 bool wifiScreenRefreshPending = false;
@@ -676,6 +719,28 @@ size_t wifiWriteBufferLength = 0;
 uint32_t wifiUploadStartedAt = 0;
 RTC_DATA_ATTR volatile uint32_t renderInProgress = 0;
 RTC_DATA_ATTR uint8_t sleepingRemotePageIndex = 0;
+RTC_DATA_ATTR bool lowPowerMode = false;
+RTC_DATA_ATTR bool remoteRecoveryWakeArmed = false;
+struct HomeWifiCache {
+    uint32_t ssidHash;
+    uint8_t bssid[6];
+    uint8_t channel;
+    bool valid;
+};
+RTC_DATA_ATTR HomeWifiCache homeWifiCache;
+// Internal DRAM has no static headroom, so this per-boot state lives in RTC
+// memory as well; setup() resets it on every boot.
+RTC_DATA_ATTR StandbyPanel* standbyPanel = nullptr;
+RTC_DATA_ATTR bool backgroundWake = false;
+RTC_DATA_ATTR bool scheduledIPhoneActionWaiting = false;
+RTC_DATA_ATTR volatile bool homeWifiFastConnectUsed = false;
+RTC_DATA_ATTR volatile uint32_t homeWifiRetryDelayMs = power_policy::homeWifiRetryMinimumMs;
+RTC_DATA_ATTR uint32_t cpuBusyAt = 0;
+RTC_DATA_ATTR uint32_t wifiTxPowerCheckedAt = 0;
+RTC_DATA_ATTR uint32_t nextSchedulePollAt = 0;
+RTC_DATA_ATTR volatile uint32_t bluetoothFastAdvertisingUntil = 0;
+RTC_DATA_ATTR bool bluetoothAdvertisingSlow = false;
+RTC_DATA_ATTR SemaphoreHandle_t loopWakeSemaphore = nullptr;
 RTC_DATA_ATTR ClimateAutomationStore climateAutomationStore;
 RTC_DATA_ATTR ScheduleRunStore scheduleRunStore;
 float climateTemperatureC = 0;
@@ -744,13 +809,20 @@ bool readHttpLine(WiFiClient& client, String& line, uint32_t deadline) {
     return false;
 }
 
+struct KeepAliveConnection {
+    WiFiClient client;
+    String authority;
+    uint16_t port = 0;
+};
+
 bool sendHttpResponse(
     const String& url,
     const char* method,
     const String& body,
     String& responseBody,
     const char* token,
-    uint32_t responseTimeoutMs = 5000);
+    uint32_t responseTimeoutMs = 5000,
+    KeepAliveConnection* keepAlive = nullptr);
 void stopWifiMode();
 void startBluetooth();
 void ensureBluetoothAdvertising();
@@ -780,6 +852,10 @@ void pollClimateAutomation();
 bool hasEnabledClimateAutomation();
 void pollScheduledRemoteActions();
 uint64_t backgroundWakeIntervalUs(uint64_t defaultIntervalUs);
+void applyWifiSleep();
+void boostCpu();
+void configureAdvertisingInterval(NimBLEAdvertising* advertising);
+void refreshRemoteBatteryIndicator(bool force = false);
 
 void loadSliderPositionStore() {
     if (sliderPositionStoreLoaded || sliderPositionStore == nullptr) {
@@ -1179,6 +1255,79 @@ void releaseFirmwareUpdate() {
     firmwareUpdate = nullptr;
 }
 
+void displaySettings();
+
+enum FirmwareReturnScreen : uint8_t {
+    kReturnToFrame = 0,
+    kReturnToRemote,
+    kReturnToSettings,
+    kReturnToLibrary,
+    kReturnToSlideshowMenu,
+    kReturnToWifiMode,
+};
+
+void drawFirmwareUpdateProgress(uint32_t receivedBytes, uint32_t expectedBytes) {
+    constexpr int32_t barX = 42;
+    constexpr int32_t barY = 520;
+    constexpr int32_t barWidth = 456;
+    constexpr int32_t barHeight = 36;
+    M5.Display.drawRect(barX, barY, barWidth, barHeight, TFT_BLACK);
+    const int32_t filled = expectedBytes == 0 ? 0 : static_cast<int32_t>(
+        static_cast<uint64_t>(barWidth - 8) * min(receivedBytes, expectedBytes) / expectedBytes);
+    if (filled > 0) {
+        M5.Display.fillRect(barX + 4, barY + 4, filled, barHeight - 8, TFT_BLACK);
+    }
+}
+
+void displayFirmwareUpdateScreen() {
+    firmwareUpdate->returnScreen = remoteVisible ? kReturnToRemote
+        : settingsVisible ? kReturnToSettings
+        : libraryVisible ? kReturnToLibrary
+        : slideshowMenuVisible ? kReturnToSlideshowMenu
+        : wifiModeVisible ? kReturnToWifiMode
+        : kReturnToFrame;
+    M5.Display.waitDisplay();
+    M5.Display.setEpdMode(epd_mode_t::epd_fast);
+    M5.Display.startWrite();
+    M5.Display.fillScreen(TFT_WHITE);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setTextDatum(textdatum_t::top_left);
+    M5.Display.setFont(&fonts::Orbitron_Light_32);
+    M5.Display.setTextSize(1);
+    M5.Display.drawString("UPDATING", 42, 300);
+    M5.Display.setFont(&fonts::FreeSansBold12pt7b);
+    M5.Display.drawString("Installing new paperGIF firmware.", 42, 380);
+    M5.Display.setFont(&fonts::FreeSans12pt7b);
+    M5.Display.drawString("Keep the M5Paper powered on.", 42, 420);
+    M5.Display.drawString("It restarts by itself when done.", 42, 456);
+    drawFirmwareUpdateProgress(0, firmwareUpdate->expectedBytes);
+    M5.Display.endWrite();
+}
+
+void refreshFirmwareUpdateProgress() {
+    const uint8_t step = static_cast<uint8_t>(
+        static_cast<uint64_t>(firmwareUpdate->receivedBytes) * 10 / firmwareUpdate->expectedBytes);
+    if (step == firmwareUpdate->progressStep) {
+        return;
+    }
+    firmwareUpdate->progressStep = step;
+    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+    M5.Display.startWrite();
+    drawFirmwareUpdateProgress(firmwareUpdate->receivedBytes, firmwareUpdate->expectedBytes);
+    M5.Display.endWrite();
+}
+
+void restoreScreenAfterFirmwareFailure(uint8_t screen) {
+    switch (screen) {
+    case kReturnToRemote: displayRemote(); break;
+    case kReturnToSettings: displaySettings(); break;
+    case kReturnToLibrary: displayLibrary(); break;
+    case kReturnToSlideshowMenu: displaySlideshowMenu(); break;
+    case kReturnToWifiMode: displayWifiMode(); break;
+    default: displayCurrentFrame(); break;
+    }
+}
+
 // Raw partition writes; esp_ota_begin/write would add static DRAM the firmware cannot spare.
 bool writeFirmwareChunk(const uint8_t* data, size_t length) {
     const uint32_t end = firmwareUpdate->receivedBytes + length;
@@ -1269,12 +1418,20 @@ uint32_t screensaverDelaySeconds() {
 }
 
 uint32_t screensaverDelayMs() {
-    return screensaverDelaySeconds() * 1000;
+    return low_power_mode::idleDelayMs(lowPowerMode, screensaverDelaySeconds() * 1000);
+}
+
+bool remoteSleepDisabled() {
+    return remoteSleepNever && !lowPowerMode;
+}
+
+bool sleepBetweenImages() {
+    return slideshowDeepSleep || lowPowerMode;
 }
 
 bool remoteSleepDeadlineReached(uint32_t now) {
     return remoteVisible && remoteProfile != nullptr &&
-        !slideshowEnabled && !remoteSleepNever &&
+        !slideshowEnabled && !remoteSleepDisabled() &&
         now - lastRemoteActivityAt >= screensaverDelayMs();
 }
 
@@ -1386,23 +1543,59 @@ void restoreSettings() {
     }
 }
 
+void boostCpu() {
+    cpuBusyAt = millis();
+    if (!lowPowerMode && getCpuFrequencyMhz() != 240) {
+        setCpuFrequencyMhz(240);
+    }
+}
+
+void applyLowPowerMode(bool active) {
+    const bool changed = active != lowPowerMode;
+    lowPowerMode = active;
+    if (active) {
+        // Wi-Fi and BLE need at least 80 MHz.
+        setCpuFrequencyMhz(80);
+    } else {
+        boostCpu();
+    }
+    applyWifiSleep();
+    if (bluetoothActive) {
+        NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+        const bool wasAdvertising = advertising->isAdvertising();
+        if (wasAdvertising) {
+            advertising->stop();
+        }
+        configureAdvertisingInterval(advertising);
+        if (wasAdvertising) {
+            advertising->start();
+        }
+    }
+    if (changed && remoteVisible) {
+        refreshRemoteBatteryIndicator(true);
+    }
+}
+
 void updateScreensaverBatteryPolicy() {
-    if (!imagesOnlyOnBattery) {
-        batteryImagesOnly = false;
-        batteryPolicySampled = false;
+    if (batteryPolicySampled && millis() - batteryPolicySampledAt < 10000) {
         return;
     }
-    if (!batteryPolicySampled || millis() - batteryPolicySampledAt >= 10000) {
-        const int32_t level = M5.Power.getBatteryLevel();
-        const bool imagesOnly = screensaver_battery::imagesOnly(true, level);
-        if (!batteryPolicySampled || imagesOnly != batteryImagesOnly) {
-            Serial.printf("Screen saver battery: %ld%% -> %s\n",
-                static_cast<long>(level), imagesOnly ? "still images" : "animation");
-        }
-        batteryImagesOnly = imagesOnly;
-        batteryPolicySampledAt = millis();
-        batteryPolicySampled = true;
+    const int32_t level = M5.Power.getBatteryLevel();
+    const bool nextLowPowerMode = low_power_mode::next(lowPowerMode, level);
+    if (!batteryPolicySampled || nextLowPowerMode != lowPowerMode) {
+        Serial.printf("Battery %ld%%: Low Power Mode %s\n",
+            static_cast<long>(level), nextLowPowerMode ? "on" : "off");
+        applyLowPowerMode(nextLowPowerMode);
     }
+    const bool imagesOnly =
+        screensaver_battery::imagesOnly(imagesOnlyOnBattery, level) || lowPowerMode;
+    if (!batteryPolicySampled || imagesOnly != batteryImagesOnly) {
+        Serial.printf("Screen saver battery: %ld%% -> %s\n",
+            static_cast<long>(level), imagesOnly ? "still images" : "animation");
+    }
+    batteryImagesOnly = imagesOnly;
+    batteryPolicySampledAt = millis();
+    batteryPolicySampled = true;
 }
 
 int8_t remoteIconHexValue(char character) {
@@ -1481,6 +1674,8 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     output.screensaverDelayMs = delaySeconds * 1000;
     output.buttonQualityRefreshInterval = constrain(
         document["buttonQualityRefreshInterval"] | 10, 1, 100);
+    output.maxButtonTextSize = remote_text_layout::clampMaxButtonTextSize(
+        document["maxButtonTextSize"] | 24);
     output.elementRefreshDelayMilliseconds = constrain(
         document["elementRefreshDelayMilliseconds"] | 20, 0, 500);
     output.useFahrenheit = strcmp(document["temperatureUnit"] | "celsius", "fahrenheit") == 0;
@@ -1982,6 +2177,7 @@ void initializeDefaultRemoteProfile() {
     remoteProfile->macPort = 43821;
     remoteProfile->screensaverDelayMs = 30000;
     remoteProfile->buttonQualityRefreshInterval = 10;
+    remoteProfile->maxButtonTextSize = 24;
     remoteProfile->elementRefreshDelayMilliseconds = 20;
     remoteProfile->pageCount = 1;
     remoteProfile->configured = true;
@@ -2881,6 +3077,9 @@ void configureWifiServer() {
             }
             return;
         }
+        document["maxButtonTextSize"] = remoteProfile != nullptr
+            ? remoteProfile->maxButtonTextSize
+            : remote_text_layout::clampMaxButtonTextSize(document["maxButtonTextSize"] | 24);
         if (remoteProfile != nullptr) {
             for (JsonObject pageJson : document["pages"].as<JsonArray>()) {
                 const char* pageId = pageJson["id"] | "";
@@ -3100,17 +3299,24 @@ void configureWifiServer() {
             return;
         }
         const char* error = "invalid_firmware_request";
+        bool showedUpdateScreen = false;
+        uint8_t returnScreen = kReturnToFrame;
         if (firmwareUpdate != nullptr) {
             if (firmwareUpdate->error == nullptr) {
                 failFirmwareUpdate("incomplete_upload");
             }
             error = firmwareUpdate->error;
+            showedUpdateScreen = firmwareUpdate->progressStep != UINT8_MAX;
+            returnScreen = firmwareUpdate->returnScreen;
         }
         String response = "{\"ok\":false,\"error\":";
         appendJsonString(response, error);
         response += '}';
         releaseFirmwareUpdate();
         wifiServer.send(400, "application/json", response);
+        if (showedUpdateScreen) {
+            restoreScreenAfterFirmwareFailure(returnScreen);
+        }
     }, []() {
         if (!wifiRequestIsMultipart()) {
             return;
@@ -3128,6 +3334,7 @@ void configureWifiServer() {
             }
             mbedtls_md5_init(&firmwareUpdate->md5);
             mbedtls_md5_starts_ret(&firmwareUpdate->md5);
+            firmwareUpdate->progressStep = UINT8_MAX;
             firmwareUpdate->expectedBytes =
                 static_cast<uint32_t>(wifiServer.header("X-PGIF-Size").toInt());
             const String md5 = wifiServer.header("X-PGIF-MD5");
@@ -3143,6 +3350,8 @@ void configureWifiServer() {
                 firmwareUpdate->accepting = true;
                 Serial.printf("Firmware update started: %lu bytes\n",
                     static_cast<unsigned long>(firmwareUpdate->expectedBytes));
+                displayFirmwareUpdateScreen();
+                firmwareUpdate->progressStep = 0;
             }
         } else if (firmwareUpdate == nullptr || !firmwareUpdate->accepting) {
             return;
@@ -3154,6 +3363,7 @@ void configureWifiServer() {
             }
             mbedtls_md5_update_ret(&firmwareUpdate->md5, part.buf, part.currentSize);
             firmwareUpdate->receivedBytes += part.currentSize;
+            refreshFirmwareUpdateProgress();
         } else if (part.status == UPLOAD_FILE_END) {
             finishFirmwareUpdate();
         } else if (part.status == UPLOAD_FILE_ABORTED) {
@@ -3351,7 +3561,7 @@ void configureWifiServer() {
                 const uint32_t uploadFinishedAt = millis();
                 wifiUploadSucceeded = installTemporaryAnimation();
                 const uint32_t installFinishedAt = millis();
-                WiFi.setSleep(true);
+                applyWifiSleep();
                 bluetoothResumeRequested = bluetoothSuspendedForWifiUpload;
                 Serial.printf(
                     "Wi-Fi upload: %lu bytes in %lums, install=%lums, result=%s\n",
@@ -3431,7 +3641,8 @@ void startWifiMode(bool showScreen = true) {
     wifiApStarted = false;
     const bool hasRemote = remoteProfile != nullptr && remoteProfile->configured;
     const bool modeStarted = WiFi.mode(hasRemote ? WIFI_AP_STA : WIFI_AP);
-    WiFi.setSleep(true);
+    applyWifiSleep();
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
     const bool accessPointStarted = modeStarted && WiFi.softAP(wifiSsid, kWifiPassword);
     const uint32_t startupDeadline = millis() + 3000;
     while (accessPointStarted && !wifiApStarted &&
@@ -3551,6 +3762,7 @@ void beginUpload(const uint8_t* value, size_t length) {
 }
 
 void displayUploadStart() {
+    boostCpu();
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
     M5.Display.fillScreen(TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -3897,6 +4109,8 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
             cancelRemoteProfileUpload(false);
         }
         splashPending = !animationReady;
+        bluetoothFastAdvertisingUntil = millis() + kFastAdvertisingMs;
+        nextBluetoothAdvertisingCheckAt = millis();
         if (server->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) {
             NimBLEDevice::startAdvertising();
         }
@@ -3906,6 +4120,19 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
 ControlCallbacks controlCallbacks;
 DataCallbacks dataCallbacks;
 ServerCallbacks serverCallbacks;
+
+void applyWifiSleep() {
+    // Max modem sleep wakes only every DTIM listen interval; BLE coexistence
+    // needs one of the modem-sleep modes either way.
+    WiFi.setSleep(lowPowerMode ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM);
+}
+
+void configureAdvertisingInterval(NimBLEAdvertising* advertising) {
+    // 0.625 ms units: 100-200 ms fast, Apple's 1022.5-1285 ms step when slow.
+    const bool slow = lowPowerMode || bluetoothAdvertisingSlow;
+    advertising->setMinInterval(slow ? 1636 : 160);
+    advertising->setMaxInterval(slow ? 2056 : 320);
+}
 
 void startBluetooth() {
     if (bluetoothActive) {
@@ -3928,12 +4155,13 @@ void startBluetooth() {
 
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
     advertising->addServiceUUID(kServiceUuid);
-    advertising->setMinInterval(160);
-    advertising->setMaxInterval(320);
+    configureAdvertisingInterval(advertising);
     advertising->setPreferredParams(12, 12);
     advertising->enableScanResponse(true);
     advertising->start();
     bluetoothActive = true;
+    bluetoothAdvertisingSlow = false;
+    bluetoothFastAdvertisingUntil = millis() + kFastAdvertisingMs;
     nextBluetoothAdvertisingCheckAt = millis() + 5000;
 }
 
@@ -3950,7 +4178,21 @@ void ensureBluetoothAdvertising() {
         return;
     }
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
-    if (advertising != nullptr && !advertising->isAdvertising()) {
+    if (advertising == nullptr) {
+        return;
+    }
+    // Apple's accessory pattern: fast for 30 s after start or disconnect, then
+    // 1022.5-1285 ms, which also applies while a controller is connected.
+    const bool slow = deviceConnected ||
+        static_cast<int32_t>(millis() - bluetoothFastAdvertisingUntil) >= 0;
+    if (slow != bluetoothAdvertisingSlow) {
+        bluetoothAdvertisingSlow = slow;
+        if (advertising->isAdvertising()) {
+            advertising->stop();
+        }
+        configureAdvertisingInterval(advertising);
+        advertising->start();
+    } else if (!advertising->isAdvertising()) {
         advertising->start();
         Serial.println("BLE advertising restarted");
     }
@@ -3982,7 +4224,7 @@ void resumeBluetoothAfterWifiUpload() {
     if (!bluetoothSuspendedForWifiUpload) {
         return;
     }
-    WiFi.setSleep(true);
+    applyWifiSleep();
     bluetoothSuspendedForWifiUpload = false;
     startBluetooth();
     Serial.println("Bluetooth resumed after Wi-Fi upload");
@@ -4020,6 +4262,7 @@ void displayDisconnectedSplash() {
 }
 
 void displayLibrary() {
+    boostCpu();
     refreshLibrary();
     if (libraryItemCount > 0) {
         librarySelection = min(librarySelection, libraryItemCount - 1);
@@ -4083,6 +4326,7 @@ void drawSettingsRow(const char* title, const char* detail, int32_t y) {
 }
 
 void displaySettings() {
+    boostCpu();
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
     M5.Display.startWrite();
     M5.Display.fillScreen(TFT_WHITE);
@@ -4101,6 +4345,7 @@ void displaySettings() {
 
     M5.Display.setFont(&fonts::FreeSans12pt7b);
     M5.Display.drawString("Remote layout is configured in the iPhone app.", 34, 700);
+    M5.Display.drawString("Firmware " PAPERGIF_FIRMWARE_VERSION, 34, 740);
     M5.Display.endWrite();
     settingsVisible = true;
     remoteVisible = false;
@@ -4198,6 +4443,7 @@ void adjustSlideshowInterval(int direction) {
 }
 
 void displaySlideshowMenu() {
+    boostCpu();
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
     M5.Display.startWrite();
     M5.Display.fillScreen(TFT_WHITE);
@@ -4284,6 +4530,7 @@ void displaySlideshowMenu() {
 }
 
 void displayWifiMode() {
+    boostCpu();
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
     M5.Display.startWrite();
     M5.Display.fillScreen(TFT_WHITE);
@@ -4555,23 +4802,104 @@ bool layoutRemoteText(
         }, lineCount);
 }
 
+const lgfx::GFXfont* remoteTitleFont(int index) {
+    const lgfx::GFXfont* nativeFonts[] = {
+        &fonts::FreeSansBold9pt7b, &fonts::FreeSansBold12pt7b,
+        &fonts::FreeSansBold18pt7b, &fonts::FreeSansBold24pt7b,
+    };
+    return nativeFonts[index];
+}
+
+uint32_t remoteTitleCodepoint(const char* text, size_t offset, size_t next) {
+    const size_t bytes = next - offset;
+    uint32_t code = static_cast<uint8_t>(text[offset]) &
+        (bytes == 1 ? 0x7F : bytes == 2 ? 0x1F : bytes == 3 ? 0x0F : 0x07);
+    for (++offset; offset < next; ++offset) {
+        code = (code << 6) | (static_cast<uint8_t>(text[offset]) & 0x3F);
+    }
+    return code;
+}
+
+const lgfx::GFXglyph* remoteTitleGlyph(const lgfx::GFXfont* font, uint32_t code) {
+    // getGlyph() is private; these four native FreeSans fonts expose their
+    // contiguous ASCII glyph table publicly (ESP32 flash is memory mapped).
+    if (code < font->first || code > font->last || font->range_num != 0) return nullptr;
+    return &font->glyph[code - font->first];
+}
+
+bool layoutRemoteTitle(const char* text, const remote_text_layout::Rect& area,
+                       remote_text_layout::FontChoice choice, uint8_t alignment,
+                       int32_t& textHeight, bool draw) {
+    if (choice.index < 0) { textHeight = 0; return false; }
+    const auto* font = remoteTitleFont(choice.index);
+    lgfx::FontMetrics metrics = {};
+    font->getDefaultMetric(&metrics);
+    const auto measure = [&](size_t start, size_t bytes) {
+        remote_text_layout::InkMeasure result;
+        const size_t end = start + bytes;
+        for (size_t offset = start; offset < end;) {
+            const size_t next = remote_text_layout::nextCodepoint(text, offset, end);
+            const uint32_t code = remoteTitleCodepoint(text, offset, next);
+            const auto* glyph = remoteTitleGlyph(font, code);
+            if (!glyph) glyph = remoteTitleGlyph(font, ' '); // Same native-font fallback as LGFX.
+            if (glyph) {
+                result.add(glyph->xOffset, glyph->yOffset, glyph->width, glyph->height,
+                    glyph->xAdvance, choice.step);
+            }
+            offset = next;
+        }
+        return result.ink;
+    };
+    // IFont::updateFontMetric only updates horizontal GFX metrics. The glyph table
+    // supplies the per-line ink top/bottom; drawChar takes a BASELINE origin,
+    // unlike drawString(top_left), which adds the font-wide baseline/bearings.
+    const auto emit = [&](size_t start, size_t bytes, int32_t penX, int32_t baselineY) {
+        lgfx::TextStyle style = M5.Display.getTextStyle();
+        style.back_rgb888 = style.fore_rgb888; // Never erase other lines/icons.
+        style.size_x = style.size_y = choice.step / 16.0f;
+        // With transparent glyphs the font envelope is unnecessary. Zero its
+        // Y origin so LGFX floors glyph yOffset exactly once, matching measure;
+        // otherwise two fixed-point floors can shift shrunken glyphs by 1px.
+        lgfx::FontMetrics drawMetrics = metrics;
+        drawMetrics.y_offset = 0;
+        int32_t filledX = penX;
+        const size_t end = start + bytes;
+        for (size_t offset = start; offset < end;) {
+            const size_t next = remote_text_layout::nextCodepoint(text, offset, end);
+            const uint32_t code = remoteTitleCodepoint(text, offset, next);
+            const auto* glyph = remoteTitleGlyph(font, code);
+            if (glyph) {
+                font->drawChar(&M5.Display, penX, baselineY, code, &style, &drawMetrics, filledX);
+            } else {
+                glyph = remoteTitleGlyph(font, ' ');
+            }
+            if (glyph) penX += remote_text_layout::scaled(glyph->xAdvance, choice.step);
+            offset = next;
+        }
+    };
+    return remote_text_layout::inkLayout(text, area,
+        max<int32_t>(1, remote_text_layout::scaled(metrics.height, choice.step)),
+        max<int32_t>(1, remote_text_layout::scaled(4, choice.step)),
+        alignment, 1, measure, emit, textHeight, draw);
+}
+
+remote_text_layout::FontChoice fittedRemoteTitle(const char* text,
+    const remote_text_layout::Rect& area, int32_t& textHeight) {
+    return remote_text_layout::chooseFont(remoteProfile ? remoteProfile->maxButtonTextSize : 24,
+        [&](int index, int step) {
+            remote_text_layout::FontChoice choice;
+            choice.index = index; choice.step = step;
+            return layoutRemoteTitle(text, area, choice, 1, textHeight, false);
+        });
+}
+
 void drawFittedRemoteTitle(const char* text, int32_t x, int32_t y,
                           int32_t width, int32_t height, uint8_t alignment) {
-    const float previousX = M5.Display.getTextSizeX();
-    const float previousY = M5.Display.getTextSizeY();
-    M5.Display.setFont(&fonts::FreeSansBold9pt7b);
-    // 1/16 increments through 2.625x (~24pt). Measure the actual display font
-    // at every candidate, including bearings, wrapped lines and scaled spacing.
-    const int step = remote_text_layout::largestFit(42, [&](int candidate) {
-        M5.Display.setTextSize(candidate / 16.0f);
-        return layoutRemoteText(text, 0, 0, width, height, alignment, 1, false);
-    });
-    if (step > 0) {
-        M5.Display.setTextSize(step / 16.0f);
-        M5.Display.setTextDatum(textdatum_t::top_left);
-        layoutRemoteText(text, x, y, width, height, alignment, 1, true);
-    }
-    M5.Display.setTextSize(previousX, previousY);
+    remote_text_layout::Rect area;
+    area.x = x; area.y = y; area.width = width; area.height = height;
+    int32_t textHeight = 0;
+    const auto choice = fittedRemoteTitle(text, area, textHeight);
+    layoutRemoteTitle(text, area, choice, alignment, textHeight, true);
 }
 
 void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = false) {
@@ -4754,7 +5082,7 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
                     valueArea.width, valueArea.height, 2);
             }
             drawFittedRemoteTitle(control.title, x + titleArea.x, y + titleArea.y,
-                titleArea.width, titleArea.height, 0);
+                titleArea.width, titleArea.height, 1);
         };
         const auto& content = sliderLayout.content;
         if (content.width <= 0 || content.height <= 0) return;
@@ -4793,9 +5121,12 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
         M5.Display.drawRoundRect(x, y, width, height, radius, foreground);
     }
     M5.Display.setTextColor(foreground, background);
-    const auto layout = remote_text_layout::buttonLayout(width, height,
+    auto layout = remote_text_layout::buttonLayout(width, height,
         (!playbackStateAvailable && control.hasIconBitmap) || displayedSymbol[0] != '\0');
     if (layout.content.width <= 0 || layout.content.height <= 0) return;
+    int32_t textHeight = 0;
+    const auto titleFont = fittedRemoteTitle(displayedTitle, layout.title, textHeight);
+    remote_text_layout::centerVerticalGroup(layout, titleFont.index < 0 ? 0 : textHeight);
     M5.Display.setClipRect(x + layout.content.x, y + layout.content.y,
         layout.content.width, layout.content.height);
     if (layout.iconSize > 0) {
@@ -4805,8 +5136,9 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
             x + layout.iconX, y + layout.iconY, layout.iconSize,
             foreground, background);
     }
-    drawFittedRemoteTitle(displayedTitle, x + layout.title.x, y + layout.title.y,
-        layout.title.width, layout.title.height, layout.horizontal ? 0 : 1);
+    auto titleArea = layout.title;
+    titleArea.x += x; titleArea.y += y;
+    layoutRemoteTitle(displayedTitle, titleArea, titleFont, 1, textHeight, true);
     M5.Display.clearClipRect();
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
 }
@@ -4912,6 +5244,7 @@ int8_t remotePageTabAtX(int32_t x) {
 void displayRemoteProfileChanges(
     const RemoteProfile& previousProfile,
     uint8_t previousPageIndex) {
+    boostCpu();
     const RemotePage& previousPage = previousProfile.pages[previousPageIndex];
     const RemotePage& page = remoteProfile->pages[remotePageIndex];
     const bool pageNameChanged = strcmp(previousPage.name, page.name) != 0;
@@ -5224,11 +5557,26 @@ media_timeline::Position currentRemoteMediaPosition(uint32_t now) {
 }
 
 void refreshRemoteMediaPosition() {
-    if (remoteVisible && currentRemoteMediaPosition(millis()) != displayedRemoteMediaPosition) {
-        // Coalesce time changes with other status updates and wait for the panel
-        // to be idle in renderRemoteFeedback(), never in the touch handler.
-        remoteStatusRedrawPending = true;
+    if (!remoteVisible) {
+        return;
     }
+    const media_timeline::Position position = currentRemoteMediaPosition(millis());
+    if (position == displayedRemoteMediaPosition) {
+        return;
+    }
+    // Low Power Mode lets a running clock advance in coarse steps; seeks,
+    // drags and track changes still redraw immediately.
+    if (lowPowerMode && activeRemoteControlIndex < 0 && position.available &&
+        displayedRemoteMediaPosition.available &&
+        position.durationSeconds == displayedRemoteMediaPosition.durationSeconds &&
+        position.elapsedSeconds >= displayedRemoteMediaPosition.elapsedSeconds &&
+        position.elapsedSeconds - displayedRemoteMediaPosition.elapsedSeconds <
+            low_power_mode::mediaClockStepSeconds) {
+        return;
+    }
+    // Coalesce time changes with other status updates and wait for the panel
+    // to be idle in renderRemoteFeedback(), never in the touch handler.
+    remoteStatusRedrawPending = true;
 }
 
 void drawRemoteStatusLine() {
@@ -5323,11 +5671,15 @@ void drawRemoteBatteryIndicator() {
     M5.Display.setFont(&fonts::FreeSansBold9pt7b);
     M5.Display.setTextDatum(textdatum_t::middle_right);
     M5.Display.drawString(percentage, bodyX - 8, bodyY + bodyHeight / 2);
+    M5.Display.fillRect(400, 82, 116, 22, TFT_WHITE);
+    if (lowPowerMode) {
+        M5.Display.drawString("LOW POWER", bodyX + bodyWidth + 6, 93);
+    }
 }
 
-void refreshRemoteBatteryIndicator() {
+void refreshRemoteBatteryIndicator(bool force) {
     const int8_t nextLevel = sampleRemoteBatteryLevel();
-    if (nextLevel == remoteBatteryLevel) {
+    if (!force && nextLevel == remoteBatteryLevel) {
         return;
     }
     remoteBatteryLevel = nextLevel;
@@ -5355,6 +5707,7 @@ void renderRemoteFeedback() {
         M5.Display.displayBusy()) {
         return;
     }
+    boostCpu();
     const RemotePage& page = remoteProfile->pages[remotePageIndex];
     M5.Display.setEpdMode(remoteFeedbackQualityMask != 0
         ? epd_mode_t::epd_text : epd_mode_t::epd_fastest);
@@ -5422,6 +5775,7 @@ void displayRemote() {
     if (remoteProfile == nullptr || !remoteProfile->configured) {
         return;
     }
+    boostCpu();
     activeRemoteControlIndex = -1;
     activeRemoteControlVisual = false;
     activeRemoteHoldTriggered = false;
@@ -5526,16 +5880,49 @@ void connectHomeWifi() {
     }
     WiFi.mode(wifiActive ? WIFI_AP_STA : WIFI_STA);
     // The ESP32 coexistence controller requires modem sleep when BLE starts.
-    WiFi.setSleep(true);
+    applyWifiSleep();
+    // Connect at full power; updateWifiTxPower() trims it once RSSI is known.
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    wifiTxPowerCheckedAt = millis() - kWifiTxPowerCheckIntervalMs + 5000;
     homeWifiState = 1;
     homeWifiAuthenticationRetryPending = false;
     homeWifiFailureReason = 0;
     homeWifiStatusChanged = true;
     homeWifiNotificationPending = true;
-    WiFi.begin(remoteProfile->wifiSsid, remoteProfile->wifiPassword);
+    // The remembered access point and channel skip the all-channel scan.
+    homeWifiFastConnectUsed = homeWifiCache.valid &&
+        homeWifiCache.ssidHash == power_policy::ssidHash(remoteProfile->wifiSsid);
+    if (homeWifiFastConnectUsed) {
+        WiFi.begin(remoteProfile->wifiSsid, remoteProfile->wifiPassword,
+            homeWifiCache.channel, homeWifiCache.bssid);
+    } else {
+        WiFi.begin(remoteProfile->wifiSsid, remoteProfile->wifiPassword);
+    }
     homeWifiConnecting = true;
     homeWifiAttemptedAt = millis();
-    Serial.printf("Connecting to home Wi-Fi: %s\n", remoteProfile->wifiSsid);
+    Serial.printf("Connecting to home Wi-Fi: %s%s\n", remoteProfile->wifiSsid,
+        homeWifiFastConnectUsed ? " (remembered channel)" : "");
+}
+
+uint32_t homeWifiRetryIntervalMs() {
+    return power_policy::homeWifiRetryIntervalMs(lowPowerMode,
+        static_cast<int32_t>(lastRemoteActivityAt - homeWifiAttemptedAt) > 0,
+        homeWifiRetryDelayMs);
+}
+
+void updateWifiTxPower() {
+    if (WiFi.status() != WL_CONNECTED ||
+        millis() - wifiTxPowerCheckedAt < kWifiTxPowerCheckIntervalMs) {
+        return;
+    }
+    wifiTxPowerCheckedAt = millis();
+    const int rssi = WiFi.RSSI();
+    const auto power = static_cast<wifi_power_t>(
+        power_policy::wifiTxPowerQuarterDbm(rssi, wifiActive));
+    if (WiFi.getTxPower() != power) {
+        WiFi.setTxPower(power);
+        Serial.printf("Wi-Fi transmit power %.2f dBm at RSSI %d\n", power / 4.0f, rssi);
+    }
 }
 
 bool sendHttpResponse(
@@ -5544,7 +5931,8 @@ bool sendHttpResponse(
     const String& body,
     String& responseBody,
     const char* token = nullptr,
-    uint32_t responseTimeoutMs) {
+    uint32_t responseTimeoutMs,
+    KeepAliveConnection* keepAlive) {
     if (WiFi.status() != WL_CONNECTED || !url.startsWith("http://")) {
         return false;
     }
@@ -5571,9 +5959,17 @@ bool sendHttpResponse(
         }
     }
 
-    WiFiClient client;
+    WiFiClient transientClient;
+    WiFiClient& client = keepAlive != nullptr ? keepAlive->client : transientClient;
+    // A reusable connection must still be open and silent; anything else is stale.
+    const bool reused = keepAlive != nullptr && client.connected() &&
+        client.available() == 0 && keepAlive->port == port &&
+        keepAlive->authority == authority;
+    if (keepAlive != nullptr && !reused) {
+        client.stop();
+    }
     client.setTimeout(4000);
-    bool connected = false;
+    bool connected = reused;
     for (uint8_t attempt = 0; attempt < 2 && !connected; ++attempt) {
         connected = resolvedAddress == IPAddress()
             ? client.connect(authority.c_str(), port, 3000)
@@ -5597,7 +5993,8 @@ bool sendHttpResponse(
     String headers;
     headers.reserve(320);
     headers = String(requestMethod) + " " + path + " HTTP/1.1\r\nHost: " +
-        authority + ":" + String(port) + "\r\nConnection: close\r\n";
+        authority + ":" + String(port) +
+        (keepAlive != nullptr ? "\r\nConnection: keep-alive\r\n" : "\r\nConnection: close\r\n");
     if (token != nullptr && token[0] != '\0') {
         headers += "Authorization: Bearer ";
         headers += token;
@@ -5615,6 +6012,12 @@ bool sendHttpResponse(
     const uint32_t responseDeadline = millis() + responseTimeoutMs;
     String statusLine;
     if (!readHttpLine(client, statusLine, responseDeadline)) {
+        if (reused && !client.connected()) {
+            // The server closed the idle connection before reading this request.
+            client.stop();
+            return sendHttpResponse(
+                url, method, body, responseBody, token, responseTimeoutMs, keepAlive);
+        }
         Serial.printf("Remote HTTP status timeout: %s:%u\n", authority.c_str(), port);
         client.stop();
         return false;
@@ -5626,6 +6029,7 @@ bool sendHttpResponse(
             status, authority.c_str(), port, path.c_str());
     }
     int contentLength = -1;
+    bool serverClosing = false;
     while (client.connected() || client.available()) {
         String line;
         if (!readHttpLine(client, line, responseDeadline)) {
@@ -5639,6 +6043,9 @@ bool sendHttpResponse(
         normalizedHeader.toLowerCase();
         if (normalizedHeader.startsWith("content-length:")) {
             contentLength = line.substring(15).toInt();
+        } else if (normalizedHeader.startsWith("connection:") &&
+                   normalizedHeader.indexOf("close") >= 0) {
+            serverClosing = true;
         }
     }
     if (contentLength > 4096) {
@@ -5683,7 +6090,12 @@ bool sendHttpResponse(
             vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
-    client.stop();
+    if (keepAlive != nullptr && contentLength >= 0 && !serverClosing) {
+        keepAlive->authority = authority;
+        keepAlive->port = port;
+    } else {
+        client.stop();
+    }
     return status >= 200 && status < 300;
 }
 
@@ -5941,6 +6353,8 @@ void queueDeviceErrorUpload() {
 void remoteNetworkTask(void* context) {
     auto& worker = *static_cast<RemoteNetworkWorker*>(context);
     RemoteNetworkRequest request;
+    // Text polling is idempotent, so only it reuses a connection across requests.
+    KeepAliveConnection textConnection;
     while (true) {
         xSemaphoreTake(remoteNetworkMutex, portMAX_DELAY);
         const bool received = worker.requests->take(request);
@@ -5959,7 +6373,8 @@ void remoteNetworkTask(void* context) {
             request.body,
             responseBody,
             request.token[0] == '\0' ? nullptr : request.token,
-            responseTimeoutMs);
+            responseTimeoutMs,
+            request.textRequest ? &textConnection : nullptr);
         Serial.printf("Remote network lane=%u queue=%lu ms request=%lu ms -> %s\n",
             static_cast<unsigned>(worker.lane),
             static_cast<unsigned long>(startedAt - request.enqueuedAt),
@@ -6693,7 +7108,8 @@ void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now)
         item["placeholder"] = volumeControl || playbackControl ? "" : control.placeholder;
         const uint32_t refreshIntervalMs = volumeControl || playbackControl || mediaSeekControl
             ? 60000 : textBoxRefreshIntervalMs(control);
-        control.nextRefreshAt = now + (refreshIntervalMs > 0 ? refreshIntervalMs : 5000);
+        control.nextRefreshAt = now + low_power_mode::refreshIntervalMs(
+            lowPowerMode, refreshIntervalMs > 0 ? refreshIntervalMs : 5000);
     }
     if (items.size() == 0 || WiFi.status() != WL_CONNECTED) {
         if (items.size() > 0) {
@@ -6938,7 +7354,10 @@ void prepareRemoteTextBoxes() {
         resolveLocalTextBox(control);
         const bool macSource = isMacTextSource(control);
         control.nextRefreshAt = macSource ? millis() :
-            (control.refreshIntervalMs > 0 ? millis() + control.refreshIntervalMs : 0);
+            (control.refreshIntervalMs > 0
+                ? millis() + low_power_mode::refreshIntervalMs(
+                    lowPowerMode, control.refreshIntervalMs)
+                : 0);
     }
 }
 
@@ -6973,7 +7392,9 @@ void pollRemoteTextBoxes() {
         } else {
             const bool changed = resolveLocalTextBox(control);
             control.nextRefreshAt = control.refreshIntervalMs > 0
-                ? now + control.refreshIntervalMs : 0;
+                ? now + low_power_mode::refreshIntervalMs(
+                    lowPowerMode, control.refreshIntervalMs)
+                : 0;
             if (changed) {
                 redrawRemoteTextBox(page, index);
             }
@@ -7485,6 +7906,11 @@ ScheduleRunState& scheduleRunStateFor(const RemoteControl& control) {
 
 void pollScheduledRemoteActions() {
     static uint32_t lastPolledMinute = UINT32_MAX;
+    // Reading the RTC costs ~0.7 ms; once a second is plenty for minute schedules.
+    if (static_cast<int32_t>(millis() - nextSchedulePollAt) < 0) {
+        return;
+    }
+    nextSchedulePollAt = millis() + 1000;
     if (remoteProfile == nullptr || !remoteProfile->configured) {
         return;
     }
@@ -7504,6 +7930,7 @@ void pollScheduledRemoteActions() {
         return;
     }
     lastPolledMinute = minuteKey;
+    scheduledIPhoneActionWaiting = false;
     for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount; ++pageIndex) {
         RemotePage& page = remoteProfile->pages[pageIndex];
         for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
@@ -7559,6 +7986,9 @@ void pollScheduledRemoteActions() {
                     schedule.hour,
                     schedule.minute);
                 if (!dispatchRemoteAction(scheduledControl, true, false)) {
+                    if (strncmp(control.action.type, "iPhone", 6) == 0) {
+                        scheduledIPhoneActionWaiting = true;
+                    }
                     continue;
                 }
                 runState.runMask |= scheduleBit;
@@ -8126,6 +8556,7 @@ void prepareNextSlideshowItem() {
 }
 
 void displayBatteryStill(bool first) {
+    boostCpu();
     refreshLibrary();
     const size_t start = first ? activeLibraryIndex() : batteryStillIndex + 1;
     uint16_t frameCounts[kMaximumLibraryItems];
@@ -8874,8 +9305,13 @@ void enterM5PaperDeepSleep(uint64_t microseconds) {
     gpio_set_direction(kMainPowerPin, GPIO_MODE_OUTPUT);
     gpio_set_level(kMainPowerPin, 1);
     gpio_hold_en(kMainPowerPin);
+    // Keep the SD card deselected; a floating CS can pull it out of standby.
+    pinMode(kSdCs, OUTPUT);
+    digitalWrite(kSdCs, HIGH);
+    gpio_hold_en(static_cast<gpio_num_t>(kSdCs));
     gpio_deep_sleep_hold_en();
     const bool recoveryTimer = microseconds == M5.Power.sleep_no_timer;
+    remoteRecoveryWakeArmed = recoveryTimer;
     const uint64_t wakeInterval = recoveryTimer
         ? kRemoteSleepRecoveryIntervalUs
         : microseconds;
@@ -8889,6 +9325,7 @@ void enterM5PaperDeepSleep(uint64_t microseconds) {
     // A touch arriving now instead causes an immediate (safe) EXT0 wake.
     M5.Power.deepSleep(wakeInterval, false);
     gpio_hold_dis(kMainPowerPin);
+    gpio_hold_dis(static_cast<gpio_num_t>(kSdCs));
     gpio_deep_sleep_hold_dis();
     Serial.println("Deep sleep was refused; restoring remote display");
     M5.Display.wakeup();
@@ -9001,6 +9438,7 @@ void displayCurrentFrame() {
     if (!animationReady || upload.active) {
         return;
     }
+    boostCpu();
 
     const uint32_t renderStartedAt = millis();
     renderInProgress = kRenderMarker;
@@ -9100,7 +9538,7 @@ void displayCurrentFrame() {
     }
 
     if (slideshowEnabled && screensaverStyle == ScreensaverStyle::media &&
-        slideshowDeepSleep && !deepSleepSuspended &&
+        sleepBetweenImages() && !deepSleepSuspended &&
         animationHeader.frameCount == 1 && !hasPendingRemoteNetworkWork()) {
         if (deviceConnected) {
             slideshowSleepPending = true;
@@ -9118,11 +9556,27 @@ void displayCurrentFrame() {
 
 }  // namespace
 
+void IRAM_ATTR wakeLoopFromIsr() {
+    BaseType_t higherPriorityTaskWoken = pdFALSE;
+    if (loopWakeSemaphore != nullptr) {
+        xSemaphoreGiveFromISR(loopWakeSemaphore, &higherPriorityTaskWoken);
+    }
+    if (higherPriorityTaskWoken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
 void IRAM_ATTR handleTouchInterrupt() {
     touchInterruptPending = true;
+    wakeLoopFromIsr();
+}
+
+void IRAM_ATTR handleMenuButtonInterrupt() {
+    wakeLoopFromIsr();
 }
 
 void IRAM_ATTR handlePreviousButtonInterrupt() {
+    wakeLoopFromIsr();
     const TickType_t now = xTaskGetTickCountFromISR();
     if (!previousButtonInterruptSeen ||
         now - previousButtonInterruptAt >= pdMS_TO_TICKS(kRemotePageButtonDebounceMs)) {
@@ -9136,6 +9590,7 @@ void IRAM_ATTR handlePreviousButtonInterrupt() {
 }
 
 void IRAM_ATTR handleNextButtonInterrupt() {
+    wakeLoopFromIsr();
     const TickType_t now = xTaskGetTickCountFromISR();
     if (!nextButtonInterruptSeen ||
         now - nextButtonInterruptAt >= pdMS_TO_TICKS(kRemotePageButtonDebounceMs)) {
@@ -9188,6 +9643,15 @@ void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
         homeWifiConnecting = false;
         homeWifiAuthenticationRetryPending = false;
         homeWifiAuthenticationFailures = 0;
+        homeWifiFastConnectUsed = false;
+        homeWifiRetryDelayMs = power_policy::homeWifiRetryMinimumMs;
+        const uint8_t* bssid = WiFi.BSSID();
+        if (bssid != nullptr && remoteProfile != nullptr) {
+            homeWifiCache.ssidHash = power_policy::ssidHash(remoteProfile->wifiSsid);
+            memcpy(homeWifiCache.bssid, bssid, sizeof(homeWifiCache.bssid));
+            homeWifiCache.channel = static_cast<uint8_t>(WiFi.channel());
+            homeWifiCache.valid = true;
+        }
         homeWifiState = 2;
         homeWifiFailureReason = 0;
         homeWifiStatusChanged = true;
@@ -9197,6 +9661,17 @@ void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
         const uint16_t reason = info.wifi_sta_disconnected.reason;
         homeWifiConnecting = false;
         homeWifiAttemptedAt = millis();
+        if (homeWifiFastConnectUsed && reason != WIFI_REASON_ASSOC_LEAVE) {
+            // The remembered access point or channel no longer answers; rescan now.
+            homeWifiFastConnectUsed = false;
+            homeWifiCache.valid = false;
+            homeWifiState = 1;
+            homeWifiFailureReason = 0;
+            homeWifiAuthenticationRetryPending = true;
+            homeWifiAuthenticationRetryRequestedAt = homeWifiAttemptedAt;
+            Serial.printf("Home Wi-Fi fast connect failed (reason %u), rescanning\n", reason);
+            return;
+        }
         if (isHomeWifiAuthenticationFailure(reason) &&
             ++homeWifiAuthenticationFailures < kHomeWifiAuthenticationAttemptLimit) {
             homeWifiState = 1;
@@ -9222,13 +9697,124 @@ void handleWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
 }
 
+void installStandbyPanel() {
+    if (M5.getBoard() != m5::board_t::board_M5Paper) {
+        return;
+    }
+    lgfx::Panel_Device* current = M5.Display.getPanel();
+    auto* panel = new StandbyPanel();
+    panel->config(current->config());
+    panel->setBus(current->getBus());
+    panel->setTouch(current->getTouch());
+    if (!panel->init(false)) {
+        Serial.println("E-paper standby panel unavailable");
+        delete panel;
+        return;
+    }
+    M5.Display.setPanel(panel);
+    M5.Display.setColorDepth(M5.Display.getColorDepth());
+    standbyPanel = panel;
+}
+
+void leaveBackgroundWake() {
+    backgroundWake = false;
+    lastRemoteActivityAt = millis();
+    suppressHeldWakeTouch = M5.Touch.getCount() > 0;
+    pendingRemotePageDelta = 0;
+    menuButton.rawPressed = digitalRead(kMenuButtonPin) == LOW;
+    menuButton.pressed = menuButton.rawPressed;
+    menuButton.changedAt = millis();
+    if (WiFi.status() != WL_CONNECTED && !homeWifiConnecting) {
+        connectHomeWifi();
+    }
+    if (!remoteVisible) {
+        displayRemote();
+    }
+    startBluetooth();
+}
+
+void runBackgroundWake() {
+    // A touch or button is a wake gesture: show the remote as a normal wake would.
+    if (M5.Touch.getCount() > 0 || digitalRead(kPreviousButtonPin) == LOW ||
+        digitalRead(kMenuButtonPin) == LOW || digitalRead(kNextButtonPin) == LOW) {
+        Serial.println("Background wake interrupted by input");
+        leaveBackgroundWake();
+        return;
+    }
+    if (getCpuFrequencyMhz() != 80) {
+        setCpuFrequencyMhz(80);
+    }
+    if (homeWifiAuthenticationRetryPending &&
+        millis() - homeWifiAuthenticationRetryRequestedAt >= kHomeWifiAuthenticationRetryDelayMs) {
+        homeWifiAuthenticationRetryPending = false;
+        connectHomeWifi();
+    }
+    if (homeWifiConnecting && millis() - homeWifiAttemptedAt >= 15000) {
+        homeWifiConnecting = false;
+        homeWifiCache.valid = false;
+        homeWifiState = 3;
+        homeWifiStatusChanged = true;
+    }
+    pollScheduledRemoteActions();
+    pollClimateAutomation();
+    sendDeferredThermostatSetpoint();
+    sendDeferredFanSpeed();
+    sendNextPendingRemoteAction();
+    pollRemoteNetworkResults();
+
+    const bool wifiConfigured = remoteProfile->wifiSsid[0] != '\0';
+    const bool networkWork = wifiConfigured &&
+        (pendingRemoteActionCount > 0 || deferredThermostatSetpointPending ||
+         deferredFanSpeedPending || hasPendingRemoteNetworkWork());
+    if (networkWork && WiFi.status() != WL_CONNECTED && !homeWifiConnecting &&
+        !homeWifiAuthenticationRetryPending &&
+        (homeWifiAttemptedAt == 0 || millis() - homeWifiAttemptedAt >= homeWifiRetryIntervalMs())) {
+        if (homeWifiAttemptedAt != 0) {
+            homeWifiRetryDelayMs = power_policy::nextHomeWifiBackoffMs(homeWifiRetryDelayMs);
+        }
+        connectHomeWifi();
+    }
+    // iPhone actions travel over Bluetooth; give the phone a bounded chance to connect.
+    const bool waitingForIPhone =
+        scheduledIPhoneActionWaiting && millis() < kBackgroundWakeIPhoneWaitMs;
+    if (waitingForIPhone && !bluetoothActive) {
+        startBluetooth();
+    }
+    updateWifiTxPower();
+    if (networkWork || homeWifiConnecting || homeWifiAuthenticationRetryPending ||
+        waitingForIPhone) {
+        return;
+    }
+    Serial.println("Background wake finished");
+    Serial.flush();
+    const uint64_t wakeInterval = hasEnabledClimateAutomation()
+        ? kClimateWakeIntervalUs
+        : M5.Power.sleep_no_timer;
+    enterM5PaperDeepSleep(backgroundWakeIntervalUs(wakeInterval));
+    // Sleep was deferred by input or refused: continue as a normal wake.
+    leaveBackgroundWake();
+}
+
 void setup() {
     Serial.begin(115200);
+    standbyPanel = nullptr;
+    backgroundWake = false;
+    scheduledIPhoneActionWaiting = false;
+    homeWifiFastConnectUsed = false;
+    homeWifiRetryDelayMs = power_policy::homeWifiRetryMinimumMs;
+    cpuBusyAt = 0;
+    wifiTxPowerCheckedAt = 0;
+    nextSchedulePollAt = 0;
+    bluetoothFastAdvertisingUntil = 0;
+    bluetoothAdvertisingSlow = false;
+    loopWakeSemaphore = xSemaphoreCreateBinary();
     remoteQualityRefreshPending = esp_reset_reason() == ESP_RST_DEEPSLEEP;
     homeWifiSessionToken = static_cast<uint64_t>(esp_random()) << 32 | esp_random();
     if (homeWifiSessionToken == 0) {
         homeWifiSessionToken = 1;
     }
+    // Credentials always come from the remote profile; skip NVS writes on every connect.
+    WiFi.persistent(false);
     WiFi.onEvent(handleWifiEvent);
     wakeupCause = esp_sleep_get_wakeup_cause();
     int32_t wakeTouchRawX = 0;
@@ -9249,9 +9835,11 @@ void setup() {
     render_diagnostics::mark(render_diagnostics::Stage::initializing);
     M5.begin(config);
     render_diagnostics::mark(render_diagnostics::Stage::idle);
+    installStandbyPanel();
     localMediaStateQueue = xQueueCreate(1, sizeof(LocalMediaStateUpdate));
     startRemoteNetworkWorker();
     gpio_hold_dis(kMainPowerPin);
+    gpio_hold_dis(static_cast<gpio_num_t>(kSdCs));
     gpio_deep_sleep_hold_dis();
     climateReadingAvailable = readSht30(climateTemperatureC, climateHumidityPercent);
     if (climateReadingAvailable) {
@@ -9277,6 +9865,18 @@ void setup() {
     }
     pinMode(36, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(36), handleTouchInterrupt, FALLING);
+    if (wakeupCause == ESP_SLEEP_WAKEUP_TIMER && remoteRecoveryWakeArmed) {
+        // Nothing was scheduled: this wake only proves the board can still wake,
+        // so skip Wi-Fi, Bluetooth and the full-screen redraw. M5.begin() has
+        // already re-initialized touch; a refused sleep falls through to a normal boot.
+        pinMode(kPreviousButtonPin, INPUT);
+        pinMode(kMenuButtonPin, INPUT);
+        pinMode(kNextButtonPin, INPUT);
+        remotePageIndex = sleepingRemotePageIndex;
+        Serial.println("Recovery wake: nothing due, sleeping again");
+        enterM5PaperDeepSleep(M5.Power.sleep_no_timer);
+    }
+    remoteRecoveryWakeArmed = false;
     Serial.printf("Display: %d x %d\n", M5.Display.width(), M5.Display.height());
 
     sliderPositionStore = static_cast<SliderPositionStore*>(heap_caps_calloc(
@@ -9356,6 +9956,8 @@ void setup() {
         digitalPinToInterrupt(kPreviousButtonPin), handlePreviousButtonInterrupt, FALLING);
     attachInterrupt(
         digitalPinToInterrupt(kNextButtonPin), handleNextButtonInterrupt, FALLING);
+    attachInterrupt(
+        digitalPinToInterrupt(kMenuButtonPin), handleMenuButtonInterrupt, CHANGE);
     if (wakeupCause == ESP_SLEEP_WAKEUP_EXT1) {
         menuButton.rawPressed = true;
         menuButton.pressed = true;
@@ -9363,7 +9965,7 @@ void setup() {
     }
     const bool resumeSleepingSlideshow =
         wakeupCause == ESP_SLEEP_WAKEUP_TIMER && slideshowEnabled &&
-        screensaverStyle == ScreensaverStyle::media && slideshowDeepSleep && animationReady;
+        screensaverStyle == ScreensaverStyle::media && sleepBetweenImages() && animationReady;
     if (resumeSleepingSlideshow) {
         screensaverActive = remoteProfile != nullptr && remoteProfile->configured;
         stillFrameDisplayed = false;
@@ -9373,6 +9975,12 @@ void setup() {
     }
     if (resumeSleepingSlideshow) {
         Serial.println("Resuming sleeping slideshow");
+    } else if (wakeupCause == ESP_SLEEP_WAKEUP_TIMER && !slideshowEnabled &&
+               remoteProfile != nullptr && remoteProfile->configured) {
+        // Climate or schedule work only: keep the sleeping screen and leave
+        // Bluetooth off unless a touch, a button or an iPhone action needs it.
+        backgroundWake = true;
+        Serial.println("Background wake: climate and schedules only");
     } else if (remoteProfile != nullptr && remoteProfile->configured) {
         lastRemoteActivityAt = millis();
         connectHomeWifi();
@@ -9394,6 +10002,16 @@ void setup() {
 
 void loop() {
     M5.update();
+    if (backgroundWake) {
+        updateScreensaverBatteryPolicy();
+        runBackgroundWake();
+        delay(kIdleLoopDelayMs);
+        return;
+    }
+    if (touchInterruptPending || pendingRemotePageDelta != 0 ||
+        digitalRead(kMenuButtonPin) == LOW) {
+        boostCpu();
+    }
 #if PAPERGIF_SERIAL_COMMANDS
     processSerialCommands();
 #endif
@@ -9490,12 +10108,14 @@ void loop() {
     if (remoteProfile != nullptr && remoteProfile->configured &&
         WiFi.status() != WL_CONNECTED && !homeWifiConnecting &&
         !homeWifiAuthenticationRetryPending &&
-        millis() - homeWifiAttemptedAt >= 30000) {
+        millis() - homeWifiAttemptedAt >= homeWifiRetryIntervalMs()) {
         homeWifiAuthenticationFailures = 0;
+        homeWifiRetryDelayMs = power_policy::nextHomeWifiBackoffMs(homeWifiRetryDelayMs);
         connectHomeWifi();
     }
     if (homeWifiConnecting && millis() - homeWifiAttemptedAt >= 15000) {
         homeWifiConnecting = false;
+        homeWifiCache.valid = false;
         homeWifiState = 3;
         homeWifiFailureReason = 0;
         homeWifiStatusChanged = true;
@@ -9531,7 +10151,7 @@ void loop() {
 
     if (!upload.active && !remoteProfileUpload.active && remoteVisible &&
         remoteProfile != nullptr && !slideshowEnabled &&
-        !remoteSleepNever &&
+        !remoteSleepDisabled() &&
         pendingRemoteActionCount == 0 && !deferredThermostatSetpointPending &&
         !deferredFanSpeedPending &&
         !hasPendingRemoteNetworkWork() &&
@@ -9546,7 +10166,7 @@ void loop() {
     }
 
     if (slideshowSleepPending && !upload.active &&
-        !remoteProfileUpload.active && slideshowEnabled && slideshowDeepSleep &&
+        !remoteProfileUpload.active && slideshowEnabled && sleepBetweenImages() &&
         screensaverStyle == ScreensaverStyle::media &&
         !deepSleepSuspended && animationReady && stillFrameDisplayed &&
         !hasPendingRemoteNetworkWork() &&
@@ -9648,5 +10268,22 @@ void loop() {
     const bool latencySensitiveWork = upload.active || remoteProfileUpload.active ||
         activeRemoteControlIndex >= 0 || animatedPlaybackActive || snakePlaybackActive || homeWifiConnecting ||
         bluetoothSuspendRequested || bluetoothResumeRequested;
-    delay(latencySensitiveWork ? 1 : kIdleLoopDelayMs);
+    if (latencySensitiveWork || wifiActive) {
+        cpuBusyAt = millis();
+    }
+    if (!lowPowerMode && millis() - cpuBusyAt >= kCpuBoostHoldMs &&
+        getCpuFrequencyMhz() != 80) {
+        setCpuFrequencyMhz(80);
+    }
+    if (standbyPanel != nullptr && !latencySensitiveWork) {
+        standbyPanel->enterStandbyWhenIdle(kPanelStandbyIdleMs);
+    }
+    updateWifiTxPower();
+    if (latencySensitiveWork) {
+        delay(1);
+    } else if (millis() - cpuBusyAt < kCpuBoostHoldMs || loopWakeSemaphore == nullptr) {
+        delay(kIdleLoopDelayMs);
+    } else {
+        xSemaphoreTake(loopWakeSemaphore, pdMS_TO_TICKS(kQuietLoopDelayMs));
+    }
 }

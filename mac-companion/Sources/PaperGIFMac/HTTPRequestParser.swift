@@ -48,6 +48,25 @@ enum HTTPRequestParser {
         return .complete(Data(data.prefix(totalLength)))
     }
 
+    /// Only an explicit opt-in keeps the connection open; other clients keep
+    /// the original one-request-per-connection behavior.
+    static func requestsKeepAlive(_ request: Data) -> Bool {
+        guard let headerEnd = request.range(of: headerSeparator),
+              let header = String(data: request[..<headerEnd.lowerBound], encoding: .utf8) else {
+            return false
+        }
+        for line in header.split(separator: "\r\n").dropFirst() {
+            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2,
+                  parts[0].trimmingCharacters(in: .whitespaces)
+                    .caseInsensitiveCompare("Connection") == .orderedSame else { continue }
+            return parts[1].split(separator: ",").contains {
+                $0.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare("keep-alive") == .orderedSame
+            }
+        }
+        return false
+    }
+
     static func hasBearerToken(_ expectedToken: String, in request: Data) -> Bool {
         guard let headerEnd = request.range(of: headerSeparator),
               let header = String(data: request[..<headerEnd.lowerBound], encoding: .utf8) else {

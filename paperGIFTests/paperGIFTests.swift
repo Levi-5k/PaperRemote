@@ -11,6 +11,87 @@ import Testing
 @testable import paperGIF
 
 struct paperGIFTests {
+    @Test func remoteButtonTextSizeDefaultsClampsAndRoundTrips() throws {
+        let legacy = try JSONDecoder().decode(PaperGIFRemoteProfile.self, from: Data(#"{"version":6,"pages":[]}"#.utf8))
+        #expect(legacy.maxButtonTextSize == 24)
+        #expect(PaperGIFRemoteProfile(pages: []).maxButtonTextSize == 24)
+        for (input, expected) in [(Int.min, 9), (8, 9), (9, 9), (17, 17), (24, 24), (25, 24), (Int.max, 24)] {
+            var profile = PaperGIFRemoteProfile(maxButtonTextSize: input, pages: [])
+            #expect(profile.maxButtonTextSize == expected)
+            profile.maxButtonTextSize = input
+            #expect(profile.maxButtonTextSize == expected)
+            let data = try JSONEncoder().encode(profile)
+            let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(object["maxButtonTextSize"] as? Int == expected)
+            #expect(!String(decoding: data, as: UTF8.self).contains("\"maxButtonTextSize\":\(expected)."))
+            #expect(try JSONDecoder().decode(PaperGIFRemoteProfile.self, from: data) == profile)
+            let decoded = try JSONDecoder().decode(PaperGIFRemoteProfile.self, from: Data("{\"pages\":[],\"maxButtonTextSize\":\(input)}".utf8))
+            #expect(decoded.maxButtonTextSize == expected)
+            let payload = try #require(profile.devicePayload)
+            let device = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+            #expect(device["maxButtonTextSize"] as? Int == expected)
+        }
+    }
+
+    @Test func remotePreviewTextCapRecomputesForScaleAndResize() {
+        for scale in [CGFloat(0.25), 0.5, 1, 2] {
+            for compact in [false, true] {
+                for cap in [9, 17, 24] {
+                    let layout = PaperGIFRemotePreviewLabelFitting.layout(
+                        size: CGSize(width: 300 * scale, height: 150 * scale), scale: scale,
+                        compact: compact, maxButtonTextSize: cap
+                    )
+                    #expect(layout.maximumFontSize == CGFloat(cap) * scale)
+                    #expect(PaperGIFRemotePreviewLabelFitting.fontSize(for: "Go", in: layout.labelSize,
+                                                                     maximum: layout.maximumFontSize) == layout.maximumFontSize)
+                }
+            }
+        }
+        var previous: CGFloat = 0
+        for width in [CGFloat(30), 60, 120, 240, 480] {
+            let layout = PaperGIFRemotePreviewLabelFitting.layout(size: CGSize(width: width, height: width / 3),
+                                                                  scale: 1, compact: true, maxButtonTextSize: 17)
+            let font = PaperGIFRemotePreviewLabelFitting.fontSize(for: "Jog X Negative Y Positive", in: layout.labelSize,
+                                                                 maximum: layout.maximumFontSize)
+            #expect(font >= previous && font <= 17)
+            previous = font
+        }
+        #expect(previous > 9)
+    }
+
+    @Test func remotePreviewCentersTitleAndMeasuredVerticalGroupInsideSafeEdges() {
+        for size in [CGSize(width: 38, height: 12), CGSize(width: 300, height: 80), CGSize(width: 100, height: 240)] {
+            for title in ["Go", "A longer label that wraps", ""] {
+                let layout = PaperGIFRemotePreviewLabelFitting.layout(size: size, scale: 0.5, compact: false,
+                                                                     hasTitle: !title.isEmpty)
+                let font = PaperGIFRemotePreviewLabelFitting.fontSize(for: title, in: layout.labelSize, maximum: layout.maximumFontSize)
+                let measured = PaperGIFRemotePreviewLabelFitting.measuredSize(title, fontSize: font, width: layout.labelSize.width)
+                let frames = layout.frames(in: size, measuredLabelHeight: measured.height)
+                #expect(abs(frames.label.midX - size.width / 2) < 0.0001)
+                if layout.horizontal {
+                    #expect(abs(frames.label.midY - size.height / 2) < 0.0001)
+                    if !title.isEmpty {
+                        #expect(frames.label.minX >= frames.icon.maxX + layout.iconHalo + layout.spacing - 0.0001)
+                    }
+                } else {
+                    let top = frames.icon.minY - layout.iconHalo
+                    let bottom = title.isEmpty ? frames.icon.maxY + layout.iconHalo : frames.label.maxY
+                    #expect(abs((top + bottom) / 2 - size.height / 2) < 0.0001)
+                    #expect(abs(frames.label.height - measured.height) < 0.0001)
+                    #expect(frames.label.height < layout.labelSize.height)
+                }
+                for frame in [frames.icon.insetBy(dx: -layout.iconHalo, dy: -layout.iconHalo), frames.label] {
+                    #expect(frame.minX >= layout.padding - 0.0001 && frame.minY >= layout.padding - 0.0001)
+                    #expect(frame.maxX <= size.width - layout.padding + 0.0001)
+                    #expect(frame.maxY <= size.height - layout.padding + 0.0001)
+                }
+            }
+        }
+        let size = CGSize(width: 100, height: 240)
+        let noIcon = PaperGIFRemotePreviewLabelFitting.layout(size: size, scale: 1, compact: false, hasIcon: false)
+        #expect(noIcon.frames(in: size, measuredLabelHeight: 20).label.midY == size.height / 2)
+        #expect(noIcon.iconSize == 0 && noIcon.spacing == 0)
+    }
 
     @Test @MainActor func mediaSourceSelectionPreservesSeekSliderAndOutline() throws {
         var control = PaperGIFRemoteControl(

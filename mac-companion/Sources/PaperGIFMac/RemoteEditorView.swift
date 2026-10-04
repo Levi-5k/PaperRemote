@@ -5,9 +5,16 @@ import SwiftUI
 final class RemoteEditorWindowController: NSWindowController {
     private let store: RemoteEditorStore
 
-    init(store: RemoteEditorStore, moduleCatalog: ModuleCatalog, matterDevices: MatterDeviceManager) {
+    init(
+        store: RemoteEditorStore,
+        moduleCatalog: ModuleCatalog,
+        matterDevices: MatterDeviceManager,
+        updates: UpdateService
+    ) {
         self.store = store
-        let content = RemoteEditorView(store: store, moduleCatalog: moduleCatalog, matterDevices: matterDevices)
+        let content = RemoteEditorView(
+            store: store, moduleCatalog: moduleCatalog, matterDevices: matterDevices, updates: updates
+        )
         let window = NSWindow(contentViewController: NSHostingController(rootView: content))
         window.title = "paperGIF Controls"
         window.setContentSize(NSSize(width: 1_180, height: 780))
@@ -30,6 +37,7 @@ private struct RemoteEditorView: View {
     @ObservedObject var store: RemoteEditorStore
     @ObservedObject var moduleCatalog: ModuleCatalog
     @ObservedObject var matterDevices: MatterDeviceManager
+    @ObservedObject var updates: UpdateService
     @StateObject private var discovery = WLEDDiscovery()
     @StateObject private var computerDiscovery = ComputerDiscovery()
     @StateObject private var deviceDiscovery = DeviceDiscovery()
@@ -49,6 +57,7 @@ private struct RemoteEditorView: View {
         VStack(spacing: 0) {
             sendBar
             Divider()
+            UpdateBanner(updates: updates)
             HSplitView {
                 pageSidebar
                     .frame(minWidth: 170, idealWidth: 190, maxWidth: 220)
@@ -77,6 +86,7 @@ private struct RemoteEditorView: View {
             automaticallyLoadedDeviceAddress = device.address
             store.deviceAddress = device.address
             Task { await store.loadFromDevice() }
+            Task { await updates.refreshDevice() }
         }
         .onChange(of: store.selectedPageID) { _ in
             store.selectedControlID = nil
@@ -248,6 +258,14 @@ private struct RemoteEditorView: View {
                 Text("DISPLAY")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
+                Text("Maximum button text size: \(store.profile.maxButtonTextSize) pt")
+                    .monospacedDigit()
+                Slider(value: Binding(
+                    get: { Double(store.profile.maxButtonTextSize) },
+                    set: { store.profile.maxButtonTextSize = Int($0.rounded()) }
+                ), in: 9...24, step: 1)
+                .accessibilityLabel("Maximum button text size")
+                .accessibilityValue("\(store.profile.maxButtonTextSize) points")
                 Stepper(
                     "Start after \(store.profile.screensaverDelaySeconds) seconds",
                     value: $store.profile.screensaverDelaySeconds,
@@ -307,6 +325,7 @@ private struct RemoteEditorView: View {
                     pageIndex: store.selectedPageIndex ?? 0,
                     pageNames: store.profile.pages.map(\.name),
                     temperatureUnit: store.profile.temperatureUnit,
+                    maxButtonTextSize: store.profile.maxButtonTextSize,
                     selectedControlID: store.selectedControlID,
                     onSelect: { id in
                         store.selectedControlID = id
@@ -2230,6 +2249,7 @@ private struct DevicePreview: View {
     let pageIndex: Int
     let pageNames: [String]
     let temperatureUnit: RemoteTemperatureUnit
+    let maxButtonTextSize: Int
     let selectedControlID: UUID?
     let onSelect: (UUID) -> Void
     let onMove: (UUID, Int) -> Void
@@ -2276,6 +2296,7 @@ private struct DevicePreview: View {
                             temperatureUnit: temperatureUnit,
                             selected: selectedControlID == control.id,
                             scale: scale,
+                            maxButtonTextSize: maxButtonTextSize,
                             controllerCompact: control.kind == .button
                         )
                         .frame(width: frame.width * scale, height: frame.height * scale)
@@ -2298,7 +2319,8 @@ private struct DevicePreview: View {
                             control: control,
                             temperatureUnit: temperatureUnit,
                             selected: selectedControlID == control.id,
-                            scale: scale
+                            scale: scale,
+                            maxButtonTextSize: maxButtonTextSize
                         )
                             .frame(width: frame.width * scale, height: frame.height * scale)
                             .position(x: frame.midX * scale, y: frame.midY * scale)
@@ -2431,11 +2453,258 @@ private struct OpenBuildsSettingsPreview: View {
     }
 }
 
+// Internal, deterministic geometry and fitting entry points for preview regression tests.
+enum RemotePreviewLabelFitting {
+    struct Layout {
+        let horizontal: Bool
+        let padding: CGFloat
+        let spacing: CGFloat
+        let iconSize: CGFloat
+        let iconHalo: CGFloat
+        let labelSize: CGSize
+        let maximumFontSize: CGFloat
+
+        /// Frames are in button coordinates; the title stays button-centered horizontally.
+        func frames(in size: CGSize, measuredLabelHeight: CGFloat) -> (icon: CGRect, label: CGRect) {
+            let textHeight = min(labelSize.height, max(0, measuredLabelHeight))
+            let extent = iconSize > 0 ? iconSize + 2 * iconHalo : 0
+            let gap = textHeight > 0 ? spacing : 0
+            if horizontal {
+                let iconX = textHeight > 0 ? padding + iconHalo : (size.width - iconSize) / 2
+                return (
+                    CGRect(x: iconX, y: (size.height - iconSize) / 2, width: iconSize, height: iconSize),
+                    CGRect(x: (size.width - labelSize.width) / 2, y: (size.height - textHeight) / 2,
+                           width: labelSize.width, height: textHeight)
+                )
+            }
+            let top = (size.height - extent - gap - textHeight) / 2
+            return (
+                CGRect(x: (size.width - iconSize) / 2, y: top + iconHalo, width: iconSize, height: iconSize),
+                CGRect(x: (size.width - labelSize.width) / 2, y: top + extent + gap,
+                       width: labelSize.width, height: textHeight)
+            )
+        }
+    }
+
+    static func layout(size: CGSize, scale: CGFloat, compact: Bool, hasIcon: Bool = true,
+                       hasTitle: Bool = true, maxButtonTextSize: Int = 24) -> Layout {
+        let width = size.width.isFinite ? max(0, size.width) : 0
+        let height = size.height.isFinite ? max(0, size.height) : 0
+        let scale = scale.isFinite ? max(0, scale) : 0
+        let horizontal = width >= height * 1.6
+        let padding = min(12 * scale, min(width, height) / 6)
+        let innerWidth = max(0, width - 2 * padding)
+        let innerHeight = max(0, height - 2 * padding)
+        let iconCap: CGFloat = (compact ? 30 : horizontal ? 28 : 64) * scale
+        let iconExtent = hasIcon ? min(iconCap, horizontal
+            ? min(innerHeight * 0.72, innerWidth * 0.25)
+            : min(innerWidth * 0.55, innerHeight * 0.42)) : 0
+        let halo = min(4 * scale, iconExtent / 4)
+        let iconSize = max(0, iconExtent - 2 * halo)
+        let spacing = iconSize > 0 && hasTitle ? min(8 * scale, min(innerWidth, innerHeight) * 0.08) : 0
+        return Layout(
+            horizontal: horizontal, padding: padding, spacing: spacing, iconSize: iconSize,
+            iconHalo: halo,
+            labelSize: CGSize(width: horizontal ? max(0, innerWidth - 2 * (iconExtent + spacing)) : innerWidth,
+                              height: horizontal ? innerHeight : max(0, innerHeight - iconExtent - spacing)),
+            maximumFontSize: CGFloat(min(24, max(9, maxButtonTextSize))) * scale
+        )
+    }
+
+    static func measuredSize(_ title: String, fontSize: CGFloat, width: CGFloat) -> CGSize {
+        guard !title.isEmpty, fontSize > 0, fontSize.isFinite, width > 0, width.isFinite else { return .zero }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        // SwiftUI rounds the baseline and reserves the descent separately. AppKit's
+        // default line height can be a point shorter per line at fractional sizes.
+        paragraph.minimumLineHeight = round(font.ascender) + ceil(-font.descender) + ceil(font.leading)
+        // Native word wrapping falls back to character wrapping for an overlong word.
+        // Do not insert breaks or use byCharWrapping: SwiftUI wraps the original string.
+        paragraph.lineBreakMode = .byWordWrapping
+        return (title as NSString).boundingRect(
+            with: CGSize(width: width, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font,
+                         .paragraphStyle: paragraph]
+        ).size
+    }
+
+    static func fontSize(for title: String, in bounds: CGSize, maximum: CGFloat) -> CGFloat {
+        guard bounds.width > 0, bounds.height > 0, bounds.width.isFinite, bounds.height.isFinite,
+              maximum > 0, maximum.isFinite else { return 0 }
+        func fits(_ size: CGFloat) -> Bool {
+            let measured = measuredSize(title, fontSize: size, width: bounds.width)
+            return measured.width <= bounds.width && measured.height <= bounds.height
+        }
+        if fits(maximum) { return maximum }
+        // Continuous search: no minimum font floor that can overflow a tiny cell.
+        var lower: CGFloat = 0
+        var upper = maximum
+        for _ in 0..<20 {
+            let candidate = (lower + upper) / 2
+            if fits(candidate) { lower = candidate } else { upper = candidate }
+        }
+        return lower
+    }
+}
+
+// Opt-in tests live here to keep this change restricted to the two preview files.
+// Run with swift test -Xswiftc -DREMOTE_PREVIEW_FITTING_TESTS.
+#if REMOTE_PREVIEW_FITTING_TESTS
+import Testing
+
+@Suite("Remote preview label fitting")
+struct RemotePreviewLabelFittingTests {
+    @Test(arguments: ["Up Left", "Jog X Negative Y Positive", "Supercalifragilisticexpialidocious",
+                      "第一行很长的按钮标题第二行", "Line one\nLine two\nLine three\nLine four"])
+    func tinyOpenBuildsRows(title: String) {
+        for size in [CGSize(width: 38, height: 12), CGSize(width: 25, height: 8),
+                     CGSize(width: 56, height: 22)] {
+            let layout = RemotePreviewLabelFitting.layout(size: size, scale: 0.5, compact: true)
+            #expect(layout.horizontal)
+            #expect(layout.iconSize + layout.spacing + layout.labelSize.width + 2 * layout.padding <= size.width + 0.0001)
+            #expect(layout.iconSize + 2 * layout.padding <= size.height)
+            checkFit(title, layout: layout)
+        }
+    }
+
+    @Test
+    func longWordUsesNativeCharacterFallbackWithoutChangingText() {
+        let size = RemotePreviewLabelFitting.measuredSize(
+            "Supercalifragilisticexpialidocious", fontSize: 10, width: 24
+        )
+        #expect(size.width <= 24)
+        #expect(size.height > NSFont.systemFont(ofSize: 10, weight: .semibold).ascender * 3)
+        let layout = RemotePreviewLabelFitting.layout(size: CGSize(width: 45, height: 110), scale: 1, compact: false)
+        #expect(!layout.horizontal)
+        checkFit("A very long button title with more than two wrapped lines", layout: layout)
+    }
+
+    @Test
+    func resizingRecomputesGeometryAndLargestFittingFont() {
+        let title = "Jog X Negative Y Positive"
+        var previous: CGFloat = 0
+        for multiplier in [CGFloat(0.2), 0.3, 0.5, 0.8, 1, 1.5, 2] {
+            let layout = RemotePreviewLabelFitting.layout(
+                size: CGSize(width: 100 * multiplier, height: 30 * multiplier), scale: 1, compact: true
+            )
+            let fitted = checkFit(title, layout: layout)
+            #expect(fitted >= previous)
+            previous = fitted
+        }
+        #expect(previous > 10)
+        let tall = RemotePreviewLabelFitting.layout(size: CGSize(width: 30, height: 100), scale: 1, compact: true)
+        #expect(!tall.horizontal)
+        #expect(tall.iconSize + tall.spacing + tall.labelSize.height + 2 * tall.padding <= 100)
+        checkFit(title, layout: tall)
+    }
+
+    @Test
+    func emptyAndDegenerateBounds() {
+        #expect(RemotePreviewLabelFitting.fontSize(for: "Title", in: .zero, maximum: 10) == 0)
+        #expect(RemotePreviewLabelFitting.fontSize(for: "Title", in: CGSize(width: 20, height: 0), maximum: 10) == 0)
+        #expect(RemotePreviewLabelFitting.fontSize(for: "", in: CGSize(width: 20, height: 20), maximum: 10) == 10)
+        let layout = RemotePreviewLabelFitting.layout(size: CGSize(width: 20, height: 10), scale: 1, compact: true, hasIcon: false)
+        #expect(layout.iconSize == 0)
+        #expect(layout.spacing == 0)
+        checkFit("No icon", layout: layout)
+    }
+
+    @MainActor @Test(arguments: ["Jog X Negative Y Positive", "Supercalifragilisticexpialidocious",
+                                 "Line one\nLine two\nLine three\nLine four"])
+    func swiftUIWrappingMatchesFittedNativeHeight(title: String) {
+        for size in [CGSize(width: 38, height: 12), CGSize(width: 56, height: 22), CGSize(width: 45, height: 110)] {
+            let layout = RemotePreviewLabelFitting.layout(size: size, scale: 0.5, compact: true)
+            let fitted = checkFit(title, layout: layout)
+            let view = NSHostingView(rootView: Text(verbatim: title)
+                .font(Font(NSFont.systemFont(ofSize: fitted, weight: .semibold)))
+                .lineLimit(nil).allowsTightening(false).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: layout.labelSize.width))
+            #expect(view.fittingSize.height <= layout.labelSize.height + 0.0001)
+        }
+    }
+
+    @discardableResult
+    private func checkFit(_ title: String, layout: RemotePreviewLabelFitting.Layout) -> CGFloat {
+        let fitted = RemotePreviewLabelFitting.fontSize(for: title, in: layout.labelSize, maximum: layout.maximumFontSize)
+        #expect(fitted > 0)
+        #expect(fitted <= layout.maximumFontSize)
+        let measured = RemotePreviewLabelFitting.measuredSize(title, fontSize: fitted, width: layout.labelSize.width)
+        #expect(measured.width <= layout.labelSize.width)
+        #expect(measured.height <= layout.labelSize.height)
+        if fitted + 0.001 < layout.maximumFontSize {
+            let larger = RemotePreviewLabelFitting.measuredSize(title, fontSize: fitted + 0.001, width: layout.labelSize.width)
+            #expect(larger.width > layout.labelSize.width || larger.height > layout.labelSize.height)
+        }
+        return fitted
+    }
+}
+#endif
+
+private struct RemotePreviewLabel: View {
+    let control: RemoteControl
+    let scale: CGFloat
+    let compact: Bool
+    let maxButtonTextSize: Int
+
+    var body: some View {
+        GeometryReader { geometry in
+            let hasIcon = !control.symbol.isEmpty || control.iconBitmap != nil
+            let layout = RemotePreviewLabelFitting.layout(
+                size: geometry.size, scale: scale, compact: compact,
+                hasIcon: hasIcon, hasTitle: !control.title.isEmpty, maxButtonTextSize: maxButtonTextSize
+            )
+            let fontSize = RemotePreviewLabelFitting.fontSize(
+                for: control.title, in: layout.labelSize, maximum: layout.maximumFontSize
+            )
+            let measured = RemotePreviewLabelFitting.measuredSize(
+                control.title, fontSize: fontSize, width: layout.labelSize.width
+            )
+            let frames = layout.frames(in: geometry.size, measuredLabelHeight: measured.height)
+            ZStack(alignment: .topLeading) {
+                if hasIcon && layout.iconSize > 0 {
+                    icon(size: layout.iconSize)
+                        .position(x: frames.icon.midX, y: frames.icon.midY)
+                }
+                label(size: frames.label.size, fontSize: fontSize)
+                    .position(x: frames.label.midX, y: frames.label.midY)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
+        .clipped()
+    }
+
+    private func icon(size: CGFloat) -> some View {
+        RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
+            .frame(width: size, height: size)
+            .clipped()
+    }
+
+    private func label(size: CGSize, fontSize: CGFloat) -> some View {
+        Group {
+            if fontSize > 0 && !control.title.isEmpty {
+                Text(verbatim: control.title)
+                    .font(Font(NSFont.systemFont(ofSize: fontSize, weight: .semibold)))
+                    .lineLimit(nil)
+                    .allowsTightening(false)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(width: size.width, height: control.title.isEmpty ? 0 : size.height)
+        .clipped()
+    }
+}
+
 private struct PreviewControl: View {
     let control: RemoteControl
     let temperatureUnit: RemoteTemperatureUnit
     let selected: Bool
     let scale: CGFloat
+    let maxButtonTextSize: Int
     var controllerCompact = false
 
     var body: some View {
@@ -2488,40 +2757,10 @@ private struct PreviewControl: View {
                         .padding(8 * scale)
                         .clipped()
                 } else {
-                    HStack(spacing: 8 * scale) {
-                        RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                            .frame(width: 28 * scale, height: 28 * scale)
-                        Text(control.title).lineLimit(1)
-                    }
-                    .font(.system(size: 15 * scale, weight: .semibold))
+                    RemotePreviewLabel(control: control, scale: scale, compact: controllerCompact, maxButtonTextSize: maxButtonTextSize)
                 }
-            } else if controllerCompact {
-                VStack(spacing: 5 * scale) {
-                    RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                        .frame(width: 30 * scale, height: 30 * scale)
-                    Text(control.title)
-                        .font(.system(size: 10 * scale, weight: .semibold))
-                }
-            } else if control.buttonGridHeight == 1 {
-                HStack(spacing: 8 * scale) {
-                    RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                        .frame(width: 28 * scale, height: 28 * scale)
-                    Text(control.title)
-                        .font(.system(size: 15 * scale, weight: .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.65)
-                }
-                .padding(.horizontal, 10 * scale)
             } else {
-                VStack(spacing: 10 * scale) {
-                    RemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                        .frame(width: 64 * scale, height: 64 * scale)
-                    Text(control.title)
-                        .font(.system(size: 16 * scale, weight: .semibold))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(8 * scale)
+                RemotePreviewLabel(control: control, scale: scale, compact: controllerCompact, maxButtonTextSize: maxButtonTextSize)
             }
         }
         .foregroundStyle(.black)

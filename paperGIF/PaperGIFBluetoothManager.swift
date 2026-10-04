@@ -277,6 +277,17 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         connectionState == .connected || wifiConnectionState == .connected
     }
 
+    /// HTTP endpoint for the M5Paper, preferring home Wi-Fi; its own network needs no token.
+    var deviceHTTPEndpoint: PaperGIFDeviceEndpoint? {
+        if homeWiFiState == .connected, let url = homeWiFiDeviceURL, let authorization = homeWiFiAuthorization {
+            return PaperGIFDeviceEndpoint(url: url, authorization: authorization)
+        }
+        if wifiConnectionState == .connected {
+            return PaperGIFDeviceEndpoint(url: Self.wifiDeviceURL, authorization: nil)
+        }
+        return nil
+    }
+
     func syncLocalMediaState(_ state: LocalMediaState, immediately: Bool = false) {
         pendingLocalMediaState = state
         let previous = lastSentLocalMediaState

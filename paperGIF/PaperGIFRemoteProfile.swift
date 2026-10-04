@@ -908,6 +908,13 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     var computers: [PaperGIFRemoteComputer]
     var screensaverDelaySeconds = 30
     var buttonQualityRefreshInterval = 10
+    /// Nominal device points; preview renderers convert this using their device scale.
+    var maxButtonTextSize = 24 {
+        didSet {
+            let clamped = min(24, max(9, maxButtonTextSize))
+            if maxButtonTextSize != clamped { maxButtonTextSize = clamped }
+        }
+    }
     var elementRefreshDelayMilliseconds = 20
     var temperatureUnit: PaperGIFTemperatureUnit = .celsius
     var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
@@ -924,6 +931,7 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         computers: [PaperGIFRemoteComputer] = [],
         screensaverDelaySeconds: Int = 30,
         buttonQualityRefreshInterval: Int = 10,
+        maxButtonTextSize: Int = 24,
         elementRefreshDelayMilliseconds: Int = 20,
         timeZoneOffsetMinutes: Int = TimeZone.current.secondsFromGMT() / 60,
         pages: [PaperGIFRemotePage]
@@ -938,9 +946,16 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         self.computers = computers
         self.screensaverDelaySeconds = screensaverDelaySeconds
         self.buttonQualityRefreshInterval = buttonQualityRefreshInterval
+        self.maxButtonTextSize = min(24, max(9, maxButtonTextSize))
         self.elementRefreshDelayMilliseconds = elementRefreshDelayMilliseconds
         self.timeZoneOffsetMinutes = timeZoneOffsetMinutes
         self.pages = pages
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, updatedAtMilliseconds, wifiSSID, wifiPassword, macHost, macPort, macToken
+        case computers, screensaverDelaySeconds, buttonQualityRefreshInterval, maxButtonTextSize
+        case elementRefreshDelayMilliseconds, temperatureUnit, timeZoneOffsetMinutes, pages
     }
 
     init(from decoder: Decoder) throws {
@@ -967,6 +982,9 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         buttonQualityRefreshInterval = try container.decodeIfPresent(
             Int.self, forKey: .buttonQualityRefreshInterval
         ) ?? 10
+        maxButtonTextSize = min(24, max(9, try container.decodeIfPresent(
+            Int.self, forKey: .maxButtonTextSize
+        ) ?? 24))
         elementRefreshDelayMilliseconds = try container.decodeIfPresent(
             Int.self, forKey: .elementRefreshDelayMilliseconds
         ) ?? 20

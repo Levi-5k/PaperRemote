@@ -1,4 +1,6 @@
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Globalization;
 using PaperGIF.Windows.Core.Models;
 
 namespace PaperGIF.Windows.Host;
@@ -15,6 +17,7 @@ internal sealed class RemotePreviewPanel : Control
     private int settingsSlot = -1;
     private Point dragStart;
     private Rectangle gridFrame;
+    private int maxButtonTextSize = RemoteProfile.MaximumButtonTextSize;
 
     public RemotePreviewPanel()
     {
@@ -34,6 +37,16 @@ internal sealed class RemotePreviewPanel : Control
     }
 
     public Guid? SelectedControlId { get; set; }
+    public int MaxButtonTextSize
+    {
+        get => maxButtonTextSize;
+        set
+        {
+            maxButtonTextSize = Math.Clamp(value,
+                RemoteProfile.MinimumButtonTextSize, RemoteProfile.MaximumButtonTextSize);
+            Invalidate();
+        }
+    }
     public int PageIndex { get; set; }
     public IReadOnlyList<string> PageNames { get; set; } = [];
     public event EventHandler<Guid>? ControlSelected;
@@ -166,7 +179,7 @@ internal sealed class RemotePreviewPanel : Control
             screen.Width - 20,
             screen.Height - headerHeight - footerHeight);
         gridFrame = grid;
-        DrawControls(graphics, grid, page);
+        DrawControls(graphics, grid, page, screen.Width / 540f);
     }
 
     private void DrawPageTabs(Graphics graphics, Rectangle screen)
@@ -234,7 +247,7 @@ internal sealed class RemotePreviewPanel : Control
             var frame = ScaleFrame(screen, canonical);
             controlFrames[control.Id] = frame;
             controlSlots[control.Id] = slot;
-            DrawControl(graphics, frame, control);
+            DrawControl(graphics, frame, control, screen.Width / 540f);
         }
 
         var settings = controllerPage.OpenBuildsController ?? new OpenBuildsControllerSettings();
@@ -314,7 +327,7 @@ internal sealed class RemotePreviewPanel : Control
         graphics.DrawString(text, font, selected ? Brushes.White : Brushes.Black, frame, format);
     }
 
-    private void DrawControls(Graphics graphics, Rectangle grid, RemotePage remotePage)
+    private void DrawControls(Graphics graphics, Rectangle grid, RemotePage remotePage, float screenScale)
     {
         var columns = Math.Clamp(remotePage.GridColumns, 1, 12);
         var rows = Math.Clamp(remotePage.GridRows, 1, 16);
@@ -339,12 +352,16 @@ internal sealed class RemotePreviewPanel : Control
                 cellHeight * height - 8));
             controlFrames[control.Id] = frame;
             controlSlots[control.Id] = slot;
-            DrawControl(graphics, frame, control);
+            DrawControl(graphics, frame, control, screenScale);
         }
     }
 
-    private void DrawControl(Graphics graphics, Rectangle frame, RemoteControl control)
+    private void DrawControl(Graphics graphics, Rectangle frame, RemoteControl control, float screenScale)
     {
+        if (frame.Width <= 0 || frame.Height <= 0 || screenScale <= 0)
+        {
+            return;
+        }
         var selected = control.Id == SelectedControlId;
         using var fill = new SolidBrush(selected ? EditorTheme.ForestSoft : Color.FromArgb(246, 248, 245));
         using var outline = new Pen(selected ? EditorTheme.Forest : Color.FromArgb(157, 168, 162), selected ? 2 : 1);
@@ -355,17 +372,17 @@ internal sealed class RemotePreviewPanel : Control
             using var accent = new SolidBrush(EditorTheme.Coral);
             graphics.FillRectangle(accent, frame.Left + 7, frame.Top + 7, 3, Math.Max(4, frame.Height - 14));
         }
-        using var titleFont = new Font("Segoe UI Variable Text Semibold", Math.Max(7, frame.Width / 15f));
-        using var valueFont = new Font("Segoe UI Variable Text", Math.Max(6, frame.Width / 21f));
-        var format = new StringFormat
-        {
-            Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Center,
-            Trimming = StringTrimming.EllipsisCharacter,
-        };
         if (control.Kind == RemoteControlKind.TextBox &&
             control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition)
         {
+            using var titleFont = new Font("Segoe UI Variable Text Semibold", Math.Max(7, frame.Width / 15f));
+            using var valueFont = new Font("Segoe UI Variable Text", Math.Max(6, frame.Width / 21f));
+            using var format = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+                Trimming = StringTrimming.EllipsisCharacter,
+            };
             var components = control.TextBox.SourceText.Split('|');
             var axis = components.Length > 1 ? components[1].ToUpperInvariant() : "X";
             var units = components.Length > 2 ? components[2].ToLowerInvariant() : "mm";
@@ -396,13 +413,156 @@ internal sealed class RemotePreviewPanel : Control
                 var outlineFrame = Rectangle.Inflate(frame, -inset, -inset);
                 EditorTheme.FillRoundedRectangle(graphics, Brushes.White, outlineFrame, Math.Max(2, 5 - inset / 2));
             }
-            var textBrush = control.SliderOutlineInsetPixels.HasValue || progress < 0.5f
-                ? Brushes.Black : Brushes.White;
-            var contentFrame = RectangleF.Inflate(frame, -10, -7);
-            graphics.DrawString(text, titleFont, textBrush, contentFrame, format);
+            var lightText = !control.SliderOutlineInsetPixels.HasValue && progress >= 0.5f;
+            var textBrush = lightText ? Brushes.White : Brushes.Black;
+            var seekSlider = control.Action.Type == RemoteActionType.MacMedia && control.Action.Text == "seek";
+            if (!seekSlider && HasIcon(control) && DeviceIconLayout(frame, screenScale, true) is { } sliderLayout)
+            {
+                DrawControlIcon(graphics, control, sliderLayout.Icon, lightText ? Color.White : Color.Black);
+                using var sliderLabel = NativeButtonLabelLayout.Fit(
+                    graphics, text, sliderLayout.Title, MaxButtonTextSize, screenScale);
+                sliderLabel.Draw(graphics, textBrush);
+                return;
+            }
+            var contentFrame = RectangleF.Inflate(frame, -10 * screenScale, -7 * screenScale);
+            using var label = NativeButtonLabelLayout.Fit(
+                graphics, text, contentFrame, MaxButtonTextSize, screenScale);
+            label.Draw(graphics, textBrush);
             return;
         }
-        graphics.DrawString(text, titleFont, Brushes.Black, RectangleF.Inflate(frame, -7, -7), format);
+        if (control.Kind == RemoteControlKind.Button && HasIcon(control) &&
+            DeviceIconLayout(frame, screenScale, false) is { } layout)
+        {
+            DrawIconAndTitle(graphics, control, text, layout, screenScale);
+            return;
+        }
+        using var title = NativeButtonLabelLayout.Fit(graphics, text,
+            RectangleF.Inflate(frame, -7 * screenScale, -7 * screenScale), MaxButtonTextSize, screenScale);
+        title.Draw(graphics, Brushes.Black);
+    }
+
+    private readonly record struct IconLayout(
+        RectangleF Content, RectangleF Icon, RectangleF Title, float Extent, float Gap, bool Horizontal);
+
+    private static bool HasIcon(RemoteControl control) =>
+        !string.IsNullOrEmpty(control.Symbol) || control.IconBitmap is not null;
+
+    // Mirrors firmware remote_text_layout::buttonLayout so icons land where the M5Paper draws them.
+    private static IconLayout? DeviceIconLayout(Rectangle frame, float scale, bool forceHorizontal)
+    {
+        var width = (int)Math.Round(frame.Width / scale);
+        var height = (int)Math.Round(frame.Height / scale);
+        if (width <= 2 || height <= 2)
+        {
+            return null;
+        }
+        var padding = Math.Min(12, Math.Max(1, Math.Min(width, height) / 6));
+        var contentWidth = width - padding * 2;
+        var contentHeight = height - padding * 2;
+        var horizontal = forceHorizontal || height <= width * 2 / 3;
+        var gap = Math.Min(8, Math.Max(1, Math.Min(width, height) / 10));
+        var extent = horizontal
+            ? Math.Min(40, Math.Min(contentHeight, Math.Min(Math.Max(16, contentWidth / 4),
+                (contentWidth - Math.Max(8, contentWidth / 3)) / 2 - gap)))
+            : Math.Min(48, Math.Min(contentWidth, Math.Min(Math.Max(16, contentHeight / 3), contentHeight * 2 / 3)));
+        if (extent < 16)
+        {
+            return null;
+        }
+        var iconSize = extent - 8;
+        RectangleF Scaled(float x, float y, float w, float h) =>
+            new(frame.Left + x * scale, frame.Top + y * scale, w * scale, h * scale);
+        var content = Scaled(padding, padding, contentWidth, contentHeight);
+        return horizontal
+            ? new IconLayout(content,
+                Scaled(padding + extent / 2 - iconSize / 2, height / 2 - iconSize / 2, iconSize, iconSize),
+                Scaled(padding + extent + gap, padding, contentWidth - (extent + gap) * 2, contentHeight),
+                extent * scale, gap * scale, true)
+            : new IconLayout(content,
+                Scaled(width / 2 - iconSize / 2, padding + extent / 2 - iconSize / 2, iconSize, iconSize),
+                Scaled(padding, padding + extent + gap, contentWidth, contentHeight - extent - gap),
+                extent * scale, gap * scale, false);
+    }
+
+    private void DrawIconAndTitle(Graphics graphics, RemoteControl control, string text, IconLayout layout,
+        float screenScale)
+    {
+        using var label = NativeButtonLabelLayout.Fit(graphics, text, layout.Title, MaxButtonTextSize, screenScale);
+        if (layout.Horizontal)
+        {
+            DrawControlIcon(graphics, control, layout.Icon, Color.Black);
+            label.Draw(graphics, Brushes.Black);
+            return;
+        }
+        // Like the firmware, center the icon and measured title together as one group.
+        var textHeight = text.Length == 0 ? 0 : Math.Min(layout.Title.Height, label.MeasuredSize.Height);
+        var gap = textHeight > 0 ? layout.Gap : 0;
+        var top = layout.Content.Top + (layout.Content.Height - layout.Extent - gap - textHeight) / 2;
+        var icon = layout.Icon;
+        icon.Y = top + layout.Extent / 2 - icon.Height / 2;
+        DrawControlIcon(graphics, control, icon, Color.Black);
+        var shift = top + layout.Extent + gap - label.TextBounds.Top;
+        var shiftedTitle = layout.Title;
+        shiftedTitle.Offset(0, shift);
+        using var shifted = NativeButtonLabelLayout.Fit(graphics, text, shiftedTitle, MaxButtonTextSize, screenScale);
+        shifted.Draw(graphics, Brushes.Black);
+    }
+
+    private static void DrawControlIcon(Graphics graphics, RemoteControl control, RectangleF bounds, Color color)
+    {
+        var state = graphics.Save();
+        try
+        {
+            using var bitmap = DecodeIconBitmap(control.IconBitmap, color);
+            if (bitmap is not null)
+            {
+                graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+                graphics.PixelOffsetMode = PixelOffsetMode.Half;
+                graphics.DrawImage(bitmap, bounds);
+                return;
+            }
+            using var path = RemoteIconGlyphs.CreatePath(control.Symbol, bounds);
+            if (path is null)
+            {
+                return;
+            }
+            using var brush = new SolidBrush(color);
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            graphics.FillPath(brush, path);
+        }
+        finally
+        {
+            graphics.Restore(state);
+        }
+    }
+
+    // Same 1-bit, row-major, MSB-first hex mask the firmware accepts (32 or 64 pixels square).
+    private static Bitmap? DecodeIconBitmap(string? hex, Color color)
+    {
+        var dimension = hex?.Length switch { 256 => 32, 1024 => 64, _ => 0 };
+        if (hex is null || dimension == 0)
+        {
+            return null;
+        }
+        var bitmap = new Bitmap(dimension, dimension, PixelFormat.Format32bppArgb);
+        for (var index = 0; index < hex.Length / 2; index++)
+        {
+            if (!byte.TryParse(hex.AsSpan(index * 2, 2), NumberStyles.HexNumber,
+                    CultureInfo.InvariantCulture, out var value))
+            {
+                bitmap.Dispose();
+                return null;
+            }
+            for (var bit = 0; bit < 8; bit++)
+            {
+                if ((value & (0x80 >> bit)) != 0)
+                {
+                    var pixel = index * 8 + bit;
+                    bitmap.SetPixel(pixel % dimension, pixel / dimension, color);
+                }
+            }
+        }
+        return bitmap;
     }
 
     private static (int Width, int Height) Span(RemoteControl control, int columns, int rows)

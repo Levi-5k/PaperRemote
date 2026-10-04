@@ -38,4 +38,17 @@ final class HTTPRequestParserTests: XCTestCase {
         XCTAssertTrue(HTTPRequestParser.hasBearerToken("SecretToken", in: matching))
         XCTAssertFalse(HTTPRequestParser.hasBearerToken("secrettoken", in: matching))
     }
+
+    func testKeepAliveRequiresExplicitConnectionToken() {
+        let keepAlive = Data("POST /text-source HTTP/1.1\r\nconnection: Keep-Alive\r\n\r\n".utf8)
+        XCTAssertTrue(HTTPRequestParser.requestsKeepAlive(keepAlive))
+        let listed = Data("POST / HTTP/1.1\r\nConnection: upgrade, keep-alive\r\n\r\n".utf8)
+        XCTAssertTrue(HTTPRequestParser.requestsKeepAlive(listed))
+        let close = Data("POST / HTTP/1.1\r\nConnection: close\r\n\r\n".utf8)
+        XCTAssertFalse(HTTPRequestParser.requestsKeepAlive(close))
+        let implicit = Data("POST / HTTP/1.1\r\nHost: example\r\n\r\n".utf8)
+        XCTAssertFalse(HTTPRequestParser.requestsKeepAlive(implicit))
+        let header = Data("POST / HTTP/1.1\r\nX-Note: keep-alive\r\n\r\n".utf8)
+        XCTAssertFalse(HTTPRequestParser.requestsKeepAlive(header))
+    }
 }

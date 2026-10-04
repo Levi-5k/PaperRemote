@@ -4,6 +4,7 @@ struct PaperGIFDeviceView: View {
     @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
     let animation: PaperGIFAnimation?
     let sourceName: String
+    @StateObject private var firmware = PaperGIFFirmwareUpdater()
 
     var body: some View {
         NavigationStack {
@@ -47,6 +48,8 @@ struct PaperGIFDeviceView: View {
                     }
                 }
 
+                firmwareSection
+
                 Section("Media") {
                     if let animation {
                         LabeledContent("Name", value: sourceName)
@@ -82,6 +85,59 @@ struct PaperGIFDeviceView: View {
                 }
             }
             .navigationTitle("Device")
+            .task(id: bluetoothManager.deviceHTTPEndpoint) {
+                await firmware.refresh(endpoint: bluetoothManager.deviceHTTPEndpoint)
+            }
+        }
+    }
+
+    private var firmwareSection: some View {
+        Section {
+            LabeledContent("Installed", value: firmware.deviceFirmware ?? "Not reachable over Wi-Fi")
+            LabeledContent("Latest release", value: firmware.release?.version ?? "Unknown")
+
+            if let activity = firmware.activity {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text(activity)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let endpoint = bluetoothManager.deviceHTTPEndpoint,
+                      firmware.updateAvailable, !firmware.needsUSB {
+                Button {
+                    Task { await firmware.install(endpoint: endpoint) }
+                } label: {
+                    Label("Update M5Paper to \(firmware.release?.version ?? "")", systemImage: "arrow.down.circle.fill")
+                }
+                .disabled(bluetoothManager.isTransferring)
+            } else {
+                Button {
+                    Task { await firmware.refresh(endpoint: bluetoothManager.deviceHTTPEndpoint) }
+                } label: {
+                    Label("Check for Updates", systemImage: "arrow.clockwise")
+                }
+            }
+
+            if let problem = firmware.problem {
+                Text(problem)
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+            } else if let notice = firmware.notice {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(.green)
+            }
+        } header: {
+            Text("Firmware")
+        } footer: {
+            if firmware.needsUSB {
+                Text("This M5Paper's firmware is too old for Wi-Fi updates. Flash it over USB once; later updates install from here.")
+            } else if bluetoothManager.deviceHTTPEndpoint == nil {
+                Text("Firmware updates install over Wi-Fi. Connect the M5Paper to Wi-Fi to check its version.")
+            } else if firmware.deviceFirmware != nil, !firmware.updateAvailable, firmware.release != nil {
+                Text("The M5Paper is up to date.")
+            }
         }
     }
 

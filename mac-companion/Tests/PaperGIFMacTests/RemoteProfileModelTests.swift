@@ -3,6 +3,28 @@ import XCTest
 @testable import PaperGIFMac
 
 final class RemoteProfileModelTests: XCTestCase {
+    func testButtonTextSizeDefaultClampAndIntegerRoundTrip() throws {
+        let legacy = try JSONDecoder().decode(RemoteProfile.self, from: Data(#"{"version":6,"pages":[]}"#.utf8))
+        XCTAssertEqual(legacy.maxButtonTextSize, 24)
+        XCTAssertEqual(RemoteProfile(pages: []).maxButtonTextSize, 24)
+        for (input, expected) in [(Int.min, 9), (8, 9), (9, 9), (17, 17), (24, 24), (25, 24), (Int.max, 24)] {
+            var profile = RemoteProfile(maxButtonTextSize: input, pages: [])
+            XCTAssertEqual(profile.maxButtonTextSize, expected)
+            profile.maxButtonTextSize = input
+            XCTAssertEqual(profile.maxButtonTextSize, expected)
+            let data = try JSONEncoder().encode(profile)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let value = try XCTUnwrap(object["maxButtonTextSize"] as? NSNumber)
+            XCTAssertEqual(value.intValue, expected)
+            XCTAssertFalse(String(data: data, encoding: .utf8)!.contains("\"maxButtonTextSize\":\(expected)."))
+            XCTAssertEqual(try JSONDecoder().decode(RemoteProfile.self, from: data), profile)
+            let decoded = try JSONDecoder().decode(RemoteProfile.self, from: Data("{\"pages\":[],\"maxButtonTextSize\":\(input)}".utf8))
+            XCTAssertEqual(decoded.maxButtonTextSize, expected)
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: profile.devicePayload) as? [String: Any])
+            XCTAssertEqual(payload["maxButtonTextSize"] as? Int, expected)
+        }
+    }
+
     func testCanonicalV6FixtureCoversEveryActionType() throws {
         let profile = try JSONDecoder().decode(
             RemoteProfile.self,

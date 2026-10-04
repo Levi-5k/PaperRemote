@@ -202,6 +202,9 @@ public sealed class RemoteProfile
 {
     public const int CurrentVersion = 6;
     public const int MaximumControlsPerPage = 24;
+    public const int MinimumButtonTextSize = 9;
+    public const int MaximumButtonTextSize = 24;
+    private int maxButtonTextSize = MaximumButtonTextSize;
 
     public int Version { get; set; } = CurrentVersion;
     public long UpdatedAtMilliseconds { get; set; }
@@ -214,6 +217,12 @@ public sealed class RemoteProfile
     public int ScreensaverDelaySeconds { get; set; } = 30;
     public int ButtonQualityRefreshInterval { get; set; } = 10;
     public int ElementRefreshDelayMilliseconds { get; set; } = 20;
+    // Clamp in the setter so both device JSON and saved editor documents are normalized.
+    public int MaxButtonTextSize
+    {
+        get => maxButtonTextSize;
+        set => maxButtonTextSize = Math.Clamp(value, MinimumButtonTextSize, MaximumButtonTextSize);
+    }
     public TemperatureUnit TemperatureUnit { get; set; } = TemperatureUnit.Celsius;
     public int TimeZoneOffsetMinutes { get; set; } = (int)TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.Now).TotalMinutes;
     public List<RemotePage> Pages { get; set; } = [];

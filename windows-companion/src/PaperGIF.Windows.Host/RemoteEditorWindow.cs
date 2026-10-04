@@ -68,6 +68,8 @@ internal sealed class RemoteEditorWindow : Form
     private readonly Control applicationPickerRow;
     private readonly Control applicationTargetRow;
     private readonly PropertyGrid profileProperties = new();
+    private readonly TrackBar maxButtonTextSize = new();
+    private readonly Label maxButtonTextSizeValue = new();
     private readonly ListBox computersList = new();
     private readonly ListBox discoveredList = new();
     private readonly ComboBox wifiNetworks = new();
@@ -95,6 +97,7 @@ internal sealed class RemoteEditorWindow : Form
         NetHomeService netHomeService,
         ModuleCatalogService moduleCatalog,
         HomeAccessoryCatalog homeAccessories,
+        UpdateCoordinator updates,
         Icon icon)
     {
         this.store = store;
@@ -135,6 +138,7 @@ internal sealed class RemoteEditorWindow : Form
         StartPosition = FormStartPosition.CenterScreen;
 
         Controls.Add(BuildWorkspace());
+        Controls.Add(new UpdateBannerPanel(updates));
         Controls.Add(BuildSendBar(icon));
         EditorTheme.StyleInput(this);
         store.Changed += HandleStoreChanged;
@@ -869,6 +873,61 @@ internal sealed class RemoteEditorWindow : Form
         profileProperties.Dock = DockStyle.Fill;
         profileProperties.ToolbarVisible = false;
         profileProperties.HelpVisible = true;
+        var deviceSettings = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            Margin = Padding.Empty,
+        };
+        deviceSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        deviceSettings.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        deviceSettings.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        deviceSettings.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Text = "Device settings",
+            Font = EditorTheme.StrongFont,
+            Padding = new Padding(2, 4, 0, 4),
+        }, 0, 0);
+        var textSizeRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 2,
+            RowCount = 2,
+            Margin = Padding.Empty,
+        };
+        textSizeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        textSizeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
+        textSizeRow.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Text = "Maximum button text size",
+            Margin = new Padding(2, 4, 0, 0),
+        }, 0, 0);
+        maxButtonTextSizeValue.Dock = DockStyle.Fill;
+        maxButtonTextSizeValue.TextAlign = ContentAlignment.MiddleRight;
+        textSizeRow.Controls.Add(maxButtonTextSizeValue, 1, 0);
+        maxButtonTextSize.Dock = DockStyle.Fill;
+        maxButtonTextSize.Minimum = RemoteProfile.MinimumButtonTextSize;
+        maxButtonTextSize.Maximum = RemoteProfile.MaximumButtonTextSize;
+        maxButtonTextSize.TickFrequency = 1;
+        maxButtonTextSize.SmallChange = 1;
+        maxButtonTextSize.LargeChange = 1;
+        maxButtonTextSize.AccessibleName = "Maximum button text size (pt)";
+        maxButtonTextSize.ValueChanged += (_, _) =>
+        {
+            if (!refreshing && store.Profile.MaxButtonTextSize != maxButtonTextSize.Value)
+            {
+                store.Profile.MaxButtonTextSize = maxButtonTextSize.Value;
+                store.Commit();
+            }
+        };
+        textSizeRow.Controls.Add(maxButtonTextSize, 0, 1);
+        textSizeRow.SetColumnSpan(maxButtonTextSize, 2);
+        deviceSettings.Controls.Add(textSizeRow, 0, 1);
+        deviceSettings.Controls.Add(profileProperties, 0, 2);
         var wifiControls = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
         wifiNetworks.Width = 230;
         wifiNetworks.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -931,7 +990,7 @@ internal sealed class RemoteEditorWindow : Form
             Text = "Computer pairing and discovery use the same companion API as macOS.",
         };
         layout.Controls.Add(wifiControls, 0, 0);
-        layout.Controls.Add(profileProperties, 0, 1);
+        layout.Controls.Add(deviceSettings, 0, 1);
         layout.Controls.Add(new Label { AutoSize = true, Text = "Computers", Font = new Font("Segoe UI Semibold", 9F), Padding = new Padding(2, 8, 0, 4) }, 0, 2);
         layout.Controls.Add(computersList, 0, 3);
         layout.Controls.Add(computerButtons, 0, 4);
@@ -964,6 +1023,7 @@ internal sealed class RemoteEditorWindow : Form
         preview.PageIndex = Math.Max(0, store.Profile.Pages.FindIndex(page => page.Id == store.SelectedPageId));
         preview.PageNames = store.Profile.Pages.Select(page => page.Name).ToArray();
         preview.SelectedControlId = store.SelectedControlId;
+        preview.MaxButtonTextSize = store.Profile.MaxButtonTextSize;
         var selectedControl = store.SelectedControl;
         controlProperties.SelectedObject = selectedControl is { } control && store.SelectedPage is { } selectedPage
             ? new ControlProperties(control, selectedPage, store)
@@ -981,6 +1041,8 @@ internal sealed class RemoteEditorWindow : Form
         targetComputer.SelectedItem = computerChoices.First(choice => choice.ComputerId == selectedComputerId);
         RefreshControlOptions();
         profileProperties.SelectedObject = new ProfileProperties(store);
+        maxButtonTextSize.Value = store.Profile.MaxButtonTextSize;
+        maxButtonTextSizeValue.Text = $"{store.Profile.MaxButtonTextSize} pt";
         var selectedComputer = computersList.SelectedItem as RemoteComputer;
         computersList.DataSource = null;
         computersList.DataSource = store.Profile.Computers;

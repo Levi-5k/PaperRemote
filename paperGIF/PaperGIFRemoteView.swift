@@ -388,6 +388,16 @@ struct PaperGIFRemoteView: View {
 
     private var screensaverSection: some View {
         Section("Display") {
+            VStack(alignment: .leading) {
+                Text("Maximum button text size: \(profile.maxButtonTextSize) pt")
+                    .monospacedDigit()
+                Slider(value: Binding(
+                    get: { Double(profile.maxButtonTextSize) },
+                    set: { profile.maxButtonTextSize = Int($0.rounded()) }
+                ), in: 9...24, step: 1)
+                .accessibilityLabel("Maximum button text size")
+                .accessibilityValue("\(profile.maxButtonTextSize) points")
+            }
             Stepper(
                 "Start after \(profile.screensaverDelaySeconds) seconds",
                 value: screensaverDelayBinding,
@@ -784,6 +794,7 @@ struct PaperGIFRemoteView: View {
                         pages: profile.pages,
                         computers: profile.computers,
                         temperatureUnit: profile.temperatureUnit,
+                        maxButtonTextSize: profile.maxButtonTextSize,
                         wledDiscovery: wledDiscovery
                     )
                 } label: {
@@ -1631,6 +1642,7 @@ private struct PaperGIFRemotePageEditor: View {
     let pages: [PaperGIFRemotePage]
     let computers: [PaperGIFRemoteComputer]
     let temperatureUnit: PaperGIFTemperatureUnit
+    let maxButtonTextSize: Int
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     @State private var selectedControlID: UUID?
 
@@ -1642,6 +1654,7 @@ private struct PaperGIFRemotePageEditor: View {
                     pageIndex: pages.firstIndex { $0.id == page.id } ?? 0,
                     pageNames: pages.map(\.name),
                     temperatureUnit: temperatureUnit,
+                    maxButtonTextSize: maxButtonTextSize,
                     onEditControl: { selectedControlID = $0 }
                 )
                 .aspectRatio(540.0 / 960.0, contentMode: .fit)
@@ -1815,6 +1828,7 @@ private struct PaperGIFRemotePagePreview: View {
     let pageIndex: Int
     let pageNames: [String]
     let temperatureUnit: PaperGIFTemperatureUnit
+    let maxButtonTextSize: Int
     let onEditControl: (UUID) -> Void
     @State private var draggedControlID: UUID?
     @State private var dragLocation: CGPoint?
@@ -2045,48 +2059,13 @@ private struct PaperGIFRemoteTabsPreview: View {
                         .foregroundStyle(control.sliderOutlineInsetPixels == nil && progress >= 0.5
                             ? Color.white : Color.black)
                 } else {
-                    HStack(spacing: 8 * scale) {
-                        PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                            .frame(width: 28, height: 28)
-                        Text(control.title)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.65)
-                    }
-                    .font(.system(size: 12, weight: .semibold))
+                    PaperGIFRemotePreviewLabel(control: control, scale: scale, compact: controllerCompact, maxButtonTextSize: maxButtonTextSize)
                     .foregroundStyle(control.sliderOutlineInsetPixels == nil && progress >= 0.5
                         ? Color.white : Color.black)
                 }
-            } else if controllerCompact && control.kind == .button {
-                VStack(spacing: 5 * scale) {
-                    PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                        .frame(width: 30 * scale, height: 30 * scale)
-                    Text(control.title)
-                        .font(.system(size: 10 * scale, weight: .semibold))
-                }
-                .foregroundStyle(.black)
-            } else if control.buttonGridHeight == 1 {
-                HStack(spacing: 8 * scale) {
-                    PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                        .frame(width: 28, height: 28)
-                    Text(control.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.65)
-                }
-                .foregroundStyle(.black)
-                .padding(.horizontal, 10 * scale)
             } else {
-                VStack(spacing: 10 * scale) {
-                    PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
-                        .frame(width: 64, height: 64)
-                    Text(control.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.65)
-                        .multilineTextAlignment(.center)
-                }
+                PaperGIFRemotePreviewLabel(control: control, scale: scale, compact: controllerCompact, maxButtonTextSize: maxButtonTextSize)
                 .foregroundStyle(.black)
-                .padding(.horizontal, 8)
             }
         }
         .frame(width: frame.width, height: frame.height)
@@ -3630,6 +3609,156 @@ private struct PaperGIFMacApplication: Decodable, Identifiable {
     let iconBitmap: String?
 
     var id: String { path }
+}
+
+// Keep geometry and native measurement internal so device tests can exercise them directly.
+enum PaperGIFRemotePreviewLabelFitting {
+    struct Layout {
+        let horizontal: Bool
+        let padding: CGFloat
+        let spacing: CGFloat
+        let iconSize: CGFloat
+        let iconHalo: CGFloat
+        let labelSize: CGSize
+        let maximumFontSize: CGFloat
+
+        /// Frames are in button coordinates; the title stays button-centered horizontally.
+        func frames(in size: CGSize, measuredLabelHeight: CGFloat) -> (icon: CGRect, label: CGRect) {
+            let textHeight = min(labelSize.height, max(0, measuredLabelHeight))
+            let extent = iconSize > 0 ? iconSize + 2 * iconHalo : 0
+            let gap = textHeight > 0 ? spacing : 0
+            if horizontal {
+                let iconX = textHeight > 0 ? padding + iconHalo : (size.width - iconSize) / 2
+                return (
+                    CGRect(x: iconX, y: (size.height - iconSize) / 2, width: iconSize, height: iconSize),
+                    CGRect(x: (size.width - labelSize.width) / 2, y: (size.height - textHeight) / 2,
+                           width: labelSize.width, height: textHeight)
+                )
+            }
+            let top = (size.height - extent - gap - textHeight) / 2
+            return (
+                CGRect(x: (size.width - iconSize) / 2, y: top + iconHalo, width: iconSize, height: iconSize),
+                CGRect(x: (size.width - labelSize.width) / 2, y: top + extent + gap,
+                       width: labelSize.width, height: textHeight)
+            )
+        }
+    }
+
+    static func layout(size: CGSize, scale: CGFloat, compact: Bool, hasIcon: Bool = true,
+                       hasTitle: Bool = true, maxButtonTextSize: Int = 24) -> Layout {
+        let width = size.width.isFinite ? max(0, size.width) : 0
+        let height = size.height.isFinite ? max(0, size.height) : 0
+        let scale = scale.isFinite ? max(0, scale) : 0
+        let horizontal = width >= height * 1.6
+        let padding = min(12 * scale, min(width, height) / 6)
+        let innerWidth = max(0, width - 2 * padding)
+        let innerHeight = max(0, height - 2 * padding)
+        let iconCap: CGFloat = (compact ? 30 : horizontal ? 28 : 64) * scale
+        let iconExtent = hasIcon ? min(iconCap, horizontal
+            ? min(innerHeight * 0.72, innerWidth * 0.25)
+            : min(innerWidth * 0.55, innerHeight * 0.42)) : 0
+        let halo = min(4 * scale, iconExtent / 4)
+        let iconSize = max(0, iconExtent - 2 * halo)
+        let spacing = iconSize > 0 && hasTitle ? min(8 * scale, min(innerWidth, innerHeight) * 0.08) : 0
+        return Layout(
+            horizontal: horizontal, padding: padding, spacing: spacing, iconSize: iconSize,
+            iconHalo: halo,
+            labelSize: CGSize(width: horizontal ? max(0, innerWidth - 2 * (iconExtent + spacing)) : innerWidth,
+                              height: horizontal ? innerHeight : max(0, innerHeight - iconExtent - spacing)),
+            maximumFontSize: CGFloat(min(24, max(9, maxButtonTextSize))) * scale
+        )
+    }
+
+    static func measuredSize(_ title: String, fontSize: CGFloat, width: CGFloat) -> CGSize {
+        guard !title.isEmpty, fontSize > 0, fontSize.isFinite, width > 0, width.isFinite else { return .zero }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+        // Reserve SwiftUI's rounded baseline/descent, not a shorter native line fragment.
+        paragraph.minimumLineHeight = round(font.ascender) + ceil(-font.descender) + ceil(font.leading)
+        // Match SwiftUI's native word wrapping, including character fallback for long words.
+        paragraph.lineBreakMode = .byWordWrapping
+        return (title as NSString).boundingRect(
+            with: CGSize(width: width, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font,
+                         .paragraphStyle: paragraph],
+            context: nil
+        ).size
+    }
+
+    static func fontSize(for title: String, in bounds: CGSize, maximum: CGFloat) -> CGFloat {
+        guard bounds.width > 0, bounds.height > 0, bounds.width.isFinite, bounds.height.isFinite,
+              maximum > 0, maximum.isFinite else { return 0 }
+        func fits(_ size: CGFloat) -> Bool {
+            let measured = measuredSize(title, fontSize: size, width: bounds.width)
+            return measured.width <= bounds.width && measured.height <= bounds.height
+        }
+        if fits(maximum) { return maximum }
+        var lower: CGFloat = 0
+        var upper = maximum
+        for _ in 0..<20 {
+            let candidate = (lower + upper) / 2
+            if fits(candidate) { lower = candidate } else { upper = candidate }
+        }
+        return lower
+    }
+}
+
+private struct PaperGIFRemotePreviewLabel: View {
+    let control: PaperGIFRemoteControl
+    let scale: CGFloat
+    let compact: Bool
+    let maxButtonTextSize: Int
+
+    var body: some View {
+        GeometryReader { geometry in
+            let hasIcon = !control.symbol.isEmpty || control.iconBitmap != nil
+            let layout = PaperGIFRemotePreviewLabelFitting.layout(
+                size: geometry.size, scale: scale, compact: compact,
+                hasIcon: hasIcon, hasTitle: !control.title.isEmpty, maxButtonTextSize: maxButtonTextSize
+            )
+            let fontSize = PaperGIFRemotePreviewLabelFitting.fontSize(
+                for: control.title, in: layout.labelSize, maximum: layout.maximumFontSize
+            )
+            let measured = PaperGIFRemotePreviewLabelFitting.measuredSize(
+                control.title, fontSize: fontSize, width: layout.labelSize.width
+            )
+            let frames = layout.frames(in: geometry.size, measuredLabelHeight: measured.height)
+            ZStack(alignment: .topLeading) {
+                if hasIcon && layout.iconSize > 0 {
+                    icon(size: layout.iconSize)
+                        .position(x: frames.icon.midX, y: frames.icon.midY)
+                }
+                label(size: frames.label.size, fontSize: fontSize)
+                    .position(x: frames.label.midX, y: frames.label.midY)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
+        .clipped()
+    }
+
+    private func icon(size: CGFloat) -> some View {
+        PaperGIFRemoteBitmapIcon(symbol: control.symbol, bitmap: control.iconBitmap)
+            .frame(width: size, height: size)
+            .clipped()
+    }
+
+    private func label(size: CGSize, fontSize: CGFloat) -> some View {
+        Group {
+            if fontSize > 0 && !control.title.isEmpty {
+                Text(verbatim: control.title)
+                    .font(Font(UIFont.systemFont(ofSize: fontSize, weight: .semibold)))
+                    .lineLimit(nil)
+                    .allowsTightening(false)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(width: size.width, height: control.title.isEmpty ? 0 : size.height)
+        .clipped()
+    }
 }
 
 private struct PaperGIFRemoteBitmapIcon: View {

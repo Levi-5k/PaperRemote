@@ -773,13 +773,27 @@ struct RemoteProfile: Codable, Equatable, Sendable {
     var computers: [RemoteComputer] = []
     var screensaverDelaySeconds = 30
     var buttonQualityRefreshInterval = 10
+    /// Nominal device points; preview renderers convert this using their device scale.
+    var maxButtonTextSize = 24 {
+        didSet {
+            let clamped = min(24, max(9, maxButtonTextSize))
+            if maxButtonTextSize != clamped { maxButtonTextSize = clamped }
+        }
+    }
     var elementRefreshDelayMilliseconds = 20
     var temperatureUnit: RemoteTemperatureUnit = .celsius
     var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
     var pages: [RemotePage]
 
-    init(pages: [RemotePage]) {
+    init(maxButtonTextSize: Int = 24, pages: [RemotePage]) {
+        self.maxButtonTextSize = min(24, max(9, maxButtonTextSize))
         self.pages = pages
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, updatedAtMilliseconds, wifiSSID, wifiPassword, macHost, macPort, macToken
+        case computers, screensaverDelaySeconds, buttonQualityRefreshInterval, maxButtonTextSize
+        case elementRefreshDelayMilliseconds, temperatureUnit, timeZoneOffsetMinutes, pages
     }
 
     init(from decoder: Decoder) throws {
@@ -806,6 +820,9 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         buttonQualityRefreshInterval = try container.decodeIfPresent(
             Int.self, forKey: .buttonQualityRefreshInterval
         ) ?? 10
+        maxButtonTextSize = min(24, max(9, try container.decodeIfPresent(
+            Int.self, forKey: .maxButtonTextSize
+        ) ?? 24))
         elementRefreshDelayMilliseconds = try container.decodeIfPresent(
             Int.self, forKey: .elementRefreshDelayMilliseconds
         ) ?? 20

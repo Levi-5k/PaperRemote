@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import Security
+import UserNotifications
 
 struct ReleaseManifest: Decodable, Equatable {
     struct Asset: Decodable, Equatable {
@@ -265,89 +266,148 @@ enum FirmwareInstaller {
 }
 
 @MainActor
-final class UpdateService {
+final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     struct FirmwareTarget {
         let address: String
         let token: String
     }
 
-    var statusChanged: ((String?) -> Void)?
+    enum Activity: Equatable {
+        case checking
+        case downloading(String)
+        case installing(String)
+
+        var title: String {
+            switch self {
+            case .checking: "Checking for Updates…"
+            case .downloading(let item): "Downloading \(item)…"
+            case .installing(let item): "Installing \(item)…"
+            }
+        }
+    }
+
+    @Published private(set) var release: AvailableRelease?
+    /// nil when the M5Paper could not be reached.
+    @Published private(set) var deviceFirmware: String?
+    @Published private(set) var activity: Activity?
+    @Published private(set) var problem: String?
+    @Published private(set) var notice: String?
+
+    var menuChanged: ((_ title: String, _ enabled: Bool) -> Void)?
     var firmwareTarget: (() -> FirmwareTarget?)?
+    var deviceAddressFound: ((String) -> Void)?
+    var openUpdates: (() -> Void)?
 
     private var timer: Timer?
-    private var isBusy = false
+    private static let notifiedVersionKey = "UpdateService.notifiedVersion"
 
     var currentAppVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
     }
 
+    var appUpdate: AvailableRelease? {
+        guard let release, release.manifest.mac != nil,
+              SoftwareVersion.isNewer(release.version, than: currentAppVersion) else { return nil }
+        return release
+    }
+
+    var firmwareUpdate: AvailableRelease? {
+        guard let release, let deviceFirmware, release.manifest.firmware != nil,
+              SoftwareVersion.isNewer(release.version, than: deviceFirmware) else { return nil }
+        return release
+    }
+
+    var firmwareNeedsUSB: Bool {
+        firmwareUpdate != nil && deviceFirmware == FirmwareInstaller.usbOnlyVersion
+    }
+
     func startAutomaticChecks() {
+        UNUserNotificationCenter.current().delegate = self
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(15))
-            await self?.checkForUpdates(userInitiated: false)
+            await self?.refresh(notify: true)
         }
         timer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in await self?.checkForUpdates(userInitiated: false) }
+            Task { @MainActor [weak self] in await self?.refresh(notify: true) }
         }
     }
 
-    func checkForUpdates(userInitiated: Bool) async {
-        guard !isBusy else { return }
-        isBusy = true
-        statusChanged?("Checking for Updates…")
-        defer {
-            isBusy = false
-            statusChanged?(nil)
-        }
-        let release: AvailableRelease
+    /// Checks GitHub and the M5Paper without interrupting; results show in the menu and editor.
+    func refresh(notify: Bool = false) async {
+        guard activity == nil else { return }
+        setActivity(.checking)
+        defer { setActivity(nil) }
         do {
             release = try await ReleaseClient.latest()
+            problem = nil
         } catch {
             DiagnosticLog.error("Update check failed", error: error)
-            if userInitiated { present(error, title: "Could Not Check for Updates") }
+            if release == nil { problem = "Could not check for updates: \(error.localizedDescription)" }
+        }
+        await refreshDevice()
+        if notify { notifyIfNeeded() }
+    }
+
+    func refreshDevice() async {
+        guard let target = firmwareTarget?() else {
+            deviceFirmware = nil
             return
         }
-
-        var offeredUpdate = false
-        if let asset = release.manifest.mac, SoftwareVersion.isNewer(release.version, than: currentAppVersion) {
-            offeredUpdate = true
-            if confirm(
-                title: "paperGIF Mac \(release.version) Is Available",
-                message: "You have \(currentAppVersion). paperGIF Mac will download, verify, install, and relaunch.\n\n\(release.notes)",
-                action: "Install and Relaunch"
-            ) {
-                await installApp(asset, from: release)
+        if let version = await FirmwareInstaller.installedVersion(at: target.address) {
+            deviceFirmware = version
+            return
+        }
+        // The saved address goes stale when the M5Paper gets a new IP; find it again.
+        for device in await DeviceDiscovery.probeNetwork(preferredAddress: target.address) {
+            if let version = await FirmwareInstaller.installedVersion(at: device.address) {
+                deviceAddressFound?(device.address)
+                deviceFirmware = version
                 return
             }
         }
+        deviceFirmware = nil
+    }
 
-        let target = firmwareTarget?()
-        var deviceVersion: String?
-        if let target {
-            deviceVersion = await FirmwareInstaller.installedVersion(at: target.address)
+    func dismissMessages() {
+        problem = nil
+        notice = nil
+    }
+
+    /// Menu command: checks, then asks about each available update.
+    func checkForUpdates(userInitiated: Bool) async {
+        await refresh()
+        guard let release else {
+            if userInitiated, let problem { inform(title: "Could Not Check for Updates", message: problem) }
+            return
         }
-        if let target, let deviceVersion, let asset = release.manifest.firmware,
-           SoftwareVersion.isNewer(release.version, than: deviceVersion) {
-            offeredUpdate = true
-            if deviceVersion == FirmwareInstaller.usbOnlyVersion {
-                if userInitiated {
-                    inform(
-                        title: "M5Paper Needs a One-Time USB Update",
-                        message: "This M5Paper's firmware is too old to update over Wi-Fi. Flash firmware \(release.version) over USB once; later updates install from here."
-                    )
-                }
-            } else if confirm(
-                title: "M5Paper Firmware \(release.version) Is Available",
-                message: "The M5Paper has \(deviceVersion). Keep it awake and nearby; it restarts when the update finishes.",
-                action: "Update M5Paper"
-            ) {
-                await installFirmware(asset, from: release, target: target)
+        if let appUpdate, confirm(
+            title: "paperGIF Mac \(appUpdate.version) Is Available",
+            message: "You have \(currentAppVersion). paperGIF Mac will download, verify, install, and relaunch.\n\n\(appUpdate.notes)",
+            action: "Install and Relaunch"
+        ) {
+            await installAppUpdate()
+            if let problem { inform(title: "Could Not Install the Update", message: problem) }
+            return
+        }
+        if firmwareNeedsUSB {
+            inform(
+                title: "M5Paper Needs a One-Time USB Update",
+                message: "This M5Paper's firmware is too old to update over Wi-Fi. Flash firmware \(release.version) over USB once; later updates install from here."
+            )
+        } else if let firmwareUpdate, let deviceFirmware, confirm(
+            title: "M5Paper Firmware \(firmwareUpdate.version) Is Available",
+            message: "The M5Paper has \(deviceFirmware). It shows its progress on screen and restarts when the update finishes.",
+            action: "Update M5Paper"
+        ) {
+            await installFirmwareUpdate()
+            if let problem {
+                inform(title: "Could Not Update the M5Paper", message: problem)
+            } else if let notice {
+                inform(title: "M5Paper Updated", message: notice)
             }
-        }
-
-        if userInitiated && !offeredUpdate {
-            let firmwareLine = deviceVersion.map { "M5Paper firmware \($0)" }
-                ?? "M5Paper not reachable, so its firmware was not checked"
+        } else if userInitiated && appUpdate == nil && firmwareUpdate == nil {
+            let firmwareLine = deviceFirmware.map { "M5Paper firmware \($0)" }
+                ?? "M5Paper not found on the network, so its firmware was not checked"
             inform(
                 title: "paperGIF Is Up to Date",
                 message: "paperGIF Mac \(currentAppVersion)\n\(firmwareLine)\nLatest release: \(release.version)"
@@ -355,52 +415,29 @@ final class UpdateService {
         }
     }
 
-    private func installApp(_ asset: ReleaseManifest.Asset, from release: AvailableRelease) async {
-        statusChanged?("Downloading paperGIF Mac \(release.version)…")
+    func installAppUpdate() async {
+        guard activity == nil, let release = appUpdate, let asset = release.manifest.mac else { return }
+        dismissMessages()
+        setActivity(.downloading("paperGIF Mac \(release.version)"))
+        defer { setActivity(nil) }
         do {
-            let appURL = Bundle.main.bundleURL
-            guard appURL.pathExtension == "app" else {
-                throw UpdateError.notInstallable("Updates can only be installed into the packaged paperGIF Mac.app.")
-            }
-            let parent = appURL.deletingLastPathComponent()
-            guard FileManager.default.isWritableFile(atPath: parent.path) else {
-                throw UpdateError.notInstallable("paperGIF Mac cannot write to \(parent.path).")
-            }
-            let archive = try await ReleaseClient.download(asset, from: release)
-            defer { try? FileManager.default.removeItem(at: archive) }
-            let staging = parent.appendingPathComponent(".paperGIF-update-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
-            do {
-                let stagedApp = try await Self.extractApp(archive, into: staging)
-                try Self.verifySignature(of: stagedApp, matches: appURL)
-                let stagedVersion = Bundle(url: stagedApp)?
-                    .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-                guard SoftwareVersion.components(stagedVersion) == SoftwareVersion.components(release.version) else {
-                    throw UpdateError.invalidRelease("the app inside reports version \(stagedVersion)")
-                }
-                try Self.launchReplacement(of: appURL, with: stagedApp, staging: staging)
-            } catch {
-                try? FileManager.default.removeItem(at: staging)
-                throw error
-            }
-            DiagnosticLog.info("Installing paperGIF Mac \(release.version) and relaunching")
-            NSApp.terminate(nil)
+            try await installApp(asset, from: release)
         } catch {
             DiagnosticLog.error("App update failed", error: error)
-            present(error, title: "Could Not Install the Update")
+            problem = error.localizedDescription
         }
     }
 
-    private func installFirmware(
-        _ asset: ReleaseManifest.Asset,
-        from release: AvailableRelease,
-        target: FirmwareTarget
-    ) async {
-        statusChanged?("Downloading M5Paper firmware \(release.version)…")
+    func installFirmwareUpdate() async {
+        guard activity == nil, let release = firmwareUpdate, !firmwareNeedsUSB,
+              let asset = release.manifest.firmware, let target = firmwareTarget?() else { return }
+        dismissMessages()
+        defer { setActivity(nil) }
         do {
+            setActivity(.downloading("M5Paper firmware \(release.version)"))
             let file = try await ReleaseClient.download(asset, from: release)
             defer { try? FileManager.default.removeItem(at: file) }
-            statusChanged?("Installing M5Paper firmware \(release.version)…")
+            setActivity(.installing("M5Paper firmware \(release.version)"))
             try await FirmwareInstaller.install(
                 firmwareAt: file,
                 version: release.version,
@@ -408,11 +445,80 @@ final class UpdateService {
                 token: target.token
             )
             DiagnosticLog.info("M5Paper firmware updated to \(release.version)")
-            inform(title: "M5Paper Updated", message: "The M5Paper restarted with firmware \(release.version).")
+            deviceFirmware = release.version
+            notice = "The M5Paper restarted with firmware \(release.version)."
         } catch {
             DiagnosticLog.error("Firmware update failed", error: error)
-            present(error, title: "Could Not Update the M5Paper")
+            problem = error.localizedDescription
         }
+    }
+
+    private func setActivity(_ newActivity: Activity?) {
+        activity = newActivity
+        if let newActivity {
+            menuChanged?(newActivity.title, false)
+        } else if let version = (appUpdate ?? firmwareUpdate)?.version {
+            menuChanged?("Install Update \(version)…", true)
+        } else {
+            menuChanged?("Check for Updates…", true)
+        }
+    }
+
+    private func notifyIfNeeded() {
+        guard let release = appUpdate ?? (firmwareNeedsUSB ? nil : firmwareUpdate),
+              UserDefaults.standard.string(forKey: Self.notifiedVersionKey) != release.version else { return }
+        UserDefaults.standard.set(release.version, forKey: Self.notifiedVersionKey)
+        let center = UNUserNotificationCenter.current()
+        let body = appUpdate != nil
+            ? "paperGIF Mac \(release.version) is ready to install."
+            : "M5Paper firmware \(release.version) is ready to install."
+        center.requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "paperGIF Update Available"
+            content.body = body
+            center.add(UNNotificationRequest(identifier: "papergif-update", content: content, trigger: nil))
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        Task { @MainActor in self.openUpdates?() }
+        completionHandler()
+    }
+
+    private func installApp(_ asset: ReleaseManifest.Asset, from release: AvailableRelease) async throws {
+        let appURL = Bundle.main.bundleURL
+        guard appURL.pathExtension == "app" else {
+            throw UpdateError.notInstallable("Updates can only be installed into the packaged paperGIF Mac.app.")
+        }
+        let parent = appURL.deletingLastPathComponent()
+        guard FileManager.default.isWritableFile(atPath: parent.path) else {
+            throw UpdateError.notInstallable("paperGIF Mac cannot write to \(parent.path).")
+        }
+        let archive = try await ReleaseClient.download(asset, from: release)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        setActivity(.installing("paperGIF Mac \(release.version)"))
+        let staging = parent.appendingPathComponent(".paperGIF-update-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
+        do {
+            let stagedApp = try await Self.extractApp(archive, into: staging)
+            try Self.verifySignature(of: stagedApp, matches: appURL)
+            let stagedVersion = Bundle(url: stagedApp)?
+                .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+            guard SoftwareVersion.components(stagedVersion) == SoftwareVersion.components(release.version) else {
+                throw UpdateError.invalidRelease("the app inside reports version \(stagedVersion)")
+            }
+            try Self.launchReplacement(of: appURL, with: stagedApp, staging: staging)
+        } catch {
+            try? FileManager.default.removeItem(at: staging)
+            throw error
+        }
+        DiagnosticLog.info("Installing paperGIF Mac \(release.version) and relaunching")
+        NSApp.terminate(nil)
     }
 
     private static func extractApp(_ archive: URL, into staging: URL) async throws -> URL {
@@ -489,15 +595,6 @@ final class UpdateService {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.runModal()
-    }
-
-    private func present(_ error: Error, title: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = title
-        alert.informativeText = error.localizedDescription
         alert.runModal()
     }
 }

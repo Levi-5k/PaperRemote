@@ -14,6 +14,32 @@ PaperRemote keeps Bluetooth and home Wi-Fi available while the remote is active.
 - Skip M5Unified's automatic white-screen clear at boot because PaperRemote renders the required screen itself.
 - When the image screen saver is enabled, treat its wake tap only as a wake gesture. When it is disabled, leave the remote visible during idle sleep and use the wake tap as the first queued remote-control press.
 - Skip the full image-library scan on normal boots and input wakes; scan on library access, playback navigation, or timer-driven slideshow wake instead.
+- When the remote sleeps with nothing scheduled, the 60-second recovery timer wake goes straight back to sleep: no Wi-Fi, Bluetooth, or full-screen redraw. Previously each recovery wake redrew the remote and stayed awake for the whole sleep delay.
+- Climate and schedule timer wakes run as background wakes. The sleeping screen stays as it is and Bluetooth stays off. Wi-Fi connects only when a command must be sent, and the device sleeps again as soon as queued work is done. A touch or button press during the wake shows the remote as a normal wake would. A scheduled iPhone action that fails starts Bluetooth and waits up to 90 seconds for the phone.
+- Home Wi-Fi remembers the last access point and channel in RTC memory, so reconnects skip the all-channel scan. If the remembered access point does not answer, the cache is cleared and a full scan follows immediately. `WiFi.persistent(false)` avoids writing credentials to flash on every connect.
+- Unattended home Wi-Fi retries back off from 30 seconds to 5 minutes. Any remote activity since the last attempt restores the 30-second cadence.
+- Wi-Fi transmit power follows RSSI: 11 dBm at -50 dBm or better, 15 dBm down to -60 dBm, otherwise full power. The check runs every minute. Connections start at full power, and the transfer access point always uses full power.
+- The CPU runs at 80 MHz when idle and switches to 240 MHz for touch, buttons, rendering, uploads, animation, and Wi-Fi transfer. It returns to 80 MHz after 3 idle seconds.
+- The IT8951 e-paper controller enters standby after 2 idle seconds. A `StandbyPanel` subclass of the M5GFX panel sends `SYS_RUN` at the start of the next panel transaction.
+- The SD card chip select is held high during deep sleep so the card stays deselected.
+- Awake idle CPU load dropped from about 9% to under 1% at 80 MHz (measured 2026-10-04 with a temporary loop probe):
+  - Schedule polling read the RTC over I2C and ran `mktime` on every loop pass, about 0.7 ms each time. It now runs once a second.
+  - With no input for 3 seconds, the loop waits up to 50 ms on a semaphore instead of 10 ms. Touch, side-button, and menu-button interrupts release it immediately, so input latency is unchanged. Recent input or active work keeps the 10 ms and 1 ms cadences.
+- Bluetooth advertising follows Apple's accessory pattern: 100-200 ms for 30 seconds after start or disconnect, then 1022.5-1285 ms, including while a controller is connected and the second connection slot is advertised.
+- Text-source polling reuses one HTTP connection per computer. The firmware sends `Connection: keep-alive` only for these idempotent requests, and the Mac companion honors it with a silent 75-second idle close. Other clients and all error replies still close after each response.
+
+## Low Power Mode
+
+Turns on automatically below 30% battery and off at 35% or higher. The 5% gap keeps voltage sag during radio or panel activity from toggling the mode. The state survives deep sleep, and the remote header shows **LOW POWER** while the mode is on. Thresholds and limits are in [low_power_mode.h](../firmware/include/low_power_mode.h).
+
+- Screen saver shows still images only, with no GIFs and no Geometric Snake. Media screen savers sleep between images.
+- The screen saver and remote sleep delay is capped at 60 seconds, and **Never** is ignored.
+- CPU runs at 80 MHz instead of 240 MHz.
+- Wi-Fi uses maximum modem sleep (`WIFI_PS_MAX_MODEM`).
+- Bluetooth advertises every 1022.5-1285 ms instead of 100-200 ms.
+- Home Wi-Fi reconnect attempts run every 5 minutes instead of every 30 seconds.
+- Text boxes and computer status poll at most once per minute.
+- The media elapsed-time clock updates every 30 seconds. Seeks, drags, and track changes still redraw immediately.
 
 The M5GFX e-paper driver already disables the panel's high-voltage rail after each completed refresh. Dynamic text polling also stops while the screen saver is active.
 
@@ -67,37 +93,31 @@ single-frame image and armed scheduled deep sleep with battery reported at 100%.
 All nine host test programs passed. Restore the preferred delay after testing;
 long-duration sleep and center-button/touch wake validation remain outstanding.
 
-## Deferred Work
+## Not Implemented
 
-### Maximum Wi-Fi Modem Sleep
+Maximum modem sleep and slower Bluetooth advertising are used only in Low Power Mode, because they add latency. Dynamic CPU frequency is implemented manually (see above). Maximum modem sleep stays out of normal mode because the station sleeps through some DTIM beacons and can miss broadcast and multicast frames, such as mDNS discovery queries from the companion editors.
 
-Replace `WiFi.setSleep(true)`, which selects `WIFI_PS_MIN_MODEM`, with `WIFI_PS_MAX_MODEM` while connected. This retains Wi-Fi but buffers incoming traffic according to the access point's DTIM interval.
+### Automatic Light Sleep
 
-Validate action latency, companion text updates, reconnect behavior, and multiple router brands before enabling it by default.
+Not possible on this hardware and SDK while Bluetooth is running:
 
-### Dynamic CPU Frequency
+- The prebuilt Arduino SDK is built with `# CONFIG_PM_ENABLE is not set`, so there is no automatic light sleep or tickless idle.
+- On the ESP32, the Bluetooth controller can only allow light sleep when it has an external 32 kHz crystal as its low-power clock. The M5Paper routes GPIO 32 and 33, the crystal pins, to its Grove ports, so the controller would keep the chip awake.
 
-Run the ESP32 at a lower frequency while idle and restore full speed for display rendering, uploads, JSON processing, and network requests.
+Revisit this only with a custom ESP-IDF build and a design that turns Bluetooth off while idle.
 
-Measure idle current first. Validate BLE and Wi-Fi stability, touch handling, upload throughput, animation timing, and every transition that changes frequency.
+### Unmounting the SD Card
 
-### Adaptive Bluetooth Advertising
+The M5Paper powers the SD card from the main 3.3 V rail, and the firmware cannot switch that rail off. Unmounting would not cut power. A deselected SD card in SPI mode already sits in its low-power standby state, so the only change made is holding chip select high during deep sleep.
 
-Keep the current advertising interval immediately after boot or disconnect, then use a slower interval after several idle minutes. Existing connections would be unaffected, but later discovery could take longer.
+## Hardware validation still needed
 
-Measure the saving and set a maximum acceptable reconnection delay before changing this behavior.
+These were checked only at boot. Wi-Fi, Bluetooth, text polling over a kept-alive connection, and transmit-power trimming worked on 2026-10-04. Measure current and run long soaks for:
 
-### ESP-IDF Power Management
-
-Use an SDK configuration with dynamic frequency scaling and tickless idle so the ESP32 can automatically enter light sleep between events while retaining radio connections.
-
-The prebuilt Arduino SDK currently lacks the required power-management and tickless-idle configuration. Treat this as a toolchain migration: validate Bluetooth, Wi-Fi, timers, touch interrupts, SD access, and e-paper updates on hardware.
-
-### SD Card Idle Power
-
-Measure current with the SD card mounted and unmounted. If the card's idle draw is significant, add on-demand mount and unmount behavior around playback, browsing, and uploads.
-
-Do not implement this without measurements because remount failures would affect core features and many SD cards already enter a low-power idle state.
+- IT8951 standby: confirm that every redraw after standby is correct. Check partial button feedback, text boxes, the media clock, the battery indicator, and the page after a profile push.
+- Background climate and schedule wakes, including a touch during the wake.
+- Recovery wakes over several hours.
+- Fast reconnect after the router reboots or changes channel.
 
 ## Measurement Checklist
 
