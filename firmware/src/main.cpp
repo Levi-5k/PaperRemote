@@ -29,6 +29,7 @@
 #include "monochrome_damage.h"
 #include "psram_json_allocator.h"
 #include "remote_computer.h"
+#include "remote_icon_raster.h"
 #include "remote_network_queue.h"
 #include "remote_schedule.h"
 #include "remote_text_layout.h"
@@ -4490,223 +4491,26 @@ void drawRemoteControlIcon(
         }
         return;
     }
-    if (symbol[0] == '\0') {
+    const remote_icons::Glyph* glyph = remote_icons::findGlyph(symbol);
+    if (glyph == nullptr) {
         return;
     }
-    const int32_t half = size / 2;
-    const int32_t quarter = max(2, size / 4);
-    if (strcmp(symbol, "circle.fill") == 0) {
-        M5.Display.fillCircle(centerX, centerY, half, foreground);
-    } else if (strcmp(symbol, "play.fill") == 0) {
-        M5.Display.fillTriangle(centerX - half, centerY - half, centerX - half,
-            centerY + half, centerX + half, centerY, foreground);
-    } else if (strcmp(symbol, "pause.fill") == 0) {
-        M5.Display.fillRect(centerX - half, centerY - half, quarter, size, foreground);
-        M5.Display.fillRect(centerX + half - quarter, centerY - half, quarter, size, foreground);
-    } else if (strcmp(symbol, "playpause.fill") == 0) {
-        const int32_t barWidth = max(2, size / 8);
-        const int32_t firstBarX = centerX + max(2, size / 10);
-        const int32_t secondBarX = centerX + half - barWidth;
-        M5.Display.fillTriangle(centerX - half, centerY - half, centerX - half,
-            centerY + half, centerX - 2, centerY, foreground);
-        M5.Display.fillRect(firstBarX, centerY - half, barWidth, size, foreground);
-        M5.Display.fillRect(secondBarX, centerY - half, barWidth, size, foreground);
-    } else if (strcmp(symbol, "stop.fill") == 0) {
-        M5.Display.fillRect(centerX - half, centerY - half, size, size, foreground);
-    } else if (strcmp(symbol, "backward.fill") == 0 || strcmp(symbol, "forward.fill") == 0) {
-        const bool forward = symbol[0] == 'f';
-        if (forward) {
-            M5.Display.fillTriangle(centerX - half, centerY - half,
-                centerX - half, centerY + half, centerX, centerY, foreground);
-            M5.Display.fillTriangle(centerX, centerY - half,
-                centerX, centerY + half, centerX + half, centerY, foreground);
-        } else {
-            M5.Display.fillTriangle(centerX - half, centerY,
-                centerX, centerY - half, centerX, centerY + half, foreground);
-            M5.Display.fillTriangle(centerX, centerY,
-                centerX + half, centerY - half, centerX + half, centerY + half, foreground);
-        }
-    } else if (strncmp(symbol, "speaker", 7) == 0) {
-        M5.Display.fillRect(centerX - half, centerY - quarter, quarter, quarter * 2, foreground);
-        M5.Display.fillTriangle(centerX - quarter, centerY - quarter,
-            centerX + quarter, centerY - half,
-            centerX + quarter, centerY + half, foreground);
-        if (strcmp(symbol, "speaker.wave.2.fill") == 0) {
-            M5.Display.drawArc(centerX + quarter, centerY, half, half - 2, -50, 50, foreground);
-        } else if (strcmp(symbol, "speaker.slash.fill") == 0) {
-            M5.Display.drawLine(centerX - half, centerY - half, centerX + half, centerY + half, foreground);
-            M5.Display.drawLine(centerX - half + 1, centerY - half, centerX + half + 1, centerY + half, foreground);
-        }
-    } else if (strcmp(symbol, "power") == 0) {
-        M5.Display.drawCircle(centerX, centerY + 2, half - 2, foreground);
-        M5.Display.drawCircle(centerX, centerY + 2, half - 3, foreground);
-        M5.Display.fillRect(centerX - 2, centerY - half, 5, half + 2, background);
-        M5.Display.fillRect(centerX - 1, centerY - half, 3, half + 2, foreground);
-    } else if (strcmp(symbol, "lightbulb.fill") == 0) {
-        M5.Display.fillCircle(centerX, centerY - 3, half - 3, foreground);
-        M5.Display.fillRect(centerX - quarter, centerY + quarter, quarter * 2, quarter, foreground);
-        M5.Display.drawFastHLine(centerX - quarter, centerY + half, quarter * 2, foreground);
-    } else if (strcmp(symbol, "sun.max.fill") == 0) {
-        M5.Display.fillCircle(centerX, centerY, quarter, foreground);
-        for (uint8_t index = 0; index < 8; ++index) {
-            const float angle = index * PI / 4;
-            M5.Display.drawLine(centerX + cos(angle) * (quarter + 3), centerY + sin(angle) * (quarter + 3),
-                centerX + cos(angle) * half, centerY + sin(angle) * half, foreground);
-        }
-    } else if (strcmp(symbol, "snowflake") == 0) {
-        for (uint8_t index = 0; index < 3; ++index) {
-            const float angle = index * PI / 3;
-            const int32_t xOffset = cos(angle) * half;
-            const int32_t yOffset = sin(angle) * half;
-            M5.Display.drawLine(centerX - xOffset, centerY - yOffset,
-                centerX + xOffset, centerY + yOffset, foreground);
-        }
-        M5.Display.fillCircle(centerX, centerY, max(1, size / 12), foreground);
-    } else if (strcmp(symbol, "drop.fill") == 0 || strcmp(symbol, "humidity.fill") == 0) {
-        M5.Display.fillCircle(centerX, centerY + quarter, quarter + 2, foreground);
-        M5.Display.fillTriangle(centerX, centerY - half,
-            centerX - quarter - 2, centerY + quarter,
-            centerX + quarter + 2, centerY + quarter, foreground);
-        if (strcmp(symbol, "humidity.fill") == 0) {
-            M5.Display.fillCircle(centerX + half - 2, centerY - quarter, max(2, size / 10), foreground);
-        }
-    } else if (strcmp(symbol, "thermometer.medium") == 0) {
-        const int32_t stemWidth = max(3, size / 6);
-        M5.Display.drawRoundRect(centerX - stemWidth / 2, centerY - half,
-            stemWidth, size - quarter, stemWidth / 2, foreground);
-        M5.Display.fillRect(centerX - 1, centerY - quarter, 3, half, foreground);
-        M5.Display.fillCircle(centerX, centerY + half - quarter, quarter, foreground);
-    } else if (strcmp(symbol, "fan.fill") == 0) {
-        M5.Display.fillCircle(centerX, centerY, max(2, size / 10), foreground);
-        for (uint8_t index = 0; index < 3; ++index) {
-            const float angle = index * 2 * PI / 3;
-            const int32_t bladeX = centerX + cos(angle) * quarter;
-            const int32_t bladeY = centerY + sin(angle) * quarter;
-            const int32_t tipX = centerX + cos(angle + 0.65f) * half;
-            const int32_t tipY = centerY + sin(angle + 0.65f) * half;
-            M5.Display.fillTriangle(centerX, centerY, bladeX, bladeY, tipX, tipY, foreground);
-        }
-    } else if (strcmp(symbol, "wind") == 0) {
-        M5.Display.drawFastHLine(centerX - half, centerY - quarter, size - quarter, foreground);
-        M5.Display.drawArc(centerX + quarter, centerY - quarter, quarter, quarter - 2, 270, 90, foreground);
-        M5.Display.drawFastHLine(centerX - half, centerY + quarter, size, foreground);
-        M5.Display.drawArc(centerX, centerY + quarter, quarter, quarter - 2, 270, 90, foreground);
-    } else if (strcmp(symbol, "moon.fill") == 0) {
-        M5.Display.fillCircle(centerX, centerY, half, foreground);
-        M5.Display.fillCircle(centerX + quarter, centerY - quarter, half - 2, background);
-    } else if (strcmp(symbol, "sparkles") == 0) {
-        M5.Display.drawFastHLine(centerX - half, centerY, size, foreground);
-        M5.Display.drawFastVLine(centerX, centerY - half, size, foreground);
-        M5.Display.drawFastHLine(centerX + quarter, centerY - quarter, half, foreground);
-        M5.Display.drawFastVLine(centerX + half, centerY - half, half, foreground);
-    } else if (strcmp(symbol, "house.fill") == 0) {
-        M5.Display.fillTriangle(centerX - half, centerY, centerX, centerY - half,
-            centerX + half, centerY, foreground);
-        M5.Display.fillRect(centerX - half + 3, centerY, size - 6, half, foreground);
-    } else if (strcmp(symbol, "gearshape.fill") == 0) {
-        M5.Display.fillCircle(centerX, centerY, half, foreground);
-        M5.Display.fillCircle(centerX, centerY, quarter, background);
-        for (uint8_t index = 0; index < 8; ++index) {
-            const float angle = index * PI / 4;
-            M5.Display.drawLine(
-                centerX + cos(angle) * (half - 1), centerY + sin(angle) * (half - 1),
-                centerX + cos(angle) * (half + 3), centerY + sin(angle) * (half + 3),
-                foreground);
-        }
-    } else if (strncmp(symbol, "arrow.", 6) == 0) {
-        const bool diagonal = strcmp(symbol, "arrow.up.left") == 0 ||
-            strcmp(symbol, "arrow.up.right") == 0 ||
-            strcmp(symbol, "arrow.down.left") == 0 ||
-            strcmp(symbol, "arrow.down.right") == 0;
-        if (diagonal) {
-            const int32_t directionX = strstr(symbol, ".left") != nullptr ? -1 : 1;
-            const int32_t directionY = strstr(symbol, ".up.") != nullptr ? -1 : 1;
-            const int32_t tipX = centerX + directionX * half;
-            const int32_t tipY = centerY + directionY * half;
-            const int32_t baseX = tipX - directionX * quarter;
-            const int32_t baseY = tipY - directionY * quarter;
-            M5.Display.drawLine(
-                centerX - directionX * half,
-                centerY - directionY * half,
-                tipX,
-                tipY,
-                foreground);
-            M5.Display.drawLine(tipX, tipY, baseX - directionY * quarter, baseY + directionX * quarter, foreground);
-            M5.Display.drawLine(tipX, tipY, baseX + directionY * quarter, baseY - directionX * quarter, foreground);
-        } else if (strcmp(symbol, "arrow.up") == 0 || strcmp(symbol, "arrow.down") == 0) {
-            const int32_t direction = strcmp(symbol, "arrow.up") == 0 ? -1 : 1;
-            const int32_t tipY = centerY + direction * half;
-            M5.Display.drawFastVLine(centerX, centerY - half, size + 1, foreground);
-            M5.Display.drawLine(centerX, tipY, centerX - quarter, tipY - direction * quarter, foreground);
-            M5.Display.drawLine(centerX, tipY, centerX + quarter, tipY - direction * quarter, foreground);
-        } else {
-            const int32_t direction = strcmp(symbol, "arrow.left") == 0 ? -1 : 1;
-            const int32_t tipX = centerX + direction * half;
-            M5.Display.drawFastHLine(centerX - half, centerY, size + 1, foreground);
-            M5.Display.drawLine(tipX, centerY, tipX - direction * quarter, centerY - quarter, foreground);
-            M5.Display.drawLine(tipX, centerY, tipX - direction * quarter, centerY + quarter, foreground);
-        }
-    } else if (strcmp(symbol, "plus") == 0 || strcmp(symbol, "minus") == 0 ||
-               strcmp(symbol, "xmark") == 0 || strcmp(symbol, "checkmark") == 0) {
-        if (strcmp(symbol, "plus") == 0) {
-            M5.Display.drawFastHLine(centerX - half, centerY, size, foreground);
-            M5.Display.drawFastVLine(centerX, centerY - half, size, foreground);
-        } else if (strcmp(symbol, "minus") == 0) {
-            M5.Display.drawFastHLine(centerX - half, centerY, size, foreground);
-        } else if (strcmp(symbol, "checkmark") == 0) {
-            M5.Display.drawLine(centerX - half, centerY, centerX - quarter, centerY + half, foreground);
-            M5.Display.drawLine(centerX - quarter, centerY + half, centerX + half, centerY - half, foreground);
-        } else {
-            M5.Display.drawLine(centerX - half, centerY - half, centerX + half, centerY + half, foreground);
-            M5.Display.drawLine(centerX - half, centerY + half, centerX + half, centerY - half, foreground);
-        }
-    } else if (strcmp(symbol, "heart.fill") == 0) {
-        M5.Display.fillCircle(centerX - quarter, centerY - quarter, quarter + 1, foreground);
-        M5.Display.fillCircle(centerX + quarter, centerY - quarter, quarter + 1, foreground);
-        M5.Display.fillTriangle(centerX - half, centerY - quarter, centerX + half,
-            centerY - quarter, centerX, centerY + half, foreground);
-    } else if (strcmp(symbol, "star.fill") == 0) {
-        for (uint8_t index = 0; index < 10; ++index) {
-            const float firstAngle = -PI / 2 + index * PI / 5;
-            const float secondAngle = -PI / 2 + (index + 1) * PI / 5;
-            const int32_t firstRadius = index % 2 == 0 ? half : quarter;
-            const int32_t secondRadius = index % 2 == 0 ? quarter : half;
-            M5.Display.fillTriangle(centerX, centerY,
-                centerX + cos(firstAngle) * firstRadius,
-                centerY + sin(firstAngle) * firstRadius,
-                centerX + cos(secondAngle) * secondRadius,
-                centerY + sin(secondAngle) * secondRadius,
-                foreground);
-        }
-    } else if (strcmp(symbol, "bolt.fill") == 0) {
-        M5.Display.fillTriangle(centerX + quarter, centerY - half,
-            centerX - half, centerY + 1, centerX + 1, centerY, foreground);
-        M5.Display.fillTriangle(centerX - 1, centerY,
-            centerX + half, centerY - 1, centerX - quarter, centerY + half, foreground);
-    } else if (strcmp(symbol, "lock.fill") == 0) {
-        M5.Display.drawRoundRect(centerX - quarter, centerY - half, quarter * 2,
-            half + 4, quarter, foreground);
-        M5.Display.fillRect(centerX - half, centerY - 2, size, half + 4, foreground);
-    } else if (strcmp(symbol, "wifi") == 0) {
-        M5.Display.drawArc(centerX, centerY + half, half, half - 2, 220, 320, foreground);
-        M5.Display.drawArc(centerX, centerY + half, quarter + 2, quarter, 220, 320, foreground);
-        M5.Display.fillCircle(centerX, centerY + half - 1, 2, foreground);
-    } else if (strcmp(symbol, "slider.horizontal.3") == 0) {
-        for (int32_t offset = -quarter; offset <= quarter; offset += quarter) {
-            M5.Display.drawFastHLine(centerX - half, centerY + offset, size, foreground);
-        }
-        M5.Display.fillCircle(centerX - quarter, centerY - quarter, 2, foreground);
-        M5.Display.fillCircle(centerX + quarter, centerY, 2, foreground);
-        M5.Display.fillCircle(centerX, centerY + quarter, 2, foreground);
-    } else if (strcmp(symbol, "music.note") == 0) {
-        M5.Display.drawFastVLine(centerX + quarter, centerY - half, size - quarter, foreground);
-        M5.Display.drawFastHLine(centerX - quarter, centerY - half, half, foreground);
-        M5.Display.fillCircle(centerX, centerY + half - 2, quarter, foreground);
-    } else if (strcmp(symbol, "display") == 0) {
-        M5.Display.drawRect(centerX - half, centerY - half, size, size - quarter, foreground);
-        M5.Display.drawFastVLine(centerX, centerY + quarter, quarter, foreground);
-        M5.Display.drawFastHLine(centerX - quarter, centerY + half, half, foreground);
-    }
+    const auto luminance = [](uint32_t color565) {
+        const uint32_t red = ((color565 >> 11) & 0x1F) * 255 / 31;
+        const uint32_t green = ((color565 >> 5) & 0x3F) * 255 / 63;
+        const uint32_t blue = (color565 & 0x1F) * 255 / 31;
+        return static_cast<int32_t>((red * 299 + green * 587 + blue * 114) / 1000);
+    };
+    const int32_t foregroundLevel = luminance(foreground);
+    const int32_t backgroundLevel = luminance(background);
+    const int32_t left = centerX - size / 2;
+    const int32_t top = centerY - size / 2;
+    remote_icons::rasterize(*glyph, size, [&](int32_t x, int32_t y, uint8_t coverage) {
+        const int32_t level = backgroundLevel + (foregroundLevel - backgroundLevel) * coverage / 255;
+        // Snap to the panel's 16 gray levels so anti-aliased edges stay stable across refreshes.
+        const uint8_t gray = static_cast<uint8_t>((level * 15 + 127) / 255 * 17);
+        M5.Display.drawPixel(left + x, top + y, M5.Display.color565(gray, gray, gray));
+    });
 }
 
 bool layoutRemoteText(

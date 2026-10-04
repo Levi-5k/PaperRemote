@@ -467,7 +467,8 @@ private struct ControlCatalogPanel: View {
                                         store.addControl(template.control)
                                     } label: {
                                         HStack(spacing: 10) {
-                                            Image(systemName: template.symbol)
+                                            RemoteIconGlyphView(name: template.symbol)
+                                                .frame(width: 16, height: 16)
                                                 .frame(width: 24)
                                                 .foregroundStyle(Color(red: 0.08, green: 0.35, blue: 0.42))
                                             VStack(alignment: .leading, spacing: 1) {
@@ -713,7 +714,14 @@ private struct ControlInspector: View {
                         LabeledContent("Icon") {
                             Picker("", selection: symbolBinding) {
                                 ForEach(RemoteIcon.all) { icon in
-                                    Label(icon.title, systemImage: icon.id).tag(icon.id)
+                                    Label {
+                                        Text(icon.title)
+                                    } icon: {
+                                        if let image = RemoteIconGlyphs.templateImage(named: icon.id, size: 16) {
+                                            Image(nsImage: image)
+                                        }
+                                    }
+                                    .tag(icon.id)
                                 }
                             }
                             .labelsHidden()
@@ -2662,10 +2670,8 @@ private struct RemoteBitmapIcon: View {
                 .resizable()
                 .interpolation(.none)
                 .scaledToFit()
-        } else if !symbol.isEmpty {
-            Image(systemName: symbol)
-                .resizable()
-                .scaledToFit()
+        } else {
+            RemoteIconGlyphView(name: symbol)
         }
     }
 }

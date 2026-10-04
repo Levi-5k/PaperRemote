@@ -8,7 +8,7 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
     [Category("Appearance")]
     public string Title { get => control.Title; set { control.Title = value; store.Commit(); } }
 
-    [Category("Appearance")]
+    [Category("Appearance"), TypeConverter(typeof(RemoteIconNameConverter))]
     public string Symbol { get => control.Symbol; set { control.Symbol = value; store.Commit(); } }
 
     [Category("Appearance"), DisplayName("Tint (hex)")]
@@ -261,4 +261,15 @@ internal sealed class ProfileProperties(RemoteEditorStore store)
         get => store.Profile.TimeZoneOffsetMinutes;
         set { store.Profile.TimeZoneOffsetMinutes = Math.Clamp(value, -720, 840); store.Commit(); }
     }
+}
+
+// Lists the icons the M5Paper can draw while still accepting any typed name.
+internal sealed class RemoteIconNameConverter : StringConverter
+{
+    public override bool GetStandardValuesSupported(ITypeDescriptorContext? context) => true;
+
+    public override bool GetStandardValuesExclusive(ITypeDescriptorContext? context) => false;
+
+    public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context) =>
+        new(RemoteIconGlyphs.Names.Order(StringComparer.Ordinal).Prepend(string.Empty).ToArray());
 }

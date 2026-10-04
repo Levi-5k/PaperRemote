@@ -1669,7 +1669,12 @@ private struct PaperGIFRemotePageEditor: View {
                             wledDiscovery: wledDiscovery
                         )
                     } label: {
-                        Label(control.title, systemImage: control.symbol.isEmpty ? "square" : control.symbol)
+                        Label {
+                            Text(control.title)
+                        } icon: {
+                            RemoteIconGlyphView(name: control.symbol.isEmpty ? "square" : control.symbol)
+                                .frame(width: 20, height: 20)
+                        }
                     }
                 }
                 .onDelete { page.controls.remove(atOffsets: $0) }
@@ -3639,10 +3644,8 @@ private struct PaperGIFRemoteBitmapIcon: View {
                 .resizable()
                 .interpolation(.none)
                 .scaledToFit()
-        } else if !symbol.isEmpty {
-            Image(systemName: symbol)
-                .resizable()
-                .scaledToFit()
+        } else {
+            RemoteIconGlyphView(name: symbol)
         }
     }
 }
@@ -3778,8 +3781,8 @@ private struct PaperGIFRemoteIconPicker: View {
             dismiss()
         } label: {
             VStack(spacing: 8) {
-                Image(systemName: image)
-                    .font(.title2)
+                RemoteIconGlyphView(name: image)
+                    .frame(width: 26, height: 26)
                     .frame(height: 28)
                 Text(title)
                     .font(.caption)
