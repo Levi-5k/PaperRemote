@@ -105,6 +105,7 @@ internal sealed class RemoteEditorStore : IDisposable
         {
             return;
         }
+        TargetLocalOpenBuilds(page.Controls, LocalComputerId);
         Profile.Pages.Add(page);
         SelectedPageId = page.Id;
         SelectedControlId = null;
@@ -179,10 +180,33 @@ internal sealed class RemoteEditorStore : IDisposable
         {
             return false;
         }
+        TargetLocalOpenBuilds([control], LocalComputerId);
         page.Controls.Add(control);
         SelectedControlId = control.Id;
         Commit();
         return true;
+    }
+
+    private string? LocalComputerId =>
+        Profile.Computers.FirstOrDefault(computer => computer.Token == configuration.Token)?.Id.ToString();
+
+    // OpenBuilds at 127.0.0.1 means "this computer"; untargeted it would run on the profile's default computer.
+    internal static void TargetLocalOpenBuilds(IEnumerable<RemoteControl> controls, string? localComputerId)
+    {
+        if (localComputerId is null)
+        {
+            return;
+        }
+        foreach (var control in controls)
+        {
+            var host = control.Action.Host?.Trim() ?? string.Empty;
+            if (control.Action.Type == RemoteActionType.OpenBuilds &&
+                string.IsNullOrEmpty(control.Action.ComputerID) &&
+                host is "" or "127.0.0.1" or "localhost" or "::1")
+            {
+                control.Action.ComputerID = localComputerId;
+            }
+        }
     }
 
     public void DeleteSelectedControl()

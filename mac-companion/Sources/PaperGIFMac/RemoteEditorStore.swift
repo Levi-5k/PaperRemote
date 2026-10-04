@@ -189,9 +189,30 @@ final class RemoteEditorStore: ObservableObject {
 
     func addPage(_ page: RemotePage) {
         guard profile.pages.count < 8 else { return }
+        var page = page
+        let localID = localComputerID
+        page.controls = page.controls.map { Self.targetingLocalOpenBuilds($0, localComputerID: localID) }
         profile.pages.append(page)
         selectedPageID = page.id
         selectedControlID = nil
+    }
+
+    private var localComputerID: String? {
+        profile.computers.first(where: { $0.token == localComputer.token })?.id.uuidString
+    }
+
+    /// OpenBuilds at 127.0.0.1 means "this computer"; untargeted it would run on the profile's default computer.
+    nonisolated static func targetingLocalOpenBuilds(_ control: RemoteControl, localComputerID: String?) -> RemoteControl {
+        let host = control.action.host.trimmingCharacters(in: .whitespaces)
+        guard let localComputerID,
+              control.action.type == .openBuilds,
+              (control.action.computerID ?? "").isEmpty,
+              ["", "127.0.0.1", "localhost", "::1"].contains(host) else {
+            return control
+        }
+        var targeted = control
+        targeted.action.computerID = localComputerID
+        return targeted
     }
 
     @discardableResult
@@ -240,7 +261,9 @@ final class RemoteEditorStore: ObservableObject {
                             layoutUnitsUsed(on: profile.pages[pageIndex]) +
                                 layoutUnits(for: control, on: profile.pages[pageIndex]) <=
                                 profile.pages[pageIndex].gridColumns * profile.pages[pageIndex].gridRows else { return }
-        profile.pages[pageIndex].controls.append(control)
+        profile.pages[pageIndex].controls.append(
+            Self.targetingLocalOpenBuilds(control, localComputerID: localComputerID)
+        )
         selectedControlID = control.id
     }
 
