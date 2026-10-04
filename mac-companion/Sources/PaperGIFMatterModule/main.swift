@@ -216,6 +216,8 @@ private final class MatterHub {
         factory = MTRDeviceControllerFactory.sharedInstance()
         if !factory.isRunning {
             let factoryParameters = MTRDeviceControllerFactoryParams(storage: storage)
+            // Matter.framework ships no production attestation roots for third-party controllers.
+            factoryParameters.productAttestationAuthorityCertificates = Self.trustedAttestationRoots()
             try factory.start(factoryParameters)
         }
 
@@ -237,6 +239,17 @@ private final class MatterHub {
     deinit {
         controller.shutdown()
         factory.stop()
+    }
+
+    /// CSA production PAA roots bundled in the app's Resources/MatterPAA (or a --paa directory).
+    private static func trustedAttestationRoots() -> [Data] {
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let directory = argument(after: "--paa").map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? executable.deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Resources/MatterPAA", isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.pathExtension == "der" }.compactMap { try? Data(contentsOf: $0) }
     }
 
     func commission(setupCode: String, name: String = "Matter switch") throws -> MatterNode {
