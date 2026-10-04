@@ -12,7 +12,6 @@ struct ContentView: View {
     }
 
     @StateObject private var bluetoothManager = PaperGIFBluetoothManager()
-    @StateObject private var musicPlayer = PaperGIFMusicPlayer()
     @StateObject private var homeManager = PaperGIFHomeManager()
 
     @AppStorage(PaperGIFSettingKey.monochromeMode) private var monochromeMode = PaperGIFMonochromeMode.threshold
@@ -59,11 +58,6 @@ struct ContentView: View {
                     Label("Media", systemImage: "photo.stack")
                 }
 
-            PaperGIFMusicPlayerView(player: musicPlayer)
-                .tabItem {
-                    Label("Player", systemImage: "music.note.list")
-                }
-
             PaperGIFSettingsView(
                 monochromeMode: $monochromeMode,
                 threshold: $threshold,
@@ -98,10 +92,6 @@ struct ContentView: View {
             guard let selectedPhoto else { return }
             importPhoto(selectedPhoto)
         }
-        .onChange(of: bluetoothManager.localMediaCommandEvent) {
-            guard let event = bluetoothManager.localMediaCommandEvent else { return }
-            musicPlayer.handleRemoteCommand(event.command)
-        }
         .onChange(of: bluetoothManager.localHomePowerCommandEvent) {
             guard let event = bluetoothManager.localHomePowerCommandEvent else { return }
             bluetoothManager.sendHomePowerStatus(0)
@@ -121,11 +111,6 @@ struct ContentView: View {
                 }
             }
         }
-        .onChange(of: musicPlayer.currentTrack) { syncMusicPlayerState(immediately: true) }
-        .onChange(of: musicPlayer.isPlaying) { syncMusicPlayerState(immediately: true) }
-        .onChange(of: musicPlayer.volume) { syncMusicPlayerState(immediately: true) }
-        .onChange(of: musicPlayer.elapsed) { syncMusicPlayerState() }
-        .onChange(of: musicPlayer.duration) { syncMusicPlayerState(immediately: true) }
         .onChange(of: bluetoothManager.remoteProfileFromDevice) {
             guard let deviceProfile = bluetoothManager.remoteProfileFromDevice,
                   deviceProfile != remoteProfile else { return }
@@ -169,7 +154,6 @@ struct ContentView: View {
         }
         .task {
             restoreLibrary()
-            syncMusicPlayerState(immediately: true)
         }
         .task {
             await bluetoothManager.monitorWiFiConnection()
@@ -425,27 +409,6 @@ struct ContentView: View {
         Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
-        )
-    }
-
-    private func syncMusicPlayerState(immediately: Bool = false) {
-        let track = musicPlayer.currentTrack
-        let displayTitle: String
-        if let artist = track?.artist, !artist.isEmpty {
-            displayTitle = "\(track?.title ?? "") - \(artist)"
-        } else {
-            displayTitle = track?.title ?? ""
-        }
-        bluetoothManager.syncLocalMediaState(
-            .init(
-                title: displayTitle,
-                isAvailable: track != nil,
-                isPlaying: musicPlayer.isPlaying,
-                volume: Double(musicPlayer.volume),
-                elapsed: musicPlayer.elapsed,
-                duration: musicPlayer.duration
-            ),
-            immediately: immediately
         )
     }
 
