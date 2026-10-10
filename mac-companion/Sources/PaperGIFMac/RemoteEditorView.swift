@@ -57,7 +57,6 @@ private struct RemoteEditorView: View {
         VStack(spacing: 0) {
             sendBar
             Divider()
-            UpdateBanner(updates: updates)
             HSplitView {
                 pageSidebar
                     .frame(minWidth: 170, idealWidth: 190, maxWidth: 220)
@@ -68,6 +67,9 @@ private struct RemoteEditorView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 680)
+        .sheet(isPresented: $updates.isShowingUpdates) {
+            UpdatesPage(updates: updates)
+        }
         .onAppear {
             discovery.start()
             computerDiscovery.start()
@@ -156,6 +158,8 @@ private struct RemoteEditorView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(selectedDevice == nil || store.validationMessage != nil || store.sendState == .sending || store.sendState == .loading)
+            Divider().frame(height: 22)
+            UpdatesToolbarButton(updates: updates)
         }
         .padding(.horizontal, 16)
         .frame(height: 58)
@@ -390,7 +394,11 @@ private struct RemoteEditorView: View {
                     onDelete: store.deleteSelectedControl
                 )
             } else {
-                ControlCatalogPanel(store: store, moduleTemplates: moduleCatalog.installedTemplates)
+                ControlCatalogPanel(
+                    store: store,
+                    moduleTemplates: moduleCatalog.installedTemplates,
+                    matterDevices: matterDevices
+                )
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
@@ -446,7 +454,22 @@ private struct RemoteEditorView: View {
 private struct ControlCatalogPanel: View {
     @ObservedObject var store: RemoteEditorStore
     let moduleTemplates: [RemoteControlTemplate]
+    @ObservedObject var matterDevices: MatterDeviceManager
     @State private var search = ""
+
+    private func add(_ template: RemoteControlTemplate) async {
+        var control = template.control
+        if control.action.type == .module,
+           control.action.host == MatterDeviceManager.moduleID,
+           control.action.value == 0 {
+            if matterDevices.devices.isEmpty { await matterDevices.refresh() }
+            // Device 0 follows whichever device is newest, so a later device would silently take over this button.
+            if let newest = matterDevices.devices.last {
+                control.action.value = newest.number
+            }
+        }
+        store.addControl(control)
+    }
 
     var body: some View {
         let templates = RemoteControlTemplate.all + moduleTemplates
@@ -483,7 +506,7 @@ private struct ControlCatalogPanel: View {
                                     .padding(.horizontal, 12)
                                 ForEach(templates) { template in
                                     Button {
-                                        store.addControl(template.control)
+                                        Task { await add(template) }
                                     } label: {
                                         HStack(spacing: 10) {
                                             RemoteIconGlyphView(name: template.symbol)
@@ -522,7 +545,6 @@ private struct ModulesPanel: View {
     @ObservedObject var catalog: ModuleCatalog
     @State private var status = "Browse controls published in the paperGIF GitHub catalog."
     @State private var installingID: String?
-    @State private var findingOpenBuilds = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -583,20 +605,9 @@ private struct ModulesPanel: View {
         }
     }
 
-    private func addModulePage(_ definition: PaperModulePage, module: PaperModuleListing) async {
-        let page = ModuleCatalog.clonePage(definition, moduleID: module.id)
-        guard page.controls.contains(where: { $0.action.type == .openBuilds }) else {
-            store.addPage(page)
-            status = "Added \(definition.page.name)."
-            return
-        }
-        findingOpenBuilds = true
-        status = "Looking for OpenBuilds CONTROL on your paired computers..."
-        let computer = await store.openBuildsComputer()
-        findingOpenBuilds = false
-        store.addPage(page, openBuildsComputerID: computer?.id.uuidString)
-        status = computer.map { "Added \(definition.page.name) for OpenBuilds on \($0.name)." }
-            ?? "Added \(definition.page.name) for this Mac. OpenBuilds CONTROL wasn't found running on a paired computer."
+    private func addModulePage(_ definition: PaperModulePage, module: PaperModuleListing) {
+        store.addPage(ModuleCatalog.clonePage(definition, moduleID: module.id))
+        status = "Added \(definition.page.name) for this Mac."
     }
 
     private func availabilityStatus(for modules: [PaperModuleListing]) -> String {
@@ -645,12 +656,12 @@ private struct ModulesPanel: View {
 
             ForEach(pageTemplates, id: \.id) { definition in
                 Button {
-                    Task { await addModulePage(definition, module: module) }
+                    addModulePage(definition, module: module)
                 } label: {
                     Label("Add \(definition.page.name) Page", systemImage: "plus.rectangle.on.rectangle")
                 }
                 .buttonStyle(.bordered)
-                .disabled(store.profile.pages.count >= 8 || findingOpenBuilds)
+                .disabled(store.profile.pages.count >= 8)
                 .help(definition.detail)
             }
         }
@@ -825,10 +836,10 @@ private struct ControlInspector: View {
                 Picker("", selection: textBoxBinding(\.source)) {
                     Text("Static text").tag(RemoteTextSource.staticText)
                     Text("Date and time").tag(RemoteTextSource.dateTime)
-                    Text("Mac script output").tag(RemoteTextSource.macScript)
-                    Text("Shortcut output").tag(RemoteTextSource.macShortcut)
+                    Text("Script output").tag(RemoteTextSource.computerScript)
+                    Text("Apple Shortcut output (Mac only)").tag(RemoteTextSource.appleShortcut)
                     Text("Control value").tag(RemoteTextSource.controlValue)
-                    Text("Mac now playing").tag(RemoteTextSource.nowPlaying)
+                    Text("Now playing").tag(RemoteTextSource.nowPlaying)
                     Text("OpenBuilds position").tag(RemoteTextSource.openBuildsPosition)
                 }
                 .labelsHidden()
@@ -841,7 +852,7 @@ private struct ControlInspector: View {
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
             case .dateTime:
                 LabeledContent("Format") { TextField("%b %e, %H:%M", text: textBoxBinding(\.dateFormat)) }
-            case .macScript:
+            case .computerScript:
                 textSourceComputerPicker
                 TextEditor(text: textBoxBinding(\.sourceText))
                     .font(.body.monospaced())
@@ -850,7 +861,7 @@ private struct ControlInspector: View {
                 Text("The command must exactly match an approved script in Settings.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            case .macShortcut:
+            case .appleShortcut:
                 textSourceComputerPicker
                 LabeledContent("Shortcut") { TextField("Shortcut name", text: textBoxBinding(\.sourceText)) }
             case .controlValue:
@@ -936,26 +947,38 @@ private struct ControlInspector: View {
     @ViewBuilder private var textSourceComputerPicker: some View {
         LabeledContent("Computer") {
             Picker("", selection: textSourceComputerBinding) {
-                Text("Default Mac").tag("")
-                ForEach(computers) { computer in Text(computer.name).tag(computer.id.uuidString) }
+                computerChoices(selected: textSourceComputerBinding.wrappedValue)
             }
             .labelsHidden()
         }
+    }
+
+    @ViewBuilder private func computerChoices(selected: String) -> some View {
+        Text("Default computer").tag("")
+        ForEach(computers) { computer in Text(computer.name).tag(computer.id.uuidString) }
+        if !selected.isEmpty, !computers.contains(where: { $0.id.uuidString == selected }) {
+            Text("Missing computer (no longer paired)").tag(selected)
+        }
+    }
+
+    /// Windows writes lowercase IDs; show them against this editor's uppercase tags.
+    private func displayedComputerID(_ computerID: String?) -> String {
+        guard let computerID, !computerID.isEmpty else { return "" }
+        return computers.first { $0.id == UUID(uuidString: computerID) }?.id.uuidString ?? computerID
     }
 
     @ViewBuilder private var actionFields: some View {
         if isMacAction {
             LabeledContent("Computer") {
                 Picker("", selection: computerBinding) {
-                    Text("Default Mac").tag("")
-                    ForEach(computers) { computer in Text(computer.name).tag(computer.id.uuidString) }
+                    computerChoices(selected: computerBinding.wrappedValue)
                 }
                 .labelsHidden()
             }
         }
 
         switch control.action.type {
-        case .iPhoneMedia, .macMedia:
+        case .iPhoneMedia, .computerMedia:
             LabeledContent("Command") {
                 Picker("", selection: mediaCommandBinding) {
                     ForEach(mediaCommands, id: \.0) { command in Text(command.1).tag(command.0) }
@@ -1000,28 +1023,28 @@ private struct ControlInspector: View {
             Text("Runs through Apple Home on the connected iPhone.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        case .macKey:
+        case .computerKey:
             LabeledContent("Key") {
                 ComboBoxField(value: $control.action.text, suggestions: keyOptions)
             }
             Text("Modifiers").font(.caption).foregroundStyle(.secondary)
             HStack {
-                ForEach([("command", "Command"), ("option", "Option"), ("control", "Control"), ("shift", "Shift")], id: \.0) { modifier in
+                ForEach([("command", "Command / Win"), ("option", "Option / Alt"), ("control", "Control"), ("shift", "Shift")], id: \.0) { modifier in
                     Toggle(modifier.1, isOn: modifierBinding(modifier.0))
                 }
             }
             .toggleStyle(.checkbox)
-        case .macOpen:
+        case .computerOpen:
             applicationFields
-        case .macShortcut:
+        case .appleShortcut:
             LabeledContent("Name") { TextField("Shortcut name", text: $control.action.text) }
-        case .macScript:
+        case .computerScript:
             Text("Command").font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $control.action.text)
                 .font(.body.monospaced())
                 .frame(minHeight: 70)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
-            Text("The command must exactly match a line allowed in the menu bar app's Settings.")
+            Text("The command must exactly match an approved script in that computer's paperGIF Settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .openBuilds:
@@ -1280,11 +1303,22 @@ private struct ControlInspector: View {
         .task(id: applicationComputerKey) {
             await applicationCatalog.load(from: applicationComputer)
         }
-        if let message = applicationCatalog.message {
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack {
+            if applicationComputerMissing {
+                Text("This button's computer is no longer paired. Choose another computer above.")
+            } else if let message = applicationCatalog.message {
+                Text(message)
+            }
+            Spacer()
+            Button {
+                Task { await applicationCatalog.load(from: applicationComputer, force: true) }
+            } label: {
+                Label("Reload", systemImage: "arrow.clockwise")
+            }
+            .disabled(applicationCatalog.isLoading || applicationComputer == nil)
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
         LabeledContent("Path or URL") {
             HStack {
                 TextField("App path, bundle ID, or URL", text: openTargetBinding)
@@ -1296,11 +1330,12 @@ private struct ControlInspector: View {
     }
 
     private var applicationComputer: RemoteComputer? {
-        if let computerID = control.action.computerID,
-           let computer = computers.first(where: { $0.id.uuidString == computerID }) {
-            return computer
-        }
-        return computers.first
+        guard let computerID = control.action.computerID else { return computers.first }
+        return computers.first { $0.id == UUID(uuidString: computerID) }
+    }
+
+    private var applicationComputerMissing: Bool {
+        control.action.computerID != nil && applicationComputer == nil
     }
 
     private var applicationComputerKey: String? {
@@ -1308,7 +1343,7 @@ private struct ControlInspector: View {
     }
 
     private var targetsThisMac: Bool {
-        applicationComputer.map { $0.token == localComputerToken } ?? true
+        applicationComputer.map { $0.token == localComputerToken } ?? !applicationComputerMissing
     }
 
     private func application(at path: String) -> RemoteApplicationCatalog.Application? {
@@ -1400,11 +1435,7 @@ private struct ControlInspector: View {
     }
 
     private var isMacAction: Bool {
-        [.macMedia, .macKey, .macOpen, .macShortcut, .macScript,
-         .openBuilds, .module,
-         .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
-         .netHomeMode, .netHomeFan, .netHomeAuto]
-            .contains(control.action.type)
+        control.action.type.runsOnComputer
     }
 
     private var isWLEDAction: Bool {
@@ -1466,7 +1497,7 @@ private struct ControlInspector: View {
 
     @ViewBuilder private func scheduleFunctionFields(_ entry: RemoteScheduleEntry) -> some View {
         switch control.action.type {
-        case .iPhoneMedia, .macMedia:
+        case .iPhoneMedia, .computerMedia:
             LabeledContent("Command") {
                 Picker("", selection: scheduleTextBinding(entry.id)) {
                     ForEach(mediaCommands, id: \.0) { command in Text(command.1).tag(command.0) }
@@ -1542,11 +1573,11 @@ private struct ControlInspector: View {
     }
 
     private var scheduleUsesText: Bool {
-        [.macMedia, .wledPower, .netHomePower, .netHomeMode, .netHomeAuto].contains(control.action.type)
+        [.computerMedia, .wledPower, .netHomePower, .netHomeMode, .netHomeAuto].contains(control.action.type)
     }
 
     private var scheduleUsesValue: Bool {
-        [.macMedia, .wledPreset, .wledBrightness, .netHomeTemperature,
+        [.computerMedia, .wledPreset, .wledBrightness, .netHomeTemperature,
          .netHomeTemperatureStep, .netHomeFan].contains(control.action.type)
     }
 
@@ -1690,7 +1721,7 @@ private struct ControlInspector: View {
 
     private var computerBinding: Binding<String> {
         Binding(
-            get: { control.action.computerID ?? "" },
+            get: { displayedComputerID(control.action.computerID) },
             set: { control.action.computerID = $0.isEmpty ? nil : $0 }
         )
     }
@@ -1752,7 +1783,7 @@ private struct ControlInspector: View {
 
     private var supportsAutomaticRefresh: Bool {
         switch control.textBox?.source ?? .staticText {
-        case .dateTime, .macScript, .macShortcut, .nowPlaying, .openBuildsPosition: true
+        case .dateTime, .computerScript, .appleShortcut, .nowPlaying, .openBuildsPosition: true
         case .staticText, .controlValue: false
         }
     }
@@ -2050,11 +2081,11 @@ private struct ControlInspector: View {
                 let host = control.action.host
                 let computerID = control.action.computerID
                 switch type {
-                case .iPhoneMedia, .macMedia:
+                case .iPhoneMedia, .computerMedia:
                     control.action = RemoteAction(
                         type: type,
                         text: "playPause",
-                        computerID: type == .macMedia ? computerID : nil
+                        computerID: type == .computerMedia ? computerID : nil
                     )
                     control.title = "Play / Pause"
                     control.symbol = "playpause.fill"
@@ -2062,11 +2093,12 @@ private struct ControlInspector: View {
                 case .iPhoneHomePower:
                     control.action = RemoteAction(type: type, host: host, text: "toggle")
                     control.isToggle = true
-                case .macKey:
+                case .computerKey:
                     control.action = RemoteAction(type: type, text: "space", computerID: computerID)
-                case .macOpen:
-                    control.action = RemoteAction(type: type, text: "https://", computerID: computerID)
-                case .macShortcut, .macScript:
+                case .computerOpen:
+                    control.action = RemoteAction(type: type, computerID: computerID)
+                    control.title = "Open App or URL"
+                case .appleShortcut, .computerScript:
                     control.action = RemoteAction(type: type, computerID: computerID)
                 case .openBuilds:
                     control.action = RemoteAction(
@@ -2464,7 +2496,7 @@ enum RemotePreviewLabelFitting {
         let labelSize: CGSize
         let maximumFontSize: CGFloat
 
-        /// Frames are in button coordinates; the title stays button-centered horizontally.
+        /// Horizontal titles are centered in the space remaining after the icon and halo.
         func frames(in size: CGSize, measuredLabelHeight: CGFloat) -> (icon: CGRect, label: CGRect) {
             let textHeight = min(labelSize.height, max(0, measuredLabelHeight))
             let extent = iconSize > 0 ? iconSize + 2 * iconHalo : 0
@@ -2473,7 +2505,7 @@ enum RemotePreviewLabelFitting {
                 let iconX = textHeight > 0 ? padding + iconHalo : (size.width - iconSize) / 2
                 return (
                     CGRect(x: iconX, y: (size.height - iconSize) / 2, width: iconSize, height: iconSize),
-                    CGRect(x: (size.width - labelSize.width) / 2, y: (size.height - textHeight) / 2,
+                    CGRect(x: padding + extent + spacing, y: (size.height - textHeight) / 2,
                            width: labelSize.width, height: textHeight)
                 )
             }
@@ -2505,35 +2537,54 @@ enum RemotePreviewLabelFitting {
         return Layout(
             horizontal: horizontal, padding: padding, spacing: spacing, iconSize: iconSize,
             iconHalo: halo,
-            labelSize: CGSize(width: horizontal ? max(0, innerWidth - 2 * (iconExtent + spacing)) : innerWidth,
+            labelSize: CGSize(width: horizontal ? max(0, innerWidth - iconExtent - spacing) : innerWidth,
                               height: horizontal ? innerHeight : max(0, innerHeight - iconExtent - spacing)),
             maximumFontSize: CGFloat(min(24, max(9, maxButtonTextSize))) * scale
         )
     }
 
+    static func normalizedTitle(_ title: String) -> String {
+        title.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: .newlines).joined(separator: "\n")
+    }
+
+    static func widestWordWidth(_ title: String, fontSize: CGFloat) -> CGFloat {
+        guard fontSize > 0, fontSize.isFinite else { return 0 }
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        return title.split(whereSeparator: { $0.isWhitespace }).map {
+            ceil((String($0) as NSString).size(withAttributes: [.font: font]).width)
+        }.max() ?? 0
+    }
+
     static func measuredSize(_ title: String, fontSize: CGFloat, width: CGFloat) -> CGSize {
-        guard !title.isEmpty, fontSize > 0, fontSize.isFinite, width > 0, width.isFinite else { return .zero }
+        guard !title.isEmpty, fontSize > 0, fontSize.isFinite else { return .zero }
+        // NSHostingView rounds fractional frame widths up; constrain text to safe whole points.
+        let width = floor(width)
+        guard width > 0, width.isFinite else { return CGSize(width: CGFloat.infinity, height: CGFloat.infinity) }
+        // Reject character fallback BEFORE asking the native engine to wrap.
+        let wordWidth = widestWordWidth(title, fontSize: fontSize)
+        guard wordWidth <= width else { return CGSize(width: wordWidth, height: .infinity) }
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
-        // SwiftUI rounds the baseline and reserves the descent separately. AppKit's
-        // default line height can be a point shorter per line at fractional sizes.
+        // SwiftUI rounds the baseline and reserves the descent separately on every line.
         paragraph.minimumLineHeight = round(font.ascender) + ceil(-font.descender) + ceil(font.leading)
-        // Native word wrapping falls back to character wrapping for an overlong word.
-        // Do not insert breaks or use byCharWrapping: SwiftUI wraps the original string.
         paragraph.lineBreakMode = .byWordWrapping
-        return (title as NSString).boundingRect(
+        let measured = (normalizedTitle(title) as NSString).boundingRect(
             with: CGSize(width: width, height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font,
                          .paragraphStyle: paragraph]
         ).size
+        // Reserve SwiftUI's rounded intrinsic dimensions for the complete multiline label.
+        return CGSize(width: ceil(measured.width), height: ceil(measured.height))
     }
 
     static func fontSize(for title: String, in bounds: CGSize, maximum: CGFloat) -> CGFloat {
         guard bounds.width > 0, bounds.height > 0, bounds.width.isFinite, bounds.height.isFinite,
               maximum > 0, maximum.isFinite else { return 0 }
         func fits(_ size: CGFloat) -> Bool {
+            guard widestWordWidth(title, fontSize: size) <= bounds.width else { return false }
             let measured = measuredSize(title, fontSize: size, width: bounds.width)
             return measured.width <= bounds.width && measured.height <= bounds.height
         }
@@ -2563,22 +2614,45 @@ struct RemotePreviewLabelFittingTests {
                      CGSize(width: 56, height: 22)] {
             let layout = RemotePreviewLabelFitting.layout(size: size, scale: 0.5, compact: true)
             #expect(layout.horizontal)
-            #expect(layout.iconSize + layout.spacing + layout.labelSize.width + 2 * layout.padding <= size.width + 0.0001)
-            #expect(layout.iconSize + 2 * layout.padding <= size.height)
+            #expect(abs(layout.iconSize + 2 * layout.iconHalo + layout.spacing + layout.labelSize.width + 2 * layout.padding - size.width) < 0.0001)
+            #expect(layout.iconSize + 2 * layout.iconHalo + 2 * layout.padding <= size.height)
             checkFit(title, layout: layout)
         }
     }
 
     @Test
-    func longWordUsesNativeCharacterFallbackWithoutChangingText() {
+    func multiwordLabelsWrapButLongWordsShrinkWithoutSplitting() {
         let size = RemotePreviewLabelFitting.measuredSize(
             "Supercalifragilisticexpialidocious", fontSize: 10, width: 24
         )
-        #expect(size.width <= 24)
-        #expect(size.height > NSFont.systemFont(ofSize: 10, weight: .semibold).ascender * 3)
+        #expect(size.width > 24)
+        #expect(size.height.isInfinite)
+        let bounds = CGSize(width: 80, height: 200)
+        let title = "Up Left Down Right"
+        #expect(RemotePreviewLabelFitting.fontSize(for: title, in: bounds, maximum: 24) == 24)
+        #expect(RemotePreviewLabelFitting.measuredSize(title, fontSize: 24, width: 80).height >
+                RemotePreviewLabelFitting.measuredSize("Go", fontSize: 24, width: 80).height)
+        for word in ["Supercalifragilisticexpialidocious", "第一行很长的按钮标题第二行", "word-with/slashes"] {
+            let fitted = RemotePreviewLabelFitting.fontSize(for: word, in: bounds, maximum: 24)
+            #expect(fitted > 0 && fitted < 24)
+            #expect(RemotePreviewLabelFitting.widestWordWidth(word, fontSize: fitted) <= bounds.width)
+            #expect(RemotePreviewLabelFitting.measuredSize(word, fontSize: fitted, width: bounds.width).height ==
+                    RemotePreviewLabelFitting.measuredSize("Go", fontSize: fitted, width: bounds.width).height)
+        }
+        #expect(RemotePreviewLabelFitting.normalizedTitle("one\r\ntwo\rthree\u{2028}four") == "one\ntwo\nthree\nfour")
+        #expect(RemotePreviewLabelFitting.measuredSize("Go\n\nGo", fontSize: 24, width: 80).height >
+                RemotePreviewLabelFitting.measuredSize("Go\nGo", fontSize: 24, width: 80).height)
         let layout = RemotePreviewLabelFitting.layout(size: CGSize(width: 45, height: 110), scale: 1, compact: false)
         #expect(!layout.horizontal)
-        checkFit("A very long button title with more than two wrapped lines", layout: layout)
+        checkFit("A very long button title that may use multiple lines", layout: layout)
+    }
+
+    @Test
+    func shortLabelsRetainMaximumWithAmpleWidth() {
+        for title in ["Go", "Up Left", "Play"] {
+            let layout = RemotePreviewLabelFitting.layout(size: CGSize(width: 300, height: 80), scale: 1, compact: true)
+            #expect(checkFit(title, layout: layout) == layout.maximumFontSize)
+        }
     }
 
     @Test
@@ -2596,7 +2670,7 @@ struct RemotePreviewLabelFittingTests {
         #expect(previous > 10)
         let tall = RemotePreviewLabelFitting.layout(size: CGSize(width: 30, height: 100), scale: 1, compact: true)
         #expect(!tall.horizontal)
-        #expect(tall.iconSize + tall.spacing + tall.labelSize.height + 2 * tall.padding <= 100)
+        #expect(tall.iconSize + 2 * tall.iconHalo + tall.spacing + tall.labelSize.height + 2 * tall.padding <= 100)
         checkFit(title, layout: tall)
     }
 
@@ -2613,15 +2687,16 @@ struct RemotePreviewLabelFittingTests {
 
     @MainActor @Test(arguments: ["Jog X Negative Y Positive", "Supercalifragilisticexpialidocious",
                                  "Line one\nLine two\nLine three\nLine four"])
-    func swiftUIWrappingMatchesFittedNativeHeight(title: String) {
+    func swiftUIMultilineFitsNativeBounds(title: String) {
         for size in [CGSize(width: 38, height: 12), CGSize(width: 56, height: 22), CGSize(width: 45, height: 110)] {
             let layout = RemotePreviewLabelFitting.layout(size: size, scale: 0.5, compact: true)
             let fitted = checkFit(title, layout: layout)
-            let view = NSHostingView(rootView: Text(verbatim: title)
+            let view = NSHostingView(rootView: Text(verbatim: RemotePreviewLabelFitting.normalizedTitle(title))
                 .font(Font(NSFont.systemFont(ofSize: fitted, weight: .semibold)))
                 .lineLimit(nil).allowsTightening(false).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(width: layout.labelSize.width))
+                .frame(width: floor(layout.labelSize.width)))
+            #expect(view.fittingSize.width <= layout.labelSize.width + 0.0001)
             #expect(view.fittingSize.height <= layout.labelSize.height + 0.0001)
         }
     }
@@ -2631,6 +2706,7 @@ struct RemotePreviewLabelFittingTests {
         let fitted = RemotePreviewLabelFitting.fontSize(for: title, in: layout.labelSize, maximum: layout.maximumFontSize)
         #expect(fitted > 0)
         #expect(fitted <= layout.maximumFontSize)
+        #expect(RemotePreviewLabelFitting.widestWordWidth(title, fontSize: fitted) <= layout.labelSize.width)
         let measured = RemotePreviewLabelFitting.measuredSize(title, fontSize: fitted, width: layout.labelSize.width)
         #expect(measured.width <= layout.labelSize.width)
         #expect(measured.height <= layout.labelSize.height)
@@ -2686,12 +2762,13 @@ private struct RemotePreviewLabel: View {
     private func label(size: CGSize, fontSize: CGFloat) -> some View {
         Group {
             if fontSize > 0 && !control.title.isEmpty {
-                Text(verbatim: control.title)
+                Text(verbatim: RemotePreviewLabelFitting.normalizedTitle(control.title))
                     .font(Font(NSFont.systemFont(ofSize: fontSize, weight: .semibold)))
                     .lineLimit(nil)
                     .allowsTightening(false)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: floor(size.width))
             }
         }
         .frame(width: size.width, height: control.title.isEmpty ? 0 : size.height)
@@ -2749,7 +2826,7 @@ private struct PreviewControl: View {
                 }
                 RoundedRectangle(cornerRadius: 9 * scale).stroke(.black, lineWidth: max(1, scale))
             } else if control.kind == .slider {
-                if control.action.type == .macMedia && control.action.text == "seek" {
+                if control.action.type == .computerMedia && control.action.text == "seek" {
                     Text(textBoxPreview)
                         .font(.system(size: textBoxSize * scale, weight: .semibold))
                         .multilineTextAlignment(textBoxTextAlignment)
@@ -2800,7 +2877,7 @@ private struct PreviewControl: View {
         return switch textBox.source {
         case .staticText: textBox.sourceText
         case .dateTime: "Sep 2, 18:54"
-        case .macScript, .macShortcut: "Command output"
+        case .computerScript, .appleShortcut: "Command output"
         case .controlValue:
             if control.action.type == .netHomeTemperature {
                 "\(temperatureUnit.displayValue(celsiusTenths: control.action.valueTenths ?? control.action.value * 10)) \(temperatureUnit.symbol)"
@@ -2852,7 +2929,7 @@ private final class RemoteApplicationCatalog: ObservableObject {
 
     private var loadedKey: String?
 
-    func load(from computer: RemoteComputer?) async {
+    func load(from computer: RemoteComputer?, force: Bool = false) async {
         guard let computer else {
             applications = []
             message = "Pair a computer to list its applications."
@@ -2860,12 +2937,11 @@ private final class RemoteApplicationCatalog: ObservableObject {
             return
         }
         let key = "\(computer.id.uuidString)|\(computer.host)|\(computer.port)|\(computer.token)"
-        guard loadedKey != key else { return }
+        guard force || loadedKey != key else { return }
         loadedKey = key
         applications = []
         message = nil
         isLoading = true
-        defer { isLoading = false }
 
         var components = URLComponents()
         components.scheme = "http"
@@ -2873,7 +2949,7 @@ private final class RemoteApplicationCatalog: ObservableObject {
         components.port = computer.port
         components.path = "/applications"
         guard let url = components.url else {
-            message = "This computer address isn't valid."
+            fail(key, "This computer address isn't valid.")
             return
         }
         var request = URLRequest(url: url)
@@ -2881,19 +2957,30 @@ private final class RemoteApplicationCatalog: ObservableObject {
         request.setValue("Bearer \(computer.token)", forHTTPHeaderField: "Authorization")
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
+            guard loadedKey == key else { return }
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                message = "Couldn't load applications from \(computer.name)."
+                fail(key, "Couldn't load applications from \(computer.name).")
                 return
             }
-            applications = try JSONDecoder().decode([Application].self, from: data)
-            if applications.isEmpty {
-                message = "No applications were found on \(computer.name)."
-            }
+            let decoded = try JSONDecoder().decode([Application].self, from: data)
+            applications = decoded
+            isLoading = false
+            message = decoded.isEmpty ? "No applications were found on \(computer.name)." : nil
+        } catch is DecodingError {
+            fail(key, "\(computer.name) sent an application list this version can't read.")
         } catch {
-            // Allow a retry the next time the field appears.
-            loadedKey = nil
-            message = "Couldn't reach \(computer.name). Make sure its paperGIF companion is running."
+            fail(key, Task.isCancelled
+                ? nil
+                : "Couldn't reach \(computer.name). Make sure its paperGIF companion is running.")
         }
+    }
+
+    // Failures are not cached so the next appearance or Reload tries again.
+    private func fail(_ key: String, _ failureMessage: String?) {
+        guard loadedKey == key else { return }
+        loadedKey = nil
+        isLoading = false
+        message = failureMessage
     }
 }
 

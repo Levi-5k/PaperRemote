@@ -59,15 +59,16 @@ cp "$root/firmware/.pio/build/m5paper-v1/firmware.bin" "$output/$firmware_asset"
 
 echo "==> Building Windows companion"
 windows_staging="$output/windows"
-# LangVersion 12 matches the .NET 8 toolchain the Windows host builds with.
-dotnet publish "$root/windows-companion/src/PaperGIF.Windows.Host/PaperGIF.Windows.Host.csproj" \
+# The .NET 11 SDK may be a user-level install in ~/.dotnet alongside an older system SDK.
+dotnet_cli="$HOME/.dotnet/dotnet"
+[[ -x "$dotnet_cli" ]] || dotnet_cli=dotnet
+"$dotnet_cli" publish "$root/windows-companion/src/PaperGIF.Windows.Host/PaperGIF.Windows.Host.csproj" \
     --configuration Release \
-    --framework net8.0-windows10.0.22621.0 \
+    --framework net11.0-windows10.0.22621.0 \
     --runtime win-x64 \
-    --self-contained false \
+    --self-contained true \
     --output "$windows_staging" \
-    -p:EnableWindowsTargeting=true \
-    -p:LangVersion=12
+    -p:EnableWindowsTargeting=true
 (cd "$windows_staging" && COPYFILE_DISABLE=1 zip -qr "$output/$windows_asset" .)
 rm -rf "$windows_staging"
 

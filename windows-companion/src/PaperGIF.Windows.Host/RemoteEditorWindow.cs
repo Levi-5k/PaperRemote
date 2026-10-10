@@ -77,6 +77,10 @@ internal sealed class RemoteEditorWindow : Form
     private readonly Button scanDevicesButton = new();
     private readonly Label syncStatus = new();
     private readonly Button sendButton = new();
+    private readonly Button updatesButton = new();
+    private readonly UpdateCoordinator updates;
+    private readonly Icon icon;
+    private UpdatesDialog? updatesDialog;
     private readonly Label netHomeStatus = new();
     private readonly ComboBox netHomeUnits = new();
     private readonly SplitContainer pageSplit = new();
@@ -88,7 +92,7 @@ internal sealed class RemoteEditorWindow : Form
 
     private sealed record DeviceChoice(string DisplayName, DiscoveredEndpoint? Endpoint);
 
-    private sealed record ApplicationList(IReadOnlyList<RemoteApplication> Applications, string? Error);
+    private sealed record ApplicationList(IReadOnlyList<RemoteApplication> Applications, string? Error, DateTime LoadedAt);
 
     public RemoteEditorWindow(
         RemoteEditorStore store,
@@ -106,6 +110,8 @@ internal sealed class RemoteEditorWindow : Form
         this.netHomeService = netHomeService;
         this.moduleCatalog = moduleCatalog;
         this.homeAccessories = homeAccessories;
+        this.updates = updates;
+        this.icon = icon;
         actionComputerRow = BuildOptionRow("Action computer", targetComputer);
         mediaCommandRow = BuildOptionRow("Media command", mediaCommand);
         keyCommandRow = BuildOptionRow("Key", keyCommand);
@@ -121,7 +127,13 @@ internal sealed class RemoteEditorWindow : Form
         textComputerRow = BuildOptionRow("Text computer", textComputer);
         homeAccessoryRow = BuildOptionRow("Home accessory", homeAccessory);
         browseApplicationButton = Button("Browse...", (_, _) => BrowseForApplication(), 72);
-        applicationPickerRow = BuildOptionRow("Application", applicationPicker);
+        applicationPickerRow = BuildOptionRow("Application", new FlowLayoutPanel
+        {
+            AutoSize = true,
+            Margin = Padding.Empty,
+            WrapContents = false,
+            Controls = { applicationPicker, Button("Reload", (_, _) => ReloadApplicationList(), 60) },
+        });
         applicationTargetRow = BuildOptionRow("Path or URL", new FlowLayoutPanel
         {
             AutoSize = true,
@@ -133,14 +145,15 @@ internal sealed class RemoteEditorWindow : Form
         Icon = (Icon)icon.Clone();
         ClientSize = new Size(1000, 720);
         MinimumSize = new Size(900, 640);
-        BackColor = Canvas;
-        Font = EditorTheme.BodyFont;
+        FluentWindow.Apply(this, WindowBackdrop.Mica, ambientCanvas: true);
+        Padding = new Padding(10);
         StartPosition = FormStartPosition.CenterScreen;
 
         Controls.Add(BuildWorkspace());
-        Controls.Add(new UpdateBannerPanel(updates));
         Controls.Add(BuildSendBar(icon));
         EditorTheme.StyleInput(this);
+        updates.Changed += HandleUpdatesChanged;
+        RenderUpdatesButton();
         store.Changed += HandleStoreChanged;
         store.StatusChanged += HandleStatusChanged;
         discovery.Changed += HandleDiscoveryChanged;
@@ -157,6 +170,42 @@ internal sealed class RemoteEditorWindow : Form
             WindowState = FormWindowState.Normal;
         }
         Activate();
+    }
+
+    public void ShowUpdates(bool checkNow)
+    {
+        ShowAndActivate();
+        if (checkNow)
+        {
+            _ = updates.RefreshAsync();
+        }
+        if (updatesDialog is not null)
+        {
+            updatesDialog.Activate();
+            return;
+        }
+        using var dialog = new UpdatesDialog(updates, icon);
+        updatesDialog = dialog;
+        dialog.ShowDialog(this);
+        updatesDialog = null;
+    }
+
+    private void HandleUpdatesChanged(object? sender, EventArgs eventArgs)
+    {
+        if (IsHandleCreated && InvokeRequired)
+        {
+            BeginInvoke(RenderUpdatesButton);
+            return;
+        }
+        RenderUpdatesButton();
+    }
+
+    // Quiet when current; filled when an update is ready so it is noticed without a permanent banner.
+    private void RenderUpdatesButton()
+    {
+        var ready = updates.HasUpdate && !updates.IsBusy;
+        updatesButton.Text = updates.IsBusy ? "Updating..." : ready ? "Update ready" : "Updates";
+        EditorTheme.StyleButton(updatesButton, prominent: ready);
     }
 
     public void CloseForExit()
@@ -198,22 +247,18 @@ internal sealed class RemoteEditorWindow : Form
             store.StatusChanged -= HandleStatusChanged;
             discovery.Changed -= HandleDiscoveryChanged;
             homeAccessories.Changed -= HandleStatusChanged;
+            updates.Changed -= HandleUpdatesChanged;
         }
         base.Dispose(disposing);
     }
 
     private Control BuildSendBar(Icon icon)
     {
-        var bar = new Panel { Dock = DockStyle.Top, Height = 74, BackColor = EditorTheme.Surface };
-        bar.Paint += (_, eventArgs) =>
-        {
-            using var border = new Pen(EditorTheme.Border);
-            eventArgs.Graphics.DrawLine(border, 0, bar.Height - 1, bar.Width, bar.Height - 1);
-        };
+        var bar = new CardPanel { Dock = DockStyle.Top, Height = 74, Fill = EditorTheme.Glass, CornerRadius = 12 };
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 6,
+            ColumnCount = 7,
             Padding = new Padding(14, 10, 14, 10),
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 300));
@@ -222,6 +267,8 @@ internal sealed class RemoteEditorWindow : Form
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var brand = new Panel { Dock = DockStyle.Fill };
         var logo = new PictureBox
         {
@@ -251,8 +298,8 @@ internal sealed class RemoteEditorWindow : Form
         syncStatus.ForeColor = Muted;
         syncStatus.TextAlign = ContentAlignment.MiddleRight;
         syncStatus.Margin = new Padding(8, 0, 10, 0);
-        devicePicker.Dock = DockStyle.Fill;
-        devicePicker.Margin = new Padding(4, 7, 8, 7);
+        devicePicker.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        devicePicker.Margin = new Padding(4, 0, 8, 0);
         devicePicker.DropDownStyle = ComboBoxStyle.DropDownList;
         devicePicker.DisplayMember = nameof(DeviceChoice.DisplayName);
         devicePicker.SelectedIndexChanged += async (_, _) =>
@@ -267,27 +314,15 @@ internal sealed class RemoteEditorWindow : Form
             await RunDeviceOperation(store.LoadFromDeviceAsync);
         };
         var loadButton = Button("Reload", async (_, _) => await RunDeviceOperation(store.LoadFromDeviceAsync));
-        loadButton.Dock = DockStyle.Fill;
-        loadButton.Margin = new Padding(0, 6, 8, 6);
+        CenterInBar(loadButton, new Padding(0, 0, 8, 0));
         scanDevicesButton.Text = "Scan";
-        scanDevicesButton.BackColor = EditorTheme.Surface;
-        scanDevicesButton.ForeColor = Ink;
-        scanDevicesButton.FlatStyle = FlatStyle.Flat;
-        scanDevicesButton.FlatAppearance.BorderColor = EditorTheme.Border;
-        scanDevicesButton.FlatAppearance.MouseOverBackColor = EditorTheme.ForestSoft;
-        scanDevicesButton.UseVisualStyleBackColor = false;
-        scanDevicesButton.Dock = DockStyle.Fill;
-        scanDevicesButton.Margin = new Padding(0, 6, 8, 6);
+        EditorTheme.StyleButton(scanDevicesButton);
+        CenterInBar(scanDevicesButton, new Padding(0, 0, 8, 0));
         scanDevicesButton.Click += (_, _) => _ = discovery.ScanDevicesAsync(store.DeviceAddress);
         new ToolTip().SetToolTip(scanDevicesButton, "Scan the network for M5Paper devices");
         sendButton.Text = "Send";
-        sendButton.BackColor = Forest;
-        sendButton.ForeColor = Color.White;
-        sendButton.FlatStyle = FlatStyle.Flat;
-        sendButton.FlatAppearance.BorderSize = 0;
-        sendButton.Dock = DockStyle.Fill;
-        sendButton.Margin = new Padding(0, 6, 0, 6);
-        sendButton.Font = EditorTheme.StrongFont;
+        EditorTheme.StyleButton(sendButton, prominent: true);
+        CenterInBar(sendButton, Padding.Empty);
         sendButton.Click += async (_, _) => await RunDeviceOperation(store.SendToDeviceAsync);
         layout.Controls.Add(brand, 0, 0);
         layout.Controls.Add(syncStatus, 1, 0);
@@ -295,30 +330,52 @@ internal sealed class RemoteEditorWindow : Form
         layout.Controls.Add(scanDevicesButton, 3, 0);
         layout.Controls.Add(loadButton, 4, 0);
         layout.Controls.Add(sendButton, 5, 0);
+        CenterInBar(updatesButton, new Padding(10, 0, 0, 0));
+        updatesButton.Click += (_, _) => ShowUpdates(checkNow: false);
+        new ToolTip().SetToolTip(updatesButton, "paperGIF and M5Paper firmware updates");
+        layout.Controls.Add(updatesButton, 6, 0);
         bar.Controls.Add(layout);
         return bar;
     }
 
+    private static void CenterInBar(Control control, Padding margin)
+    {
+        control.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        control.Height = 34;
+        control.Margin = margin;
+    }
+
     private Control BuildWorkspace()
     {
+        // Transparent gutters between floating cards let the ambient backdrop show through.
         pageSplit.Dock = DockStyle.Fill;
         pageSplit.FixedPanel = FixedPanel.Panel1;
-        pageSplit.SplitterWidth = 1;
-        pageSplit.BackColor = EditorTheme.Border;
-        pageSplit.Panel1.Controls.Add(BuildPageSidebar());
+        pageSplit.SplitterWidth = 10;
+        pageSplit.BackColor = Color.Transparent;
+        pageSplit.Panel1.Controls.Add(Card(BuildPageSidebar(), EditorTheme.Layer));
         editorSplit.Dock = DockStyle.Fill;
         editorSplit.FixedPanel = FixedPanel.Panel2;
-        editorSplit.SplitterWidth = 1;
-        editorSplit.BackColor = EditorTheme.Border;
-        editorSplit.Panel1.Controls.Add(BuildPreview());
-        editorSplit.Panel2.Controls.Add(BuildInspector());
+        editorSplit.SplitterWidth = 10;
+        editorSplit.BackColor = Color.Transparent;
+        editorSplit.Panel1.Controls.Add(Card(BuildPreview(), EditorTheme.Glass));
+        editorSplit.Panel2.Controls.Add(Card(BuildInspector(), EditorTheme.Layer));
         pageSplit.Panel2.Controls.Add(editorSplit);
-        return pageSplit;
+        var workspace = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 10, 0, 0), BackColor = Color.Transparent };
+        workspace.Controls.Add(pageSplit);
+        return workspace;
+    }
+
+    private static CardPanel Card(Control content, Color fill)
+    {
+        content.Dock = DockStyle.Fill;
+        var card = new CardPanel { Dock = DockStyle.Fill, Fill = fill, Padding = new Padding(6) };
+        card.Controls.Add(content);
+        return card;
     }
 
     private Control BuildPageSidebar()
     {
-        var panel = new Panel { Dock = DockStyle.Fill, BackColor = EditorTheme.SurfaceMuted };
+        var panel = new Panel { Dock = DockStyle.Fill, BackColor = EditorTheme.Layer };
         var heading = new Label
         {
             Dock = DockStyle.Top,
@@ -334,14 +391,14 @@ internal sealed class RemoteEditorWindow : Form
             Height = 50,
             Padding = new Padding(8, 9, 8, 8),
             WrapContents = false,
-            BackColor = EditorTheme.SurfaceMuted,
+            BackColor = EditorTheme.Layer,
         };
-        controls.Controls.Add(Button("+", (_, _) => store.AddPage(), 34));
-        controls.Controls.Add(Button("Delete", (_, _) => store.DeleteSelectedPage(), 58));
-        controls.Controls.Add(Button("Up", (_, _) => store.MoveSelectedPage(-1), 42));
-        controls.Controls.Add(Button("Down", (_, _) => store.MoveSelectedPage(1), 50));
+        controls.Controls.Add(IconButton("\uE710", "Add page", (_, _) => store.AddPage()));
+        controls.Controls.Add(IconButton("\uE74D", "Delete page", (_, _) => store.DeleteSelectedPage()));
+        controls.Controls.Add(IconButton("\uE70E", "Move page up", (_, _) => store.MoveSelectedPage(-1)));
+        controls.Controls.Add(IconButton("\uE70D", "Move page down", (_, _) => store.MoveSelectedPage(1)));
         pagesList.Dock = DockStyle.Fill;
-        pagesList.BackColor = EditorTheme.SurfaceMuted;
+        pagesList.BackColor = EditorTheme.Layer;
         pagesList.Font = EditorTheme.BodyFont;
         pagesList.SelectedIndexChanged += (_, _) =>
         {
@@ -361,8 +418,8 @@ internal sealed class RemoteEditorWindow : Form
 
     private Control BuildPreview()
     {
-        var panel = new Panel { Dock = DockStyle.Fill, BackColor = Canvas };
-        var header = new Panel { Dock = DockStyle.Top, Height = 64, Padding = new Padding(18, 14, 18, 10), BackColor = Canvas };
+        var panel = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+        var header = new Panel { Dock = DockStyle.Top, Height = 64, Padding = new Padding(18, 14, 18, 10), BackColor = Color.Transparent };
         var headerLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -428,22 +485,19 @@ internal sealed class RemoteEditorWindow : Form
 
     private TabPage BuildCatalogTab()
     {
-        var tab = new TabPage("Add Controls") { BackColor = EditorTheme.SurfaceMuted, Padding = new Padding(12) };
+        var tab = new TabPage("Add Controls") { BackColor = EditorTheme.Layer, Padding = new Padding(12) };
         var searchPanel = new Panel { Dock = DockStyle.Top, Height = 46, Padding = new Padding(0, 4, 0, 10) };
         catalogSearch.Dock = DockStyle.Fill;
         catalogSearch.PlaceholderText = "Search controls";
         catalogSearch.TextChanged += (_, _) => RefreshCatalog();
         searchPanel.Controls.Add(catalogSearch);
         catalogList.Dock = DockStyle.Fill;
-        catalogList.BackColor = EditorTheme.SurfaceMuted;
+        catalogList.BackColor = EditorTheme.Layer;
         catalogList.DoubleClick += (_, _) => AddSelectedTemplate();
         var addButton = Button("Add selected control", (_, _) => AddSelectedTemplate());
+        EditorTheme.StyleButton(addButton, prominent: true);
         addButton.Dock = DockStyle.Bottom;
         addButton.Height = 40;
-        addButton.BackColor = EditorTheme.Forest;
-        addButton.ForeColor = Color.White;
-        addButton.FlatAppearance.BorderSize = 0;
-        addButton.Font = EditorTheme.StrongFont;
         tab.Controls.Add(catalogList);
         tab.Controls.Add(addButton);
         tab.Controls.Add(searchPanel);
@@ -452,7 +506,7 @@ internal sealed class RemoteEditorWindow : Form
 
     private TabPage BuildModulesTab()
     {
-        var tab = new TabPage("Modules") { BackColor = EditorTheme.SurfaceMuted, Padding = new Padding(12) };
+        var tab = new TabPage("Modules") { BackColor = EditorTheme.Layer, Padding = new Padding(12) };
         var header = new Panel { Dock = DockStyle.Top, Height = 68 };
         var title = new Label
         {
@@ -505,7 +559,7 @@ internal sealed class RemoteEditorWindow : Form
 
     private void RenderModules()
     {
-        modulesPanel.SuspendLayout();
+        using var painting = modulesPanel.SuspendPainting(LayoutSuspendTraversal.TargetAndDescendants);
         modulesPanel.Controls.Clear();
         foreach (var module in moduleCatalog.AvailableModules)
         {
@@ -525,7 +579,6 @@ internal sealed class RemoteEditorWindow : Form
             });
         }
         ResizeModuleCards();
-        modulesPanel.ResumeLayout();
     }
 
     private Control BuildModuleCard(PaperModuleListing module)
@@ -533,17 +586,13 @@ internal sealed class RemoteEditorWindow : Form
         var installed = moduleCatalog.IsInstalled(module.Id, module.Version);
         var hasUpdate = moduleCatalog.HasUpdate(module);
         var pageTemplate = moduleCatalog.GetInstalled(module.Id)?.Pages.FirstOrDefault();
-        var card = new Panel
+        var card = new CardPanel
         {
             Height = pageTemplate is null ? 112 : 150,
             Margin = new Padding(0, 0, 0, 9),
-            BackColor = EditorTheme.Surface,
+            Fill = EditorTheme.Surface,
+            CornerRadius = 8,
             Tag = "module-card",
-        };
-        card.Paint += (_, eventArgs) =>
-        {
-            using var border = new Pen(EditorTheme.Border);
-            EditorTheme.DrawRoundedRectangle(eventArgs.Graphics, border, new Rectangle(0, 0, card.Width - 1, card.Height - 1), 6);
         };
         var name = new Label
         {
@@ -579,23 +628,11 @@ internal sealed class RemoteEditorWindow : Form
         Button? addPage = null;
         if (pageTemplate is not null)
         {
-            addPage = Button("Add Page", async (_, _) =>
+            addPage = Button("Add Page", (_, _) =>
             {
-                var page = ModuleCatalogService.ClonePage(pageTemplate, module.Id);
-                if (!page.Controls.Any(control => control.Action.Type == RemoteActionType.OpenBuilds))
-                {
-                    store.AddPage(page);
-                    moduleStatus.Text = $"Added {pageTemplate.Page.Name}.";
-                    return;
-                }
-                addPage!.Enabled = false;
-                moduleStatus.Text = "Looking for OpenBuilds CONTROL on your paired computers...";
-                var computer = await store.OpenBuildsComputerAsync();
-                store.AddPage(page, computer?.Id.ToString());
-                addPage.Enabled = store.Profile.Pages.Count < 8;
-                moduleStatus.Text = computer is null
-                    ? $"Added {pageTemplate.Page.Name} for this PC. OpenBuilds CONTROL wasn't found running on a paired computer."
-                    : $"Added {pageTemplate.Page.Name} for OpenBuilds on {computer.Name}.";
+                store.AddPage(ModuleCatalogService.ClonePage(pageTemplate, module.Id));
+                addPage!.Enabled = store.Profile.Pages.Count < 8;
+                moduleStatus.Text = $"Added {pageTemplate.Page.Name} for this PC.";
             }, 92);
             addPage.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
             addPage.Location = new Point(14, 112);
@@ -647,7 +684,7 @@ internal sealed class RemoteEditorWindow : Form
 
     private TabPage BuildControlTab()
     {
-        var tab = new TabPage("Control") { BackColor = EditorTheme.Surface, Padding = new Padding(10) };
+        var tab = new TabPage("Control") { BackColor = EditorTheme.Layer, Padding = new Padding(10) };
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -742,14 +779,18 @@ internal sealed class RemoteEditorWindow : Form
                 store.Commit();
             }
         };
-        ConfigureControlOption(applicationPicker, choice =>
+        applicationPicker.DropDownStyle = ComboBoxStyle.DropDownList;
+        applicationPicker.DisplayMember = nameof(EditorChoice.DisplayName);
+        // Browsing the list or type-ahead must not rename the button; commit only a finished pick.
+        applicationPicker.DropDownClosed += (_, _) => BeginInvoke(CommitApplicationPick);
+        applicationPicker.Leave += (_, _) => CommitApplicationPick();
+        applicationPicker.KeyDown += (_, eventArgs) =>
         {
-            if (choice.Value is not null && store.SelectedControl is { Action.Type: RemoteActionType.MacOpen } control)
+            if (eventArgs.KeyCode == Keys.Enter)
             {
-                var application = ApplicationFor(control, choice.Value);
-                SetApplicationTarget(control, choice.Value, application?.Name);
+                CommitApplicationPick();
             }
-        });
+        };
         applicationPicker.Width = 300;
         applicationPicker.DropDownHeight = 400;
         // WinForms rejects a DropDownList autocomplete mode unless the source is already ListItems.
@@ -762,7 +803,7 @@ internal sealed class RemoteEditorWindow : Form
         {
             var target = applicationTarget.Text.Trim();
             if (!refreshing &&
-                store.SelectedControl is { Action.Type: RemoteActionType.MacOpen } control &&
+                store.SelectedControl is { Action.Type: RemoteActionType.ComputerOpen } control &&
                 control.Action.Text != target)
             {
                 SetApplicationTarget(control, target, ApplicationFor(control, target)?.Name);
@@ -837,12 +878,6 @@ internal sealed class RemoteEditorWindow : Form
         controlProperties.HelpVisible = true;
         controlProperties.ToolbarVisible = false;
         controlProperties.PropertySort = PropertySort.Categorized;
-        controlProperties.ViewBackColor = EditorTheme.Surface;
-        controlProperties.ViewForeColor = EditorTheme.Ink;
-        controlProperties.CategoryForeColor = EditorTheme.Forest;
-        controlProperties.HelpBackColor = EditorTheme.SurfaceMuted;
-        controlProperties.HelpForeColor = EditorTheme.Muted;
-        controlProperties.LineColor = EditorTheme.Border;
         emptyControlHint.Dock = DockStyle.Fill;
         emptyControlHint.ForeColor = Muted;
         emptyControlHint.Text = "Select a control in the preview to edit it.";
@@ -859,8 +894,9 @@ internal sealed class RemoteEditorWindow : Form
 
     private TabPage BuildConnectionsTab()
     {
-        var tab = new TabPage("Connections") { BackColor = EditorTheme.Surface, Padding = new Padding(10) };
+        var tab = new TabPage("Connections") { BackColor = EditorTheme.Layer, Padding = new Padding(10) };
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 11, ColumnCount = 1 };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -900,7 +936,7 @@ internal sealed class RemoteEditorWindow : Form
             Margin = Padding.Empty,
         };
         textSizeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        textSizeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 54));
+        textSizeRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
         textSizeRow.Controls.Add(new Label
         {
             AutoSize = true,
@@ -1033,12 +1069,16 @@ internal sealed class RemoteEditorWindow : Form
         emptyControlHint.Visible = selectedControl is null;
         var computerChoices = new List<ComputerChoice> { new(null, "Default computer") };
         computerChoices.AddRange(store.Profile.Computers.Select(computer => new ComputerChoice(computer.Id, computer.Name)));
-        targetComputer.DataSource = null;
-        targetComputer.DataSource = computerChoices;
-        targetComputer.DisplayMember = nameof(ComputerChoice.DisplayName);
         var selectedComputerId = Guid.TryParse(store.SelectedControl?.Action.ComputerID, out var parsedComputerId)
             ? parsedComputerId
             : (Guid?)null;
+        if (selectedComputerId is not null && computerChoices.All(choice => choice.ComputerId != selectedComputerId))
+        {
+            computerChoices.Add(new(selectedComputerId, "Missing computer (no longer paired)"));
+        }
+        targetComputer.DataSource = null;
+        targetComputer.DataSource = computerChoices;
+        targetComputer.DisplayMember = nameof(ComputerChoice.DisplayName);
         targetComputer.SelectedItem = computerChoices.First(choice => choice.ComputerId == selectedComputerId);
         RefreshControlOptions();
         profileProperties.SelectedObject = new ProfileProperties(store);
@@ -1097,9 +1137,9 @@ internal sealed class RemoteEditorWindow : Form
     {
         var control = store.SelectedControl;
         var showActionComputer = control is not null && IsComputerAction(control.Action.Type);
-        var showApplication = control?.Action.Type == RemoteActionType.MacOpen;
-        var showMediaCommand = control?.Action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia;
-        var showKeyCommand = control?.Action.Type == RemoteActionType.MacKey;
+        var showApplication = control?.Action.Type == RemoteActionType.ComputerOpen;
+        var showMediaCommand = control?.Action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.ComputerMedia;
+        var showKeyCommand = control?.Action.Type == RemoteActionType.ComputerKey;
         var showActionHost = control is not null && IsDeviceAction(control.Action.Type);
         var showLocalHttp = control?.Action.Type == RemoteActionType.LocalHTTP;
         var showLocalHttpBody = showLocalHttp && control?.Action.HttpMethod == "POST";
@@ -1112,8 +1152,8 @@ internal sealed class RemoteEditorWindow : Form
         var showReferencedControl = control?.Kind == RemoteControlKind.TextBox &&
             control.TextBox?.Source == RemoteTextSource.ControlValue;
         var showTextComputer = control?.Kind == RemoteControlKind.TextBox &&
-            control.TextBox?.Source is RemoteTextSource.MacScript or
-                RemoteTextSource.MacShortcut or RemoteTextSource.NowPlaying;
+            control.TextBox?.Source is RemoteTextSource.ComputerScript or
+                RemoteTextSource.AppleShortcut or RemoteTextSource.NowPlaying;
         actionComputerRow.Visible = showActionComputer;
         applicationPickerRow.Visible = applicationTargetRow.Visible = showApplication;
         mediaCommandRow.Visible = showMediaCommand;
@@ -1200,10 +1240,14 @@ internal sealed class RemoteEditorWindow : Form
                     candidate.Id.ToString(),
                     string.IsNullOrWhiteSpace(candidate.Title) ? "Untitled control" : candidate.Title))],
             control?.TextBox?.ReferencedControlID?.ToString());
+        var textComputerId = control?.TextBox?.ComputerID;
         SetControlOptions(textComputer,
             [new(null, "Default computer"), .. store.Profile.Computers.Select(computer =>
-                new EditorChoice(computer.Id.ToString(), computer.Name))],
-            control?.TextBox?.ComputerID?.ToString());
+                new EditorChoice(computer.Id.ToString(), computer.Name)),
+            .. textComputerId is { } missingId && store.Profile.Computers.All(computer => computer.Id != missingId)
+                ? [new EditorChoice(missingId.ToString(), "Missing computer (no longer paired)")]
+                : Array.Empty<EditorChoice>()],
+            textComputerId?.ToString());
         if (showHomeAccessory && control is not null)
         {
             var selectedAccessory = string.IsNullOrEmpty(control.Action.DeviceID) || string.IsNullOrEmpty(control.Action.Host)
@@ -1235,7 +1279,7 @@ internal sealed class RemoteEditorWindow : Form
         switch (control.Action.Type)
         {
             case RemoteActionType.IPhoneMedia:
-            case RemoteActionType.MacMedia:
+            case RemoteActionType.ComputerMedia:
                 actionValueLabel.Text = "Volume percent";
                 actionValue.Minimum = 0;
                 actionValue.Maximum = 100;
@@ -1297,7 +1341,7 @@ internal sealed class RemoteEditorWindow : Form
             control.Action.ValueTenths = (int)Math.Round(celsius * 10m);
             control.Action.Value = (int)Math.Round(celsius);
         }
-        else if (control.Action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia)
+        else if (control.Action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.ComputerMedia)
         {
             control.Action.Value = (int)Math.Round(actionValue.Value * 255m / 100m);
         }
@@ -1310,7 +1354,7 @@ internal sealed class RemoteEditorWindow : Form
 
     private void SaveKeyCommand()
     {
-        if (!refreshing && store.SelectedControl is { Action.Type: RemoteActionType.MacKey } control)
+        if (!refreshing && store.SelectedControl is { Action.Type: RemoteActionType.ComputerKey } control)
         {
             control.Action.Text = keyCommand.Text.Trim();
             store.Commit();
@@ -1331,7 +1375,7 @@ internal sealed class RemoteEditorWindow : Form
 
     private void SaveModifiers()
     {
-        if (refreshing || store.SelectedControl is not { Action.Type: RemoteActionType.MacKey } control)
+        if (refreshing || store.SelectedControl is not { Action.Type: RemoteActionType.ComputerKey } control)
         {
             return;
         }
@@ -1398,7 +1442,7 @@ internal sealed class RemoteEditorWindow : Form
     private void RefreshCatalog()
     {
         var query = catalogSearch.Text.Trim();
-        catalogList.BeginUpdate();
+        using var painting = catalogList.SuspendPainting(LayoutSuspendTraversal.TargetOnly);
         catalogList.Items.Clear();
         foreach (var template in RemoteControlCatalog.All.Concat(moduleCatalog.InstalledTemplates).Where(template =>
             query.Length == 0 || new[] { template.Title, template.Detail, template.Category }
@@ -1406,7 +1450,6 @@ internal sealed class RemoteEditorWindow : Form
         {
             catalogList.Items.Add(template);
         }
-        catalogList.EndUpdate();
     }
 
     private void AddSelectedTemplate()
@@ -1509,11 +1552,23 @@ internal sealed class RemoteEditorWindow : Form
             return;
         }
         store.Profile.Computers.Remove(computer);
+        var removedId = computer.Id.ToString();
         foreach (var control in store.Profile.Pages.SelectMany(page => page.Controls))
         {
-            if (control.Action.ComputerID == computer.Id.ToString())
+            if (string.Equals(control.Action.ComputerID, removedId, StringComparison.OrdinalIgnoreCase))
             {
                 control.Action.ComputerID = null;
+            }
+            if (control.TextBox is { } textBox)
+            {
+                if (textBox.ComputerID == computer.Id)
+                {
+                    textBox.ComputerID = null;
+                }
+                if (string.Equals(textBox.TapAction?.ComputerID, removedId, StringComparison.OrdinalIgnoreCase))
+                {
+                    textBox.TapAction!.ComputerID = null;
+                }
             }
         }
         store.Commit();
@@ -1539,9 +1594,33 @@ internal sealed class RemoteEditorWindow : Form
     }
 
     private RemoteComputer? ApplicationComputer(RemoteControl control) =>
-        Guid.TryParse(control.Action.ComputerID, out var computerId)
-            ? store.Profile.Computers.FirstOrDefault(candidate => candidate.Id == computerId)
-            : store.Profile.Computers.FirstOrDefault();
+        string.IsNullOrEmpty(control.Action.ComputerID)
+            ? store.Profile.Computers.FirstOrDefault()
+            : Guid.TryParse(control.Action.ComputerID, out var computerId)
+                ? store.Profile.Computers.FirstOrDefault(candidate => candidate.Id == computerId)
+                : null;
+
+    private void CommitApplicationPick()
+    {
+        if (refreshing ||
+            applicationPicker.SelectedItem is not EditorChoice { Value: { } path } ||
+            store.SelectedControl is not { Action.Type: RemoteActionType.ComputerOpen } control ||
+            control.Action.Text == path)
+        {
+            return;
+        }
+        SetApplicationTarget(control, path, ApplicationFor(control, path)?.Name);
+        store.Commit();
+    }
+
+    private void ReloadApplicationList()
+    {
+        if (store.SelectedControl is { } control && ApplicationComputer(control) is { } computer)
+        {
+            applicationLists.Remove(ApplicationListKey(computer));
+            RefreshAll();
+        }
+    }
 
     private static string ApplicationListKey(RemoteComputer computer) =>
         $"{computer.Id}|{computer.Host}|{computer.Port}|{computer.Token}";
@@ -1556,18 +1635,28 @@ internal sealed class RemoteEditorWindow : Form
     private void RefreshApplicationOptions(RemoteControl control)
     {
         var computer = ApplicationComputer(control);
+        var computerMissing = computer is null && !string.IsNullOrEmpty(control.Action.ComputerID);
         var target = control.Action.Text;
-        applicationTarget.Text = target;
-        browseApplicationButton.Enabled = computer is null || store.IsLocalComputer(computer);
+        if (!applicationTarget.Focused)
+        {
+            applicationTarget.Text = target;
+        }
+        browseApplicationButton.Enabled = computer is null ? !computerMissing : store.IsLocalComputer(computer);
         ApplicationList? list = null;
         string placeholder;
-        if (computer is null)
+        if (computerMissing)
+        {
+            placeholder = "This button's computer is no longer paired";
+        }
+        else if (computer is null)
         {
             placeholder = "Pair a computer to list its applications";
         }
-        else if (!applicationLists.TryGetValue(ApplicationListKey(computer), out list))
+        else if (!applicationLists.TryGetValue(ApplicationListKey(computer), out list) ||
+            list.Error is not null && DateTime.UtcNow - list.LoadedAt > TimeSpan.FromSeconds(30))
         {
             placeholder = "Loading applications...";
+            list = null;
             _ = LoadApplicationListAsync(computer);
         }
         else
@@ -1596,11 +1685,12 @@ internal sealed class RemoteEditorWindow : Form
         }
         try
         {
-            applicationLists[key] = new(await store.LoadApplicationsAsync(computer), null);
+            applicationLists[key] = new(await store.LoadApplicationsAsync(computer), null, DateTime.UtcNow);
         }
-        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or
+            JsonException or InvalidOperationException or UriFormatException)
         {
-            applicationLists[key] = new([], $"Couldn't load applications from {computer.Name}");
+            applicationLists[key] = new([], $"Couldn't load applications from {computer.Name}", DateTime.UtcNow);
         }
         finally
         {
@@ -1624,12 +1714,13 @@ internal sealed class RemoteEditorWindow : Form
         }
     }
 
+    // Also titles Mac targets such as /Applications/Safari.app.
     private static string? FileTitle(string target) =>
-        Path.IsPathFullyQualified(target) ? Path.GetFileNameWithoutExtension(target) : null;
+        Path.IsPathFullyQualified(target) || target.StartsWith('/') ? Path.GetFileNameWithoutExtension(target) : null;
 
     private void BrowseForApplication()
     {
-        if (store.SelectedControl is not { Action.Type: RemoteActionType.MacOpen } control)
+        if (store.SelectedControl is not { Action.Type: RemoteActionType.ComputerOpen } control)
         {
             return;
         }
@@ -1724,11 +1815,7 @@ internal sealed class RemoteEditorWindow : Form
         RemoteActionType.NetHomeFan or
         RemoteActionType.NetHomeAuto;
 
-    private static bool IsComputerAction(RemoteActionType type) => type is
-        RemoteActionType.MacMedia or RemoteActionType.MacKey or RemoteActionType.MacOpen or
-        RemoteActionType.MacShortcut or RemoteActionType.MacScript or RemoteActionType.OpenBuilds or
-        RemoteActionType.Module ||
-        IsNetHomeAction(type);
+    private static bool IsComputerAction(RemoteActionType type) => RemoteEditorStore.RunsOnComputer(type);
 
     private static bool IsDeviceAction(RemoteActionType type) => type is
         RemoteActionType.WledPower or RemoteActionType.WledPreset or RemoteActionType.WledBrightness or
@@ -1740,7 +1827,7 @@ internal sealed class RemoteEditorWindow : Form
             RemoteActionType.NetHomeTemperature or RemoteActionType.NetHomeTemperatureStep or
             RemoteActionType.NetHomeFan ||
         action.Type == RemoteActionType.OpenBuilds && action.Text.StartsWith("jog", StringComparison.Ordinal) ||
-        action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia && action.Text == "volume";
+        action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.ComputerMedia && action.Text == "volume";
 
     private void AddNetHomePage()
     {
@@ -1748,9 +1835,7 @@ internal sealed class RemoteEditorWindow : Form
         {
             return;
         }
-        var computerId = store.Profile.Computers
-            .FirstOrDefault(computer => computer.Name.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
-            ?.Id.ToString();
+        var computerId = store.EnsureLocalComputerId();
         var setpointId = Guid.NewGuid();
         var fanId = Guid.NewGuid();
         var page = new RemotePage
@@ -1885,18 +1970,21 @@ internal sealed class RemoteEditorWindow : Form
     {
         var button = new Button
         {
-            BackColor = EditorTheme.Surface,
-            FlatStyle = FlatStyle.Flat,
-            ForeColor = Ink,
             Margin = new Padding(3),
             Size = new Size(width, 28),
             Text = text,
-            UseVisualStyleBackColor = false,
         };
-        button.FlatAppearance.BorderColor = EditorTheme.Border;
-        button.FlatAppearance.MouseOverBackColor = EditorTheme.ForestSoft;
-        button.FlatAppearance.MouseDownBackColor = Color.FromArgb(204, 229, 216);
+        EditorTheme.StyleButton(button);
         button.Click += onClick;
+        return button;
+    }
+
+    private static Button IconButton(string glyph, string description, EventHandler onClick)
+    {
+        var button = Button(glyph, onClick, 32);
+        button.Font = EditorTheme.IconFont;
+        button.AccessibleName = description;
+        new ToolTip().SetToolTip(button, description);
         return button;
     }
 }
@@ -1936,6 +2024,7 @@ internal static class ComputerDialog
         form.Controls.Add(fields);
         form.AcceptButton = save;
         form.CancelButton = cancel;
+        EditorTheme.StyleDialog(form);
         if (form.ShowDialog(owner) != DialogResult.OK || string.IsNullOrWhiteSpace(name.Text) || string.IsNullOrWhiteSpace(host.Text))
         {
             return false;
@@ -1976,6 +2065,7 @@ internal static class PromptDialog
         form.Controls.AddRange([prompt, input, ok, cancel]);
         form.AcceptButton = ok;
         form.CancelButton = cancel;
+        EditorTheme.StyleDialog(form);
         return form.ShowDialog(owner) == DialogResult.OK ? input.Text : null;
     }
 }

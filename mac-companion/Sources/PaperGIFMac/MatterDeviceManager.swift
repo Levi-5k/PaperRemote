@@ -43,18 +43,42 @@ final class MatterDeviceManager: ObservableObject {
         await run(ModuleManageRequest(command: "list"), reportSuccess: false)
     }
 
-    func add(pairingCode: String, name: String) async {
-        guard !isBusy else { return }
+    /// `wifiSSID`/`wifiPassword` are only needed for factory-new Wi-Fi devices; they are passed through, never stored.
+    func add(pairingCode: String, name: String, wifiSSID: String? = nil, wifiPassword: String? = nil) async {
+        await waitUntilIdle()
         isAdding = true
         lastAddSucceeded = false
         status = "Adding \(name.isEmpty ? "device" : name)… keep it in pairing mode. This can take up to 2 minutes."
         let request = ModuleManageRequest(
             command: "commission",
             setupCode: Self.normalizedPairingCode(pairingCode),
-            name: name
+            name: name,
+            wifiSSID: wifiSSID,
+            wifiPassword: wifiPassword
         )
         lastAddSucceeded = await run(request, reportSuccess: true)
         isAdding = false
+    }
+
+    func rename(_ device: Device, to name: String) async {
+        await waitUntilIdle()
+        var request = ModuleManageRequest(command: "rename", name: name)
+        request.device = device.number
+        await run(request, reportSuccess: true)
+    }
+
+    func remove(_ device: Device) async {
+        await waitUntilIdle()
+        var request = ModuleManageRequest(command: "remove")
+        request.device = device.number
+        await run(request, reportSuccess: true)
+    }
+
+    // A list refresh is quick; waiting keeps a user action from being dropped while one runs.
+    private func waitUntilIdle() async {
+        while isBusy {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
     }
 
     /// Accepts Apple Home's 11-digit code with dashes/spaces, or an `MT:` QR payload.

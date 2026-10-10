@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
@@ -22,10 +23,12 @@ internal sealed class RemotePreviewPanel : Control
     public RemotePreviewPanel()
     {
         DoubleBuffered = true;
-        BackColor = EditorTheme.Canvas;
+        SetStyle(ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true);
+        BackColor = Color.Transparent;
         Cursor = Cursors.Hand;
     }
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public RemotePage? Page
     {
         get => page;
@@ -36,7 +39,9 @@ internal sealed class RemotePreviewPanel : Control
         }
     }
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public Guid? SelectedControlId { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int MaxButtonTextSize
     {
         get => maxButtonTextSize;
@@ -47,7 +52,9 @@ internal sealed class RemotePreviewPanel : Control
             Invalidate();
         }
     }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int PageIndex { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public IReadOnlyList<string> PageNames { get; set; } = [];
     public event EventHandler<Guid>? ControlSelected;
     public event EventHandler<ControlMoveEventArgs>? ControlMoved;
@@ -121,14 +128,13 @@ internal sealed class RemotePreviewPanel : Control
         base.OnPaint(eventArgs);
         var graphics = eventArgs.Graphics;
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var pattern = new Pen(Color.FromArgb(225, 231, 226));
+        using var pattern = new SolidBrush(Color.FromArgb(26, 255, 255, 255));
         for (var x = 16; x < Width; x += 24)
         {
-            graphics.DrawLine(pattern, x, 0, x, Height);
-        }
-        for (var y = 16; y < Height; y += 24)
-        {
-            graphics.DrawLine(pattern, 0, y, Width, y);
+            for (var y = 16; y < Height; y += 24)
+            {
+                graphics.FillEllipse(pattern, x - 1, y - 1, 2.5f, 2.5f);
+            }
         }
         var available = new Rectangle(24, 18, Math.Max(1, Width - 48), Math.Max(1, Height - 36));
         const float aspect = 540f / 960f;
@@ -144,11 +150,11 @@ internal sealed class RemotePreviewPanel : Control
             available.Top + (available.Height - screenHeight) / 2,
             screenWidth,
             screenHeight);
-        var shadowFrame = Rectangle.Inflate(screen, 7, 7);
-        shadowFrame.Offset(0, 3);
-        using var shadow = new SolidBrush(Color.FromArgb(28, 30, 42, 35));
-        EditorTheme.FillRoundedRectangle(graphics, shadow, shadowFrame, 7);
-        using var screenBrush = new SolidBrush(EditorTheme.Surface);
+        var shadowFrame = Rectangle.Inflate(screen, 9, 9);
+        shadowFrame.Offset(0, 6);
+        using var shadow = new SolidBrush(Color.FromArgb(110, 0, 0, 0));
+        EditorTheme.FillRoundedRectangle(graphics, shadow, shadowFrame, 10);
+        using var screenBrush = new SolidBrush(EditorTheme.Paper);
         EditorTheme.FillRoundedRectangle(graphics, screenBrush, screen, 6);
         using var border = new Pen(Color.FromArgb(53, 65, 59), 2);
         EditorTheme.DrawRoundedRectangle(graphics, border, screen, 6);
@@ -363,8 +369,8 @@ internal sealed class RemotePreviewPanel : Control
             return;
         }
         var selected = control.Id == SelectedControlId;
-        using var fill = new SolidBrush(selected ? EditorTheme.ForestSoft : Color.FromArgb(246, 248, 245));
-        using var outline = new Pen(selected ? EditorTheme.Forest : Color.FromArgb(157, 168, 162), selected ? 2 : 1);
+        using var fill = new SolidBrush(selected ? EditorTheme.PaperSelected : EditorTheme.PaperControl);
+        using var outline = new Pen(selected ? EditorTheme.PaperAccent : Color.FromArgb(157, 168, 162), selected ? 2 : 1);
         EditorTheme.FillRoundedRectangle(graphics, fill, frame, 5);
         EditorTheme.DrawRoundedRectangle(graphics, outline, frame, 5);
         if (selected)
@@ -415,7 +421,7 @@ internal sealed class RemotePreviewPanel : Control
             }
             var lightText = !control.SliderOutlineInsetPixels.HasValue && progress >= 0.5f;
             var textBrush = lightText ? Brushes.White : Brushes.Black;
-            var seekSlider = control.Action.Type == RemoteActionType.MacMedia && control.Action.Text == "seek";
+            var seekSlider = control.Action.Type == RemoteActionType.ComputerMedia && control.Action.Text == "seek";
             if (!seekSlider && HasIcon(control) && DeviceIconLayout(frame, screenScale, true) is { } sliderLayout)
             {
                 DrawControlIcon(graphics, control, sliderLayout.Icon, lightText ? Color.White : Color.Black);
@@ -426,7 +432,7 @@ internal sealed class RemotePreviewPanel : Control
             }
             var contentFrame = RectangleF.Inflate(frame, -10 * screenScale, -7 * screenScale);
             using var label = NativeButtonLabelLayout.Fit(
-                graphics, text, contentFrame, MaxButtonTextSize, screenScale);
+                graphics, text, contentFrame, MaxButtonTextSize, screenScale, wordOnlyWrap: !seekSlider);
             label.Draw(graphics, textBrush);
             return;
         }
@@ -437,18 +443,20 @@ internal sealed class RemotePreviewPanel : Control
             return;
         }
         using var title = NativeButtonLabelLayout.Fit(graphics, text,
-            RectangleF.Inflate(frame, -7 * screenScale, -7 * screenScale), MaxButtonTextSize, screenScale);
+            RectangleF.Inflate(frame, -7 * screenScale, -7 * screenScale), MaxButtonTextSize, screenScale,
+            wordOnlyWrap: control.Kind == RemoteControlKind.Button);
         title.Draw(graphics, Brushes.Black);
     }
 
-    private readonly record struct IconLayout(
+    internal readonly record struct IconLayout(
         RectangleF Content, RectangleF Icon, RectangleF Title, float Extent, float Gap, bool Horizontal);
 
     private static bool HasIcon(RemoteControl control) =>
         !string.IsNullOrEmpty(control.Symbol) || control.IconBitmap is not null;
 
-    // Mirrors firmware remote_text_layout::buttonLayout so icons land where the M5Paper draws them.
-    private static IconLayout? DeviceIconLayout(Rectangle frame, float scale, bool forceHorizontal)
+    // Preserve device icon geometry/halo, but center Windows titles in the actual
+    // remaining space rather than reserving a phantom second icon on the right.
+    internal static IconLayout? DeviceIconLayout(Rectangle frame, float scale, bool forceHorizontal)
     {
         var width = (int)Math.Round(frame.Width / scale);
         var height = (int)Math.Round(frame.Height / scale);
@@ -476,7 +484,7 @@ internal sealed class RemotePreviewPanel : Control
         return horizontal
             ? new IconLayout(content,
                 Scaled(padding + extent / 2 - iconSize / 2, height / 2 - iconSize / 2, iconSize, iconSize),
-                Scaled(padding + extent + gap, padding, contentWidth - (extent + gap) * 2, contentHeight),
+                Scaled(padding + extent + gap, padding, contentWidth - extent - gap, contentHeight),
                 extent * scale, gap * scale, true)
             : new IconLayout(content,
                 Scaled(width / 2 - iconSize / 2, padding + extent / 2 - iconSize / 2, iconSize, iconSize),

@@ -403,6 +403,7 @@ struct DeviceErrorEntry {
     char timestamp[32] = {};
     char message[kDeviceErrorMessageBytes] = {};
     uint8_t pendingTargets = 0;
+    uint8_t failedUploads = 0;
 };
 
 struct RemotePage {
@@ -3170,7 +3171,7 @@ void configureWifiServer() {
             wifiServer.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
             return;
         }
-        JsonDocument document;
+        JsonDocument document(&profileJsonAllocator);
         if (deserializeJson(document, wifiServer.arg("plain")) ||
             !document["items"].is<JsonArray>() || document["items"].size() > 16) {
             wifiServer.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid_update\"}");
@@ -4706,8 +4707,8 @@ void drawRemoteControlIcon(
     int32_t centerX,
     int32_t centerY,
     int32_t size,
-    uint32_t foreground,
-    uint32_t background) {
+    uint16_t foreground,
+    uint16_t background) {
     if (iconBitmap != nullptr) {
         const int32_t left = centerX - size / 2;
         const int32_t top = centerY - size / 2;
@@ -4752,7 +4753,14 @@ void drawRemoteControlIcon(
     const int32_t backgroundLevel = luminance(background);
     const int32_t left = centerX - size / 2;
     const int32_t top = centerY - size / 2;
+    // Fast modes Bayer-dither gray pixels into speckled edges; draw a solid 1-bit glyph instead.
+    const bool binary = M5.Display.getEpdMode() == epd_mode_t::epd_fast ||
+        M5.Display.getEpdMode() == epd_mode_t::epd_fastest;
     remote_icons::rasterize(*glyph, size, [&](int32_t x, int32_t y, uint8_t coverage) {
+        if (binary) {
+            if (coverage >= 128) M5.Display.drawPixel(left + x, top + y, foreground);
+            return;
+        }
         const int32_t level = backgroundLevel + (foregroundLevel - backgroundLevel) * coverage / 255;
         // Snap to the panel's 16 gray levels so anti-aliased edges stay stable across refreshes.
         const uint8_t gray = static_cast<uint8_t>((level * 15 + 127) / 255 * 17);
@@ -4817,7 +4825,7 @@ uint32_t remoteTitleCodepoint(const char* text, size_t offset, size_t next) {
     for (++offset; offset < next; ++offset) {
         code = (code << 6) | (static_cast<uint8_t>(text[offset]) & 0x3F);
     }
-    return code;
+    return remote_text_layout::titleCodepoint(code);
 }
 
 const lgfx::GFXglyph* remoteTitleGlyph(const lgfx::GFXfont* font, uint32_t code) {
@@ -4851,7 +4859,7 @@ bool layoutRemoteTitle(const char* text, const remote_text_layout::Rect& area,
         return result.ink;
     };
     // IFont::updateFontMetric only updates horizontal GFX metrics. The glyph table
-    // supplies the per-line ink top/bottom; drawChar takes a BASELINE origin,
+    // supplies the complete label's ink top/bottom; drawChar takes a BASELINE origin,
     // unlike drawString(top_left), which adds the font-wide baseline/bearings.
     const auto emit = [&](size_t start, size_t bytes, int32_t penX, int32_t baselineY) {
         lgfx::TextStyle style = M5.Display.getTextStyle();
@@ -4877,8 +4885,8 @@ bool layoutRemoteTitle(const char* text, const remote_text_layout::Rect& area,
             offset = next;
         }
     };
-    return remote_text_layout::inkLayout(text, area,
-        max<int32_t>(1, remote_text_layout::scaled(metrics.height, choice.step)),
+    return remote_text_layout::wordInkLayout(text, area,
+        max<int32_t>(1, remote_text_layout::scaled(metrics.y_advance, choice.step)),
         max<int32_t>(1, remote_text_layout::scaled(4, choice.step)),
         alignment, 1, measure, emit, textHeight, draw);
 }
@@ -5022,7 +5030,7 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
         M5.Display.drawRoundRect(x, y, width, height, radius, TFT_BLACK);
         const auto sliderLayout = remote_text_layout::buttonLayout(width, height,
             control.hasIconBitmap || control.symbol[0] != '\0', true);
-        const auto drawSliderContent = [&](uint32_t foreground, uint32_t background) {
+        const auto drawSliderContent = [&](uint16_t foreground, uint16_t background) {
             M5.Display.setTextColor(foreground);
             if (mediaSeekControl) {
                 M5.Display.setTextDatum(textdatum_t::top_left);
@@ -5113,8 +5121,9 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
     const char* displayedSymbol = playbackStateAvailable
         ? (control.toggleOn ? "pause.fill" : "play.fill")
         : control.symbol;
-    const uint32_t foreground = active ? TFT_WHITE : TFT_BLACK;
-    const uint32_t background = active ? TFT_BLACK : TFT_WHITE;
+    // RGB565: LovyanGFX reads uint32_t colors as RGB888, turning 0xFFFF white into cyan.
+    const uint16_t foreground = active ? TFT_WHITE : TFT_BLACK;
+    const uint16_t background = active ? TFT_BLACK : TFT_WHITE;
     const int32_t radius = min<int32_t>(openBuildsButton ? 8 : 10, min(width, height) / 2);
     M5.Display.fillRoundRect(x, y, width, height, radius, background);
     if (!active) {
@@ -5203,8 +5212,8 @@ void drawRemotePageTabs(uint8_t selectedPageIndex) {
         const int32_t tabRight = left + (index + 1) * width / remoteProfile->pageCount;
         const int32_t tabTop = index == selectedPageIndex ? top : top + 8;
         const int32_t tabWidth = tabRight - tabLeft;
-        const uint32_t background = index == selectedPageIndex ? TFT_BLACK : TFT_WHITE;
-        const uint32_t foreground = index == selectedPageIndex ? TFT_WHITE : TFT_BLACK;
+        const uint16_t background = index == selectedPageIndex ? TFT_BLACK : TFT_WHITE;
+        const uint16_t foreground = index == selectedPageIndex ? TFT_WHITE : TFT_BLACK;
         M5.Display.fillRoundRect(
             tabLeft, tabTop, tabWidth, bottom - tabTop, 7, background);
         M5.Display.drawRoundRect(
@@ -6195,7 +6204,7 @@ bool buildEWeLinkRequestBody(
     snprintf(sequence, sizeof(sequence), "%010lu%03lu",
         static_cast<unsigned long>(now / 1000),
         static_cast<unsigned long>(now % 1000));
-    JsonDocument payload;
+    JsonDocument payload(&profileJsonAllocator);
     payload["sequence"] = sequence;
     payload["deviceid"] = action.computerId;
     payload["selfApikey"] = "123";
@@ -6317,7 +6326,7 @@ void queueDeviceErrorUpload() {
                 entry.pendingTargets &= static_cast<uint8_t>(~(1U << computerIndex));
                 continue;
             }
-            JsonDocument document;
+            JsonDocument document(&profileJsonAllocator);
             char deviceName[24];
             snprintf(deviceName, sizeof(deviceName), "papergif-%04x",
                 static_cast<uint16_t>(ESP.getEfuseMac()));
@@ -6418,7 +6427,7 @@ void remoteNetworkTask(void* context) {
         result.logEntryId = request.logEntryId;
         result.sent = sent;
         if (result.sent && !responseBody.isEmpty()) {
-            JsonDocument response;
+            JsonDocument response(&profileJsonAllocator);
             if (!deserializeJson(response, responseBody) && response["changed"].is<bool>()) {
                 result.changed = response["changed"].as<bool>();
             }
@@ -6460,7 +6469,8 @@ void startRemoteNetworkWorker() {
         }
         worker.requests = new (storage) RemoteRequestQueue();
         // Socket calls must not starve IDLE0 (and the task watchdog).
-        ready = xTaskCreatePinnedToCore(remoteNetworkTask, names[index], 6144,
+        // Measured peak use is ~3.3 KB (text fetch, module action); stacks are internal RAM.
+        ready = xTaskCreatePinnedToCore(remoteNetworkTask, names[index], 4608,
             &worker, tskIDLE_PRIORITY, &worker.task, 0) == pdPASS;
     }
     if (!ready) {
@@ -6560,18 +6570,21 @@ void pollRemoteNetworkResults() {
         if (result.deviceLogRequest) {
             deviceErrorUploadPending = false;
             nextDeviceErrorUploadAt = millis() + (result.sent ? 250 : kDeviceErrorRetryMs);
-            if (result.sent) {
-                for (uint8_t index = 0; index < deviceErrorCount; ++index) {
-                    if (deviceErrors[index].id != result.logEntryId) {
-                        continue;
-                    }
-                    deviceErrors[index].pendingTargets &=
+            for (uint8_t index = 0; index < deviceErrorCount; ++index) {
+                DeviceErrorEntry& entry = deviceErrors[index];
+                if (entry.id != result.logEntryId) {
+                    continue;
+                }
+                // An offline computer must not hold the log (and sockets) forever.
+                if (result.sent || ++entry.failedUploads >= 3) {
+                    entry.failedUploads = 0;
+                    entry.pendingTargets &=
                         static_cast<uint8_t>(~(1U << result.logComputerIndex));
-                    if (deviceErrors[index].pendingTargets == 0) {
+                    if (entry.pendingTargets == 0) {
                         removeDeviceError(index);
                     }
-                    break;
                 }
+                break;
             }
             Serial.printf("Device error log upload -> %s\n",
                 result.sent ? "ok" : "retrying");
@@ -7076,7 +7089,7 @@ void processLocalMediaStateUpdate() {
 }
 
 void fetchMacTextBoxes(RemotePage& page, RemoteComputer& computer, uint32_t now) {
-    JsonDocument request;
+    JsonDocument request(&profileJsonAllocator);
     JsonArray items = request["items"].to<JsonArray>();
     for (uint8_t index = 0; index < page.controlCount; ++index) {
         RemoteControl& control = page.controls[index];
@@ -7161,7 +7174,7 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
         logDeviceError("Text refresh failed: %s; retrying in 2 seconds", result.url);
         return;
     }
-    JsonDocument document;
+    JsonDocument document(&profileJsonAllocator);
     if (deserializeJson(document, result.responseBody)) {
         logDeviceError("Invalid text response from %s", result.url);
         return;
@@ -7479,7 +7492,7 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
         return false;
     }
 
-    JsonDocument document;
+    JsonDocument document(&profileJsonAllocator);
     String url;
     String body;
     const char* token = nullptr;
@@ -7785,6 +7798,33 @@ bool activateRemoteControl(uint8_t pageIndex, uint8_t controlIndex) {
 }
 
 #if PAPERGIF_SERIAL_COMMANDS
+void printMemoryReport() {
+    multi_heap_info_t internal;
+    heap_caps_get_info(&internal, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    Serial.printf("Internal RAM free=%u largest=%u lowest=%u allocated=%u blocks=%u\n",
+        static_cast<unsigned>(internal.total_free_bytes),
+        static_cast<unsigned>(internal.largest_free_block),
+        static_cast<unsigned>(internal.minimum_free_bytes),
+        static_cast<unsigned>(internal.total_allocated_bytes),
+        static_cast<unsigned>(internal.allocated_blocks));
+    Serial.printf("PSRAM free=%u largest=%u\n",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+    const char* namedTasks[] = {"loopTask", "nimble_host", "tiT", "wifi", "arduino_events", "esp_timer"};
+    for (const char* name : namedTasks) {
+        if (TaskHandle_t task = xTaskGetHandle(name)) {
+            Serial.printf("Stack headroom %s=%u\n", name,
+                static_cast<unsigned>(uxTaskGetStackHighWaterMark(task)));
+        }
+    }
+    for (const auto& worker : remoteNetworkWorkers) {
+        if (worker.task != nullptr) {
+            Serial.printf("Stack headroom %s=%u\n", pcTaskGetName(worker.task),
+                static_cast<unsigned>(uxTaskGetStackHighWaterMark(worker.task)));
+        }
+    }
+}
+
 void processSerialCommands() {
     static char command[48];
     static uint8_t commandLength = 0;
@@ -7815,8 +7855,10 @@ void processSerialCommands() {
                 pageIndex, controlIndex);
             activateRemoteControl(static_cast<uint8_t>(pageIndex),
                 static_cast<uint8_t>(controlIndex));
+        } else if (strcmp(command, "mem") == 0) {
+            printMemoryReport();
         } else if (strcmp(command, "help") == 0) {
-            Serial.println("Serial commands: press <page> <index>");
+            Serial.println("Serial commands: press <page> <index>, mem");
         } else if (commandLength > 0) {
             Serial.println("Unknown serial command; enter help");
         }

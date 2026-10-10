@@ -107,13 +107,18 @@ struct RemoteOpenBuildsController: Codable, Equatable, Sendable {
 enum RemoteTextSource: String, Codable, CaseIterable, Identifiable, Sendable {
     case staticText
     case dateTime
-    case macScript
-    case macShortcut
+    // Raw values are the legacy wire names; see protocol/README.md.
+    case computerScript = "macScript"
+    case appleShortcut = "macShortcut"
     case controlValue
     case nowPlaying
     case openBuildsPosition
 
     var id: Self { self }
+
+    var runsOnComputer: Bool {
+        [.computerScript, .appleShortcut, .nowPlaying, .openBuildsPosition].contains(self)
+    }
 }
 
 enum RemoteTextSize: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -153,11 +158,12 @@ enum RemoteTextTapBehavior: String, Codable, CaseIterable, Identifiable, Sendabl
 enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
     case iPhoneMedia
     case iPhoneHomePower
-    case macMedia
-    case macKey
-    case macOpen
-    case macShortcut
-    case macScript
+    // Raw values are the legacy wire names; see protocol/README.md.
+    case computerMedia = "macMedia"
+    case computerKey = "macKey"
+    case computerOpen = "macOpen"
+    case appleShortcut = "macShortcut"
+    case computerScript = "macScript"
     case openBuilds
     case wledPower
     case wledPreset
@@ -179,11 +185,11 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .iPhoneMedia: "iPhone media"
         case .iPhoneHomePower: "Apple Home power"
-        case .macMedia: "Media"
-        case .macKey: "Keyboard shortcut"
-        case .macOpen: "Open app or URL"
-        case .macShortcut: "Apple Shortcut"
-        case .macScript: "Approved script"
+        case .computerMedia: "Media"
+        case .computerKey: "Keyboard shortcut"
+        case .computerOpen: "Open app or URL"
+        case .appleShortcut: "Apple Shortcut (Mac only)"
+        case .computerScript: "Approved script"
         case .openBuilds: "OpenBuilds CONTROL"
         case .wledPower: "WLED power"
         case .wledPreset: "WLED preset"
@@ -205,11 +211,11 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .iPhoneMedia: "iphone"
         case .iPhoneHomePower: "homekit"
-        case .macMedia: "playpause.fill"
-        case .macKey: "keyboard"
-        case .macOpen: "arrow.up.forward.app"
-        case .macShortcut: "command"
-        case .macScript: "terminal"
+        case .computerMedia: "playpause.fill"
+        case .computerKey: "keyboard"
+        case .computerOpen: "arrow.up.forward.app"
+        case .appleShortcut: "command"
+        case .computerScript: "terminal"
         case .openBuilds: "move.3d"
         case .wledPower: "power"
         case .wledPreset: "sparkles"
@@ -224,6 +230,18 @@ enum RemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .netHomeAuto: "humidity.fill"
         case .module: "shippingbox.fill"
         case .page: "rectangle.on.rectangle"
+        }
+    }
+
+    var runsOnComputer: Bool {
+        switch self {
+        case .computerMedia, .computerKey, .computerOpen, .appleShortcut, .computerScript,
+             .openBuilds, .module, .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
+             .netHomeMode, .netHomeFan, .netHomeAuto:
+            true
+        case .iPhoneMedia, .iPhoneHomePower, .wledPower, .wledPreset, .wledBrightness,
+             .eWeLinkPower, .localHTTP, .page:
+            false
         }
     }
 }
@@ -307,6 +325,52 @@ extension RemoteTextBox {
         tapBehavior = try container.decodeIfPresent(RemoteTextTapBehavior.self, forKey: .tapBehavior) ?? .displayOnly
         tapAction = try container.decodeIfPresent(RemoteAction.self, forKey: .tapAction)
         refreshIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .refreshIntervalSeconds)
+    }
+}
+
+extension RemoteControl {
+    /// Points every computer-routed part of the control at `computerID`.
+    func targetingComputer(_ computerID: String, replacingExisting: Bool = true) -> RemoteControl {
+        var targeted = self
+        if action.type.runsOnComputer, replacingExisting || action.computerID == nil {
+            targeted.action.computerID = computerID
+        }
+        if textBox?.source.runsOnComputer == true, let textComputerID = UUID(uuidString: computerID),
+           replacingExisting || textBox?.computerID == nil {
+            targeted.textBox?.computerID = textComputerID
+        }
+        if textBox?.tapAction?.type.runsOnComputer == true,
+           replacingExisting || textBox?.tapAction?.computerID == nil {
+            targeted.textBox?.tapAction?.computerID = computerID
+        }
+        return targeted
+    }
+
+    mutating func keepComputerTargets(of previous: RemoteControl) {
+        if previous.action.type == action.type, let computerID = previous.action.computerID {
+            action.computerID = computerID
+        }
+        if textBox != nil, let computerID = previous.textBox?.computerID {
+            textBox?.computerID = computerID
+        }
+        if textBox?.tapAction != nil, let computerID = previous.textBox?.tapAction?.computerID {
+            textBox?.tapAction?.computerID = computerID
+        }
+    }
+
+    /// Replaces references to `oldIDs` (in any letter case) in the action, text box and tap action.
+    mutating func retargetComputer(from oldIDs: Set<String>, to newID: UUID?) {
+        let old = Set(oldIDs.map { $0.uppercased() })
+        func matches(_ id: String?) -> Bool { id.map { old.contains($0.uppercased()) } ?? false }
+        if matches(action.computerID) {
+            action.computerID = newID?.uuidString
+        }
+        if matches(textBox?.computerID?.uuidString) {
+            textBox?.computerID = newID
+        }
+        if matches(textBox?.tapAction?.computerID) {
+            textBox?.tapAction?.computerID = newID?.uuidString
+        }
     }
 }
 
@@ -844,9 +908,9 @@ struct RemoteProfile: Codable, Equatable, Sendable {
 
     static let starter = RemoteProfile(pages: [
         RemotePage(name: "Main", controls: [
-            RemoteControl(title: "Previous", symbol: "backward.fill", kind: .button, action: .init(type: .macMedia, text: "previous")),
-            RemoteControl(title: "Play / Pause", symbol: "playpause.fill", kind: .button, action: .init(type: .macMedia, text: "playPause")),
-            RemoteControl(title: "Next", symbol: "forward.fill", kind: .button, action: .init(type: .macMedia, text: "next")),
+            RemoteControl(title: "Previous", symbol: "backward.fill", kind: .button, action: .init(type: .computerMedia, text: "previous")),
+            RemoteControl(title: "Play / Pause", symbol: "playpause.fill", kind: .button, action: .init(type: .computerMedia, text: "playPause")),
+            RemoteControl(title: "Next", symbol: "forward.fill", kind: .button, action: .init(type: .computerMedia, text: "next")),
             RemoteControl(title: "Lights", symbol: "lightbulb.fill", kind: .button, action: .init(type: .wledPower, text: "toggle")),
         ]),
     ])

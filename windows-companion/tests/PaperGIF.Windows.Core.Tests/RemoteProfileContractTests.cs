@@ -79,6 +79,18 @@ public sealed class RemoteProfileContractTests
     }
 
     [Fact]
+    public void RenamedComputerActionsKeepLegacyWireNames()
+    {
+        var action = new RemoteAction { Type = RemoteActionType.ComputerOpen };
+        var textBox = new RemoteTextBox { Source = RemoteTextSource.AppleShortcut };
+
+        Assert.Contains("\"type\":\"macOpen\"", JsonSerializer.Serialize(action, RemoteProfileJson.Options));
+        Assert.Contains("\"source\":\"macShortcut\"", JsonSerializer.Serialize(textBox, RemoteProfileJson.Options));
+        Assert.Equal(RemoteActionType.ComputerScript,
+            JsonSerializer.Deserialize<RemoteAction>("{\"type\":\"macScript\"}", RemoteProfileJson.Options)!.Type);
+    }
+
+    [Fact]
     public void CanonicalV6FixtureCoversEveryTextSource()
     {
         var profile = LoadFixture("remote-profile-v6-text-sources.json");

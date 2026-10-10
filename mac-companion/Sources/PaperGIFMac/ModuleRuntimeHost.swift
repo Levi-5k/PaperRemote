@@ -22,6 +22,8 @@ struct ModuleManageRequest: Encodable {
     var setupCode: String?
     var name: String?
     var device: Int?
+    var wifiSSID: String?
+    var wifiPassword: String?
 }
 
 final class ModuleRuntimeHost: @unchecked Sendable {
@@ -61,7 +63,10 @@ final class ModuleRuntimeHost: @unchecked Sendable {
     }
 
     func perform(_ request: ModuleActionRequest) -> ModuleActionResponse? {
-        lock.lock()
+        // A runtime handles one request at a time; adding a Matter device can hold it for two minutes.
+        guard lock.lock(before: Date().addingTimeInterval(25)) else {
+            return ModuleActionResponse(succeeded: false, changed: false, message: "Module is busy; try again shortly")
+        }
         defer { lock.unlock() }
           guard request.type == "module",
               let moduleID = request.host,
@@ -99,8 +104,16 @@ final class ModuleRuntimeHost: @unchecked Sendable {
     }
 
     /// Blocks until the module replies; call off the main thread.
-    func manage(moduleID: String, _ request: ModuleManageRequest) throws -> Data {
-        lock.lock()
+    func manage(
+        moduleID: String,
+        _ request: ModuleManageRequest,
+        waitingAtMost timeout: TimeInterval? = nil
+    ) throws -> Data {
+        if let timeout {
+            guard lock.lock(before: Date().addingTimeInterval(timeout)) else { throw ModuleRuntimeError.busy }
+        } else {
+            lock.lock()
+        }
         defer { lock.unlock() }
         guard let runtimeName = runtimeByModule[moduleID] else {
             throw ModuleRuntimeError.moduleNotLoaded(moduleID)
@@ -170,6 +183,7 @@ private enum ModuleRuntimeError: LocalizedError {
     case executableNotFound(String)
     case moduleNotLoaded(String)
     case noResponse
+    case busy
 
     var errorDescription: String? {
         switch self {
@@ -179,6 +193,8 @@ private enum ModuleRuntimeError: LocalizedError {
             "The \(id) module is not installed."
         case .noResponse:
             "Module runtime exited without a response"
+        case .busy:
+            "The module is busy; try again shortly."
         }
     }
 }

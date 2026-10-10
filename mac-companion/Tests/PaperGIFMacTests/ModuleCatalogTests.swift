@@ -57,7 +57,7 @@ final class ModuleCatalogTests: XCTestCase {
         XCTAssertEqual(page.gridColumns, 3)
         XCTAssertEqual(page.gridRows, 8)
         XCTAssertEqual(page.controls.count, 8)
-        XCTAssertTrue(page.controls.allSatisfy { $0.action.type == .macMedia })
+        XCTAssertTrue(page.controls.allSatisfy { $0.action.type == .computerMedia })
         XCTAssertEqual(page.controls.first { $0.action.text == "seek" }?.layoutSlot, 0)
         XCTAssertEqual(page.controls.first { $0.action.text == "playPause" }?.layoutSlot, 7)
         XCTAssertEqual(page.controls.first { $0.action.text == "volume" }?.layoutSlot, 15)
@@ -113,7 +113,7 @@ final class ModuleCatalogTests: XCTestCase {
         )
 
         XCTAssertEqual(module.controls.count, 7)
-        XCTAssertTrue(module.controls.allSatisfy { $0.control.action.type == .macKey })
+        XCTAssertTrue(module.controls.allSatisfy { $0.control.action.type == .computerKey })
         let definition = try XCTUnwrap(module.pages?.first)
         let page = ModuleCatalog.clonePage(definition, moduleID: module.id)
         XCTAssertEqual(page.name, "Presentation")
@@ -195,6 +195,52 @@ final class ModuleCatalogTests: XCTestCase {
             $0.computerID?.uuidString == "11111111-1111-1111-1111-111111111111" &&
                 $0.sourceText.hasPrefix("10.0.0.25|")
         })
+    }
+
+    func testUpdatingModulePageKeepsComputerTargetsForEveryComputerAction() throws {
+        let module = try JSONDecoder().decode(
+            PaperModuleManifest.self,
+            from: Data(contentsOf: moduleFixture("presentation-controls.json"))
+        )
+        let definition = try XCTUnwrap(module.pages?.first)
+        let pageComputer = "11111111-1111-1111-1111-111111111111"
+        let otherComputer = "22222222-2222-2222-2222-222222222222"
+        var existing = ModuleCatalog.clonePage(definition, moduleID: module.id)
+        existing.controls = existing.controls.map { $0.targetingComputer(pageComputer) }
+        existing.controls[1].action.computerID = otherComputer
+        existing.controls.removeLast()
+
+        let updated = ModuleCatalog.updatedPage(existing, from: definition, moduleID: module.id)
+
+        XCTAssertEqual(updated.controls.count, definition.page.controls.count)
+        XCTAssertEqual(updated.controls[1].action.computerID, otherComputer)
+        XCTAssertTrue(updated.controls.enumerated().allSatisfy { index, control in
+            index == 1 || control.action.computerID == pageComputer
+        })
+    }
+
+    func testRetargetingMatchesComputerIDsInAnyCase() {
+        let oldID = UUID()
+        let newID = UUID()
+        var control = RemoteControl(
+            title: "Status", symbol: "", kind: .textBox,
+            action: RemoteAction(type: .computerMedia, host: "")
+        )
+        control.action.computerID = oldID.uuidString.lowercased()
+        control.textBox = RemoteTextBox(source: .nowPlaying, computerID: oldID)
+        control.textBox?.tapAction = RemoteAction(type: .computerKey, host: "")
+        control.textBox?.tapAction?.computerID = oldID.uuidString
+
+        var moved = control
+        moved.retargetComputer(from: [oldID.uuidString], to: newID)
+        XCTAssertEqual(moved.action.computerID, newID.uuidString)
+        XCTAssertEqual(moved.textBox?.computerID, newID)
+        XCTAssertEqual(moved.textBox?.tapAction?.computerID, newID.uuidString)
+
+        control.retargetComputer(from: [oldID.uuidString], to: nil)
+        XCTAssertNil(control.action.computerID)
+        XCTAssertNil(control.textBox?.computerID)
+        XCTAssertNil(control.textBox?.tapAction?.computerID)
     }
 }
 

@@ -109,18 +109,7 @@ final class RemoteEditorStore: ObservableObject {
         })
         if !duplicateComputerIDs.isEmpty {
             profile.computers.removeAll { duplicateComputerIDs.contains($0.id.uuidString) }
-            for pageIndex in profile.pages.indices {
-                for controlIndex in profile.pages[pageIndex].controls.indices {
-                    if let computerID = profile.pages[pageIndex].controls[controlIndex].action.computerID,
-                       duplicateComputerIDs.contains(computerID) {
-                        profile.pages[pageIndex].controls[controlIndex].action.computerID = computer.id.uuidString
-                    }
-                    if let computerID = profile.pages[pageIndex].controls[controlIndex].textBox?.tapAction?.computerID,
-                       duplicateComputerIDs.contains(computerID) {
-                        profile.pages[pageIndex].controls[controlIndex].textBox?.tapAction?.computerID = computer.id.uuidString
-                    }
-                }
-            }
+            retargetControls(from: duplicateComputerIDs, to: computer.id)
         }
         profile.macHost = host
         profile.macPort = port
@@ -187,11 +176,14 @@ final class RemoteEditorStore: ObservableObject {
         selectedControlID = nil
     }
 
-    func addPage(_ page: RemotePage, openBuildsComputerID: String? = nil) {
+    /// Module pages always run on the computer that adds them.
+    func addPage(_ page: RemotePage) {
         guard profile.pages.count < 8 else { return }
+        if localComputerID == nil { addLocalComputer() }
         var page = page
-        let targetID = openBuildsComputerID ?? localComputerID
-        page.controls = page.controls.map { Self.targetingOpenBuilds($0, computerID: targetID) }
+        if let computerID = localComputerID {
+            page.controls = page.controls.map { $0.targetingComputer(computerID) }
+        }
         profile.pages.append(page)
         selectedPageID = page.id
         selectedControlID = nil
@@ -199,22 +191,6 @@ final class RemoteEditorStore: ObservableObject {
 
     private var localComputerID: String? {
         profile.computers.first(where: { $0.token == localComputer.token })?.id.uuidString
-    }
-
-    /// The paired computer running OpenBuilds CONTROL, preferring this one.
-    func openBuildsComputer() async -> RemoteComputer? {
-        let computers = profile.computers
-        let running = await withTaskGroup(of: UUID?.self) { group in
-            for computer in computers {
-                group.addTask { await OpenBuildsControlService.isRunning(on: computer.host) ? computer.id : nil }
-            }
-            var ids: Set<UUID> = []
-            for await id in group { if let id { ids.insert(id) } }
-            return ids
-        }
-        let localToken = localComputer.token
-        let ordered = computers.filter { $0.token == localToken } + computers.filter { $0.token != localToken }
-        return ordered.first { running.contains($0.id) }
     }
 
     private nonisolated static func isLoopback(_ host: String) -> Bool {
@@ -285,9 +261,11 @@ final class RemoteEditorStore: ObservableObject {
                             layoutUnitsUsed(on: profile.pages[pageIndex]) +
                                 layoutUnits(for: control, on: profile.pages[pageIndex]) <=
                                 profile.pages[pageIndex].gridColumns * profile.pages[pageIndex].gridRows else { return }
-        profile.pages[pageIndex].controls.append(
-            Self.targetingOpenBuilds(control, computerID: existingOpenBuildsComputerID ?? localComputerID)
-        )
+        var targeted = Self.targetingOpenBuilds(control, computerID: existingOpenBuildsComputerID ?? localComputerID)
+        if let localComputerID {
+            targeted = targeted.targetingComputer(localComputerID, replacingExisting: false)
+        }
+        profile.pages[pageIndex].controls.append(targeted)
         selectedControlID = control.id
     }
 
@@ -343,13 +321,16 @@ final class RemoteEditorStore: ObservableObject {
 
     func deleteComputer(_ id: UUID) {
         profile.computers.removeAll { $0.id == id }
+        retargetControls(from: [id.uuidString], to: nil)
+        synchronizeDefaultComputer()
+    }
+
+    private func retargetControls(from oldIDs: Set<String>, to newID: UUID?) {
         for pageIndex in profile.pages.indices {
-            for controlIndex in profile.pages[pageIndex].controls.indices
-            where profile.pages[pageIndex].controls[controlIndex].action.computerID == id.uuidString {
-                profile.pages[pageIndex].controls[controlIndex].action.computerID = nil
+            for controlIndex in profile.pages[pageIndex].controls.indices {
+                profile.pages[pageIndex].controls[controlIndex].retargetComputer(from: oldIDs, to: newID)
             }
         }
-        synchronizeDefaultComputer()
     }
 
     func addWLEDPage(name: String, host: String) {
@@ -432,10 +413,8 @@ final class RemoteEditorStore: ObservableObject {
 
     func addNetHomePage(unit: NetHomeUnit) {
         guard profile.pages.count < 8, !hasNetHomeControls(unitName: unit.name) else { return }
-        let computerID = profile.computers.first(where: {
-            $0.host.caseInsensitiveCompare(localComputer.host) == .orderedSame
-        })?.id.uuidString
-        let page = RemotePage.netHomeThermostat(unit: unit.name, computerID: computerID)
+        if localComputerID == nil { addLocalComputer() }
+        let page = RemotePage.netHomeThermostat(unit: unit.name, computerID: localComputerID)
         profile.pages.append(page)
         selectedPageID = page.id
         selectedControlID = nil

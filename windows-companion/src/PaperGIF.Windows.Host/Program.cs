@@ -75,6 +75,7 @@ internal static class Program
         System.Windows.Forms.Application.SetHighDpiMode(HighDpiMode.SystemAware);
         System.Windows.Forms.Application.EnableVisualStyles();
         System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
+        EditorTheme.ConfigureApplication();
         System.Windows.Forms.Application.Run(new TrayApplicationContext(
             configuration,
             app.Services.GetRequiredService<CompanionActivity>(),
@@ -126,12 +127,21 @@ internal static class Program
 
         app.MapPost("/home-accessories", async (HttpRequest request, [FromServices] HomeAccessoryCatalog catalog) =>
         {
-            if (request.ContentLength is not (> 0 and <= HomeAccessoryCatalog.MaximumRequestBytes))
+            if (request.ContentLength > HomeAccessoryCatalog.MaximumRequestBytes)
             {
                 return Results.Json(new { ok = false }, statusCode: StatusCodes.Status400BadRequest);
             }
-            using var reader = new StreamReader(request.Body);
-            if (HomeAccessoryCatalog.Validate(await reader.ReadToEndAsync()) is not { } accessories)
+            // Chunked bodies have no Content-Length, so bound the read itself.
+            var body = new byte[HomeAccessoryCatalog.MaximumRequestBytes + 1];
+            var length = 0;
+            int read;
+            while (length < body.Length &&
+                (read = await request.Body.ReadAsync(body.AsMemory(length))) > 0)
+            {
+                length += read;
+            }
+            if (length is 0 or > HomeAccessoryCatalog.MaximumRequestBytes ||
+                HomeAccessoryCatalog.Validate(System.Text.Encoding.UTF8.GetString(body, 0, length)) is not { } accessories)
             {
                 return Results.Json(new { ok = false }, statusCode: StatusCodes.Status400BadRequest);
             }

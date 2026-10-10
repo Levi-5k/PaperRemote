@@ -77,7 +77,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         updateItem = new ToolStripMenuItem(
             "Check for updates...",
             null,
-            async (_, _) => await CheckForUpdatesAsync(userInitiated: true));
+            (_, _) => window.ShowUpdates(checkNow: true));
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(openItem);
@@ -115,7 +115,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (updateBalloonShown)
             {
                 updateBalloonShown = false;
-                window.ShowAndActivate();
+                window.ShowUpdates(checkNow: false);
             }
         };
         _ = CheckForModuleUpdatesAsync(moduleCatalog);
@@ -180,92 +180,19 @@ internal sealed class TrayApplicationContext : ApplicationContext
             10_000,
             "paperGIF update available",
             updates.AppUpdate is not null
-                ? $"paperGIF {release.Version} is ready to install. Click to open paperGIF."
-                : $"M5Paper firmware {release.Version} is ready to install. Click to open paperGIF.",
+                ? $"paperGIF {release.Version} is ready to install. Click to see the update."
+                : $"M5Paper firmware {release.Version} is ready to install. Click to see the update.",
             ToolTipIcon.Info);
-    }
-
-    // Menu command: checks, then asks about each available update.
-    private async Task CheckForUpdatesAsync(bool userInitiated)
-    {
-        if (updates.IsBusy)
-        {
-            return;
-        }
-        await updates.RefreshAsync();
-        if (updates.Release is not { } release)
-        {
-            if (userInitiated && updates.Problem is { } problem)
-            {
-                MessageBox.Show(problem, "paperGIF update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-            return;
-        }
-        if (updates.AppUpdate is { } appUpdate && Confirm(
-            $"paperGIF {appUpdate.Version} is available",
-            $"You have {UpdateCoordinator.CurrentVersion}. paperGIF will download, verify, install, and restart.\n\n{appUpdate.Notes}",
-            "Install and restart?"))
-        {
-            await updates.InstallAppAsync();
-            ShowUpdateResult("paperGIF update");
-            return;
-        }
-        if (updates.FirmwareNeedsUsb)
-        {
-            MessageBox.Show(
-                $"This M5Paper's firmware is too old to update over Wi-Fi. Flash firmware {release.Version} over USB once; later updates install from here.",
-                "M5Paper needs a one-time USB update",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
-        }
-        else if (updates.FirmwareUpdate is { } firmwareUpdate && Confirm(
-            $"M5Paper firmware {firmwareUpdate.Version} is available",
-            $"The M5Paper has {updates.DeviceFirmware}. It shows its progress on screen and restarts when the update finishes.",
-            "Update the M5Paper now?"))
-        {
-            await updates.InstallFirmwareAsync();
-            ShowUpdateResult("paperGIF update");
-        }
-        else if (userInitiated && updates.AppUpdate is null && updates.FirmwareUpdate is null)
-        {
-            var firmwareLine = updates.DeviceFirmware is null
-                ? "M5Paper not found on the network, so its firmware was not checked"
-                : $"M5Paper firmware {updates.DeviceFirmware}";
-            MessageBox.Show(
-                $"paperGIF {UpdateCoordinator.CurrentVersion}\n{firmwareLine}\nLatest release: {release.Version}",
-                "paperGIF is up to date",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
-        }
-    }
-
-    private void ShowUpdateResult(string title)
-    {
-        if (updates.Problem is { } problem)
-        {
-            MessageBox.Show(problem, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-        else if (updates.Notice is { } notice)
-        {
-            MessageBox.Show(notice, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
     }
 
     private void UpdateMenuItemText()
     {
         var available = updates.AppUpdate ?? updates.FirmwareUpdate;
+        // Stays enabled while busy: it opens the Updates page, which shows progress.
         updateItem.Text = updates.Activity ?? (available is null
             ? "Check for updates..."
             : $"Install update {available.Version}...");
-        updateItem.Enabled = !updates.IsBusy;
     }
-
-    private static bool Confirm(string title, string message, string question) =>
-        MessageBox.Show(
-            $"{message}\n\n{question}",
-            title,
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Information) == DialogResult.Yes;
 
     protected override void ExitThreadCore()
     {
@@ -302,7 +229,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
             activityItem.Owner.BeginInvoke(() => HandleActionRecorded(sender, action));
             return;
         }
-        var actionName = string.IsNullOrWhiteSpace(action.Text) ? action.Type : action.Text;
+        var actionName = string.IsNullOrWhiteSpace(action.Text)
+            ? ActionDescriptions.TypeName(action.Type)
+            : ActionDescriptions.Detail(action.Text);
         activityItem.Text = $"{(action.Succeeded ? "Ran" : "Failed")}: {actionName}";
         var tooltip = $"paperGIF: {activityItem.Text}";
         notifyIcon.Text = tooltip[..Math.Min(tooltip.Length, 63)];

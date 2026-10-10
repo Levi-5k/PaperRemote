@@ -14,6 +14,8 @@ public sealed class RemoteIconGlyphsTests
         {
             using var path = RemoteIconGlyphs.CreatePath(name, bounds);
             Assert.NotNull(path);
+            // GetBounds includes Bezier control points, which may sit just outside the curve.
+            path.Flatten();
             var extent = path.GetBounds();
             Assert.True(extent.Width * extent.Height > 20, name);
             Assert.True(RectangleF.Inflate(bounds, 0.01f, 0.01f).Contains(extent), name);

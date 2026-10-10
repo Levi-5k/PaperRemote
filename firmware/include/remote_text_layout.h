@@ -49,8 +49,8 @@ inline ButtonLayout buttonLayout(int32_t width, int32_t height, bool hasIcon,
         result.iconX = padding + extent / 2;
         result.iconY = height / 2;
         result.title.x += extent + gap;
-        // Reserve the same space on BOTH sides: title center == button center.
-        result.title.width -= (extent + gap) * 2;
+        // Only the actual left icon consumes title space; keep the right padding.
+        result.title.width -= extent + gap;
     } else {
         result.iconX = width / 2;
         result.iconY = padding + extent / 2;
@@ -169,6 +169,37 @@ inline size_t nextCodepoint(const char* text, size_t offset, size_t length) {
 
 inline bool space(char c) { return c == ' ' || c == '\t' || c == '\r'; }
 
+inline uint32_t titleCodepoint(uint32_t code) {
+    return code == '\n' || code == '\r' ? ' ' : code;
+}
+
+// Single-span layout for callers that explicitly require one line.
+// Validate UTF-8 before calling either callback; align actual ink and bearings.
+template <typename Measure, typename Emit>
+bool singleLineInkLayout(const char* text, const Rect& area,
+                         uint8_t horizontalAlignment, uint8_t verticalAlignment,
+                         Measure measure, Emit emit, int32_t& textHeight, bool draw) {
+    textHeight = 0;
+    if (!text || area.width <= 0 || area.height <= 0) return false;
+    const size_t length = std::strlen(text);
+    for (size_t offset = 0; offset < length;) {
+        const size_t next = nextCodepoint(text, offset, length);
+        if (!next) return false;
+        offset = next;
+    }
+    if (!length) return true;
+    const Ink ink = measure(0, length);
+    textHeight = ink.height;
+    if (ink.width < 0 || ink.height < 0 || ink.width > area.width || ink.height > area.height)
+        return false;
+    if (draw && ink.width && ink.height) {
+        emit(0, length,
+            area.x + alignedOffset(area.width, ink.width, horizontalAlignment) - ink.left,
+            area.y + alignedOffset(area.height, ink.height, verticalAlignment) - ink.top);
+    }
+    return true;
+}
+
 // measure(start, byteCount) must measure the complete span, including glyph
 // bearings. emit(start, byteCount, width, lineIndex) receives whole UTF-8 spans.
 // No line-width array: even thousands of newlines cannot overrun local storage.
@@ -212,32 +243,89 @@ bool wrap(const char* text, int32_t width, int32_t height, int32_t lineHeight,
     return true;
 }
 
+// Button/ordinary-slider wrapping: only whitespace/newlines may break a line.
+// A word that does not fit fails the candidate font, never splits into glyphs.
+// Validate the entire string first, so malformed UTF-8 never reaches callbacks.
+template <typename Measure, typename Emit>
+bool wrapWords(const char* text, int32_t width, Measure measure, Emit emit) {
+    if (!text || width <= 0) return false;
+    const size_t length = std::strlen(text);
+    for (size_t offset = 0; offset < length;) {
+        const size_t next = nextCodepoint(text, offset, length);
+        if (!next) return false;
+        offset = next;
+    }
+    const auto whitespace = [](char c) {
+        return space(c) || c == '\v' || c == '\f';
+    };
+    size_t position = 0, line = 0;
+    while (position < length) {
+        while (position < length && whitespace(text[position])) ++position;
+        if (position == length) break;
+        const size_t start = position;
+        size_t end = start;
+        int32_t lineWidth = 0;
+        while (position < length && text[position] != '\n') {
+            const size_t wordStart = position;
+            while (position < length && !whitespace(text[position]) && text[position] != '\n') {
+                position = nextCodepoint(text, position, length);
+            }
+            const int32_t wordWidth = measure(wordStart, position - wordStart);
+            if (wordWidth < 0 || wordWidth > width) return false;
+            const int32_t candidate = measure(start, position - start);
+            if (candidate < 0) return false;
+            if (candidate > width) {
+                position = wordStart;
+                break;
+            }
+            end = position;
+            lineWidth = candidate;
+            while (position < length && whitespace(text[position])) ++position;
+        }
+        emit(start, end - start, lineWidth, line++);
+        if (position < length && text[position] == '\n') ++position;
+    }
+    return true;
+}
+
 // Measure and center each line's visible ink, not a font-wide envelope. Blank
 // lines keep their nominal height; no trailing interline gap enters the block.
 // emit receives the pen X and baseline Y relative to the supplied area.
 template <typename Measure, typename Emit>
 bool inkLayout(const char* text, const Rect& area, int32_t blankHeight, int32_t gap,
                uint8_t horizontalAlignment, uint8_t verticalAlignment,
-               Measure measure, Emit emit, int32_t& textHeight, bool draw) {
+               Measure measure, Emit emit, int32_t& textHeight, bool draw,
+               bool wordsOnly = false) {
     textHeight = 0;
     size_t count = 0;
     const auto width = [&](size_t start, size_t bytes) { return measure(start, bytes).width; };
-    if (!wrap(text, area.width, INT32_MAX, 1, width,
-        [&](size_t start, size_t bytes, int32_t, size_t line) {
+    const auto collect = [&](size_t start, size_t bytes, int32_t, size_t line) {
             const Ink ink = measure(start, bytes);
             textHeight += (line ? gap : 0) + (ink.height ? ink.height : blankHeight);
-        }, count) || area.height <= 0 || textHeight > area.height) return false;
+        };
+    const bool fits = wordsOnly ? wrapWords(text, area.width, width, collect)
+        : wrap(text, area.width, INT32_MAX, 1, width, collect, count);
+    if (!fits || area.height <= 0 || textHeight > area.height) return false;
     if (!draw) return true;
     int32_t top = area.y + alignedOffset(area.height, textHeight, verticalAlignment);
-    return wrap(text, area.width, INT32_MAX, 1, width,
-        [&](size_t start, size_t bytes, int32_t lineWidth, size_t) {
+    const auto output = [&](size_t start, size_t bytes, int32_t lineWidth, size_t) {
             const Ink ink = measure(start, bytes);
             emit(start, bytes,
                 area.x + alignedOffset(area.width, lineWidth, horizontalAlignment) - ink.left,
                 top - ink.top);
             top += (ink.height ? ink.height : blankHeight) + gap;
-        }, count);
+        };
+    return wordsOnly ? wrapWords(text, area.width, width, output)
+        : wrap(text, area.width, INT32_MAX, 1, width, output, count);
 }
+
+    template <typename Measure, typename Emit>
+    bool wordInkLayout(const char* text, const Rect& area, int32_t blankHeight, int32_t gap,
+               uint8_t horizontalAlignment, uint8_t verticalAlignment,
+               Measure measure, Emit emit, int32_t& textHeight, bool draw) {
+        return inkLayout(text, area, blankHeight, gap, horizontalAlignment, verticalAlignment,
+        measure, emit, textHeight, draw, true);
+    }
 
 // Search every size, not binary search: font rounding/wrapping can change at
 // different thresholds. Returns the largest tested size fitting BOTH axes.

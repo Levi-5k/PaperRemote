@@ -22,7 +22,7 @@ internal sealed class WindowsTextSourceResolver(
         var media = needsMediaSession
             ? await ReadMediaSessionAsync(cancellationToken)
             : null;
-        var openBuildsPositions = new Dictionary<string, OpenBuildsPosition?>(StringComparer.Ordinal);
+        Dictionary<string, OpenBuildsPosition?> openBuildsPositions = [with(StringComparer.Ordinal)];
         foreach (var host in request.Items
             .Where(item => item.Source == "openBuildsPosition")
             .Select(item => ParseOpenBuildsTarget(item.SourceText).Host)

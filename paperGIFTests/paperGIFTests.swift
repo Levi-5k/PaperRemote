@@ -8,6 +8,7 @@
 import CoreGraphics
 import Foundation
 import Testing
+import UIKit
 @testable import paperGIF
 
 struct paperGIFTests {
@@ -61,19 +62,23 @@ struct paperGIFTests {
 
     @Test func remotePreviewCentersTitleAndMeasuredVerticalGroupInsideSafeEdges() {
         for size in [CGSize(width: 38, height: 12), CGSize(width: 300, height: 80), CGSize(width: 100, height: 240)] {
-            for title in ["Go", "A longer label that wraps", ""] {
+            for title in ["Go", "A longer label that may use multiple lines", ""] {
                 let layout = PaperGIFRemotePreviewLabelFitting.layout(size: size, scale: 0.5, compact: false,
                                                                      hasTitle: !title.isEmpty)
                 let font = PaperGIFRemotePreviewLabelFitting.fontSize(for: title, in: layout.labelSize, maximum: layout.maximumFontSize)
                 let measured = PaperGIFRemotePreviewLabelFitting.measuredSize(title, fontSize: font, width: layout.labelSize.width)
                 let frames = layout.frames(in: size, measuredLabelHeight: measured.height)
-                #expect(abs(frames.label.midX - size.width / 2) < 0.0001)
                 if layout.horizontal {
+                    let extent = layout.iconSize + 2 * layout.iconHalo
+                    #expect(abs(layout.labelSize.width - (size.width - 2 * layout.padding - extent - layout.spacing)) < 0.0001)
+                    #expect(abs(frames.label.midX - (layout.padding + extent + layout.spacing + size.width - layout.padding) / 2) < 0.0001)
+                    #expect(abs(frames.label.maxX - (size.width - layout.padding)) < 0.0001)
                     #expect(abs(frames.label.midY - size.height / 2) < 0.0001)
                     if !title.isEmpty {
                         #expect(frames.label.minX >= frames.icon.maxX + layout.iconHalo + layout.spacing - 0.0001)
                     }
                 } else {
+                    #expect(abs(frames.label.midX - size.width / 2) < 0.0001)
                     let top = frames.icon.minY - layout.iconHalo
                     let bottom = title.isEmpty ? frames.icon.maxY + layout.iconHalo : frames.label.maxY
                     #expect(abs((top + bottom) / 2 - size.height / 2) < 0.0001)
@@ -93,16 +98,63 @@ struct paperGIFTests {
         #expect(noIcon.iconSize == 0 && noIcon.spacing == 0)
     }
 
+        @Test func remotePreviewWordWrappedMeasurementAndWholeWordShrink() {
+        #expect(PaperGIFRemotePreviewLabelFitting.normalizedTitle("Line one\r\nLine two\rLine three\u{2028}Line four") ==
+            "Line one\nLine two\nLine three\nLine four")
+        let bounds = CGSize(width: 80, height: 200)
+        let title = "Up Left Down Right"
+        #expect(PaperGIFRemotePreviewLabelFitting.fontSize(for: title, in: bounds, maximum: 24) == 24)
+        #expect(PaperGIFRemotePreviewLabelFitting.measuredSize(title, fontSize: 24, width: 80).height >
+            PaperGIFRemotePreviewLabelFitting.measuredSize("Go", fontSize: 24, width: 80).height)
+        #expect(PaperGIFRemotePreviewLabelFitting.measuredSize("Go\n\nGo", fontSize: 24, width: 80).height >
+            PaperGIFRemotePreviewLabelFitting.measuredSize("Go\nGo", fontSize: 24, width: 80).height)
+        for word in ["Supercalifragilisticexpialidocious", "第一行很长的按钮标题第二行", "word-with/slashes"] {
+            let rejected = PaperGIFRemotePreviewLabelFitting.measuredSize(word, fontSize: 24, width: 80)
+            #expect(rejected.width > 80 && rejected.height.isInfinite)
+            let fitted = PaperGIFRemotePreviewLabelFitting.fontSize(for: word, in: bounds, maximum: 24)
+            #expect(fitted > 0 && fitted < 24)
+            #expect(PaperGIFRemotePreviewLabelFitting.widestWordWidth(word, fontSize: fitted) <= 80)
+            #expect(PaperGIFRemotePreviewLabelFitting.measuredSize(word, fontSize: fitted, width: 80).height ==
+                PaperGIFRemotePreviewLabelFitting.measuredSize("Go", fontSize: fitted, width: 80).height)
+        }
+        for title in ["Jog X Negative Y Positive", "Supercalifragilisticexpialidocious",
+                      "第一行很长的按钮标题第二行", "Line one\nLine two\nLine three"] {
+            let measured = PaperGIFRemotePreviewLabelFitting.measuredSize(title, fontSize: 24, width: 20)
+            #expect(measured.width > 20)
+            #expect(measured.height.isInfinite)
+            for bounds in [CGSize(width: 20, height: 100), CGSize(width: 100, height: 5)] {
+                let fitted = PaperGIFRemotePreviewLabelFitting.fontSize(for: title, in: bounds, maximum: 24)
+                #expect(fitted > 0 && fitted < 24)
+                #expect(PaperGIFRemotePreviewLabelFitting.widestWordWidth(title, fontSize: fitted) <= bounds.width)
+                let actual = PaperGIFRemotePreviewLabelFitting.measuredSize(title, fontSize: fitted, width: bounds.width)
+                #expect(actual.width <= bounds.width && actual.height <= bounds.height)
+                let larger = PaperGIFRemotePreviewLabelFitting.measuredSize(title, fontSize: fitted + 0.001, width: bounds.width)
+                #expect(larger.width > bounds.width || larger.height > bounds.height)
+            }
+        }
+        for hasIcon in [false, true] {
+            let size = CGSize(width: 300, height: 80)
+            let layout = PaperGIFRemotePreviewLabelFitting.layout(size: size, scale: 1, compact: true, hasIcon: hasIcon)
+            for title in ["Go", "Up Left", "Play"] {
+                #expect(PaperGIFRemotePreviewLabelFitting.fontSize(for: title, in: layout.labelSize, maximum: layout.maximumFontSize) == 24)
+            }
+            if !hasIcon {
+                #expect(layout.labelSize.width == size.width - 2 * layout.padding)
+                #expect(layout.frames(in: size, measuredLabelHeight: 20).label.midX == size.width / 2)
+            }
+        }
+    }
+
     @Test @MainActor func mediaSourceSelectionPreservesSeekSliderAndOutline() throws {
         var control = PaperGIFRemoteControl(
             title: "Music", symbol: "music.note", tintHex: "202020", kind: .slider,
             gridWidth: 2, gridHeight: 1, sliderOutlineInsetPixels: 7,
-            action: .init(type: .macMedia, text: "seek", value: 123),
+            action: .init(type: .computerMedia, text: "seek", value: 123),
             layoutSlot: 4,
             textBox: .init(source: .nowPlaying, textSize: .large,
                            horizontalAlignment: .center, verticalAlignment: .bottom)
         )
-        for source in [PaperGIFRemoteActionType.iPhoneMedia, .macMedia] {
+        for source in [PaperGIFRemoteActionType.iPhoneMedia, .computerMedia] {
             let previousType = control.action.type
             control.action.type = source
             control.applyEditorActionDefaults(previousType: previousType)
@@ -121,7 +173,7 @@ struct paperGIFTests {
     }
 
     @Test @MainActor func newSliderKeepsOutlineWhenMediaSourceIsSelected() {
-        for source in [PaperGIFRemoteActionType.macMedia, .iPhoneMedia] {
+        for source in [PaperGIFRemoteActionType.computerMedia, .iPhoneMedia] {
             var control = PaperGIFRemoteControl(
                 title: "Slider", symbol: "", tintHex: "202020", kind: .slider,
                 sliderOutlineInsetPixels: 3,
@@ -143,7 +195,7 @@ struct paperGIFTests {
         control.kind = .slider
         control.sliderOutlineInsetPixels = 5
         let previousType = control.action.type
-        control.action.type = .macMedia
+        control.action.type = .computerMedia
         control.applyEditorActionDefaults(previousType: previousType)
         #expect(control.kind == .slider)
         #expect(control.action.text == "volume")
@@ -154,7 +206,7 @@ struct paperGIFTests {
         let computerID = UUID()
         var control = PaperGIFRemoteControl.button(
             title: "Music", symbol: "music.note",
-            action: .init(type: .macMedia, text: "playPause", computerID: computerID.uuidString)
+            action: .init(type: .computerMedia, text: "playPause", computerID: computerID.uuidString)
         )
         control.setEditorMediaCommand("seek")
         #expect(control.kind == .slider)
@@ -173,11 +225,11 @@ struct paperGIFTests {
     @Test @MainActor func mediaTapActionDoesNotConvertTextBoxToSlider() {
         var control = PaperGIFRemoteControl(
             title: "Text", symbol: "", tintHex: "202020", kind: .textBox,
-            action: .init(type: .macMedia, text: "seek"),
+            action: .init(type: .computerMedia, text: "seek"),
             textBox: .init(source: .staticText, sourceText: "Keep this text")
         )
         control.action.type = .iPhoneMedia
-        control.applyEditorActionDefaults(previousType: .macMedia)
+        control.applyEditorActionDefaults(previousType: .computerMedia)
         control.setEditorMediaCommand("volume")
         #expect(control.kind == .textBox)
         #expect(control.textBox?.source == .staticText)
@@ -188,10 +240,10 @@ struct paperGIFTests {
         var control = PaperGIFRemoteControl.button(
             title: "Control", symbol: "", action: .init(type: .netHomeTemperature)
         )
-        control.applyEditorActionDefaults(previousType: .macMedia)
+        control.applyEditorActionDefaults(previousType: .computerMedia)
         #expect(control.kind == .slider)
         #expect(control.action.value == 22 && control.action.valueTenths == 220)
-        control.action.type = .macKey
+        control.action.type = .computerKey
         control.applyEditorActionDefaults(previousType: .netHomeTemperature)
         #expect(control.kind == .button)
     }
@@ -260,7 +312,7 @@ struct paperGIFTests {
                 horizontalAlignment: .center,
                 verticalAlignment: .bottom,
                 tapBehavior: .action,
-                tapAction: .init(type: .macMedia, text: "playPause"),
+                tapAction: .init(type: .computerMedia, text: "playPause"),
                 refreshIntervalSeconds: 5
             )
         )

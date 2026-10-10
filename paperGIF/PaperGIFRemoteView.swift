@@ -382,7 +382,7 @@ struct PaperGIFRemoteView: View {
         } header: {
             Text("Computers")
         } footer: {
-            Text("Run paperGIF Mac, select a discovered computer, then approve the pairing request on that Mac. Individual controls can target any paired computer.")
+            Text("Run the paperGIF companion on your Mac or PC, select a discovered computer, then approve the pairing request on that computer. Individual controls can target any paired computer.")
         }
     }
 
@@ -477,7 +477,7 @@ struct PaperGIFRemoteView: View {
         } header: {
             Text("Air Conditioners")
         } footer: {
-            Text("Sign in to NetHome Plus on a paired Mac. Adding a unit creates power, setpoint, fan, mode, and sensor auto controls.")
+            Text("Sign in to NetHome Plus on a paired computer. Adding a unit creates power, setpoint, fan, mode, and sensor auto controls.")
         }
     }
 
@@ -1236,7 +1236,7 @@ struct PaperGIFRemoteView: View {
                         : "Connected to \(computer.name)."
                 }
             } catch {
-                computerStatus = "Couldn’t reach \(name). Make sure paperGIF Mac is running."
+                computerStatus = "Couldn’t reach \(name). Make sure its paperGIF companion is running."
             }
         }
     }
@@ -1576,7 +1576,7 @@ struct PaperGIFRemoteView: View {
     private func refreshNetHomeUnits() async {
         guard !profile.computers.isEmpty else {
             netHomeUnits = []
-            netHomeStatus = "Pair a Mac to load NetHome Plus units."
+            netHomeStatus = "Pair a computer to load NetHome Plus units."
             return
         }
         isLoadingNetHomeUnits = true
@@ -2045,7 +2045,7 @@ private struct PaperGIFRemoteTabsPreview: View {
                 RoundedRectangle(cornerRadius: 10 * scale)
                     .stroke(Color.black, lineWidth: max(1, scale))
             } else if control.kind == .slider {
-                if control.action.type == .macMedia && control.action.text == "seek" {
+                if control.action.type == .computerMedia && control.action.text == "seek" {
                     Text(textBoxPreview(for: control))
                         .font(.system(size: textBoxPreviewSize(for: control), weight: .semibold))
                         .multilineTextAlignment(textBoxTextAlignment(for: control))
@@ -2076,7 +2076,7 @@ private struct PaperGIFRemoteTabsPreview: View {
         switch textBox.source {
         case .staticText: return textBox.sourceText
         case .dateTime: return "Sep 2, 18:54"
-        case .macScript, .macShortcut: return textBox.placeholder == "Unavailable" ? "Command output" : textBox.placeholder
+        case .computerScript, .appleShortcut: return textBox.placeholder == "Unavailable" ? "Command output" : textBox.placeholder
         case .controlValue:
             if control.action.type == .netHomeTemperature {
                 return "\(temperatureUnit.displayValue(celsiusTenths: control.action.valueTenths ?? control.action.value * 10)) \(temperatureUnit.symbol)"
@@ -2371,6 +2371,15 @@ private struct PaperGIFRemoteControlEditor: View {
     private let mediaCommands = ["playPause", "previous", "next", "seek", "volumeUp", "volumeDown", "volume", "mute"]
     private let modifierNames = ["command", "option", "control", "shift"]
 
+    // Windows companions map Command to the Windows key and Option to Alt.
+    private func modifierTitle(_ modifier: String) -> String {
+        switch modifier {
+        case "command": "Command / Win"
+        case "option": "Option / Alt"
+        default: modifier.capitalized
+        }
+    }
+
     var body: some View {
         Form {
             Section("Appearance") {
@@ -2466,8 +2475,8 @@ private struct PaperGIFRemoteControlEditor: View {
             Picker("Source", selection: textBoxBinding(\.source)) {
                 Text("Static text").tag(PaperGIFRemoteTextSource.staticText)
                 Text("Date and time").tag(PaperGIFRemoteTextSource.dateTime)
-                Text("Mac script output").tag(PaperGIFRemoteTextSource.macScript)
-                Text("Shortcut output").tag(PaperGIFRemoteTextSource.macShortcut)
+                Text("Script output").tag(PaperGIFRemoteTextSource.computerScript)
+                Text("Apple Shortcut output (Mac only)").tag(PaperGIFRemoteTextSource.appleShortcut)
                 Text("Control value").tag(PaperGIFRemoteTextSource.controlValue)
                 Text("Now playing").tag(PaperGIFRemoteTextSource.nowPlaying)
                 Text("OpenBuilds position").tag(PaperGIFRemoteTextSource.openBuildsPosition)
@@ -2481,11 +2490,11 @@ private struct PaperGIFRemoteControlEditor: View {
                 TextField("Date format", text: textBoxBinding(\.dateFormat))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-            case .macScript:
+            case .computerScript:
                 macTextSourceComputerPicker
                 TextField("Approved shell command", text: textBoxBinding(\.sourceText), axis: .vertical)
                     .lineLimit(2...6)
-            case .macShortcut:
+            case .appleShortcut:
                 macTextSourceComputerPicker
                 TextField("Shortcut name", text: textBoxBinding(\.sourceText))
             case .controlValue:
@@ -2584,7 +2593,7 @@ private struct PaperGIFRemoteControlEditor: View {
         }
 
         switch control.action.type {
-        case .iPhoneMedia, .macMedia:
+        case .iPhoneMedia, .computerMedia:
             Picker("Command", selection: mediaCommandBinding) {
                 ForEach(mediaCommands, id: \.self) { Text(mediaTitle($0)).tag($0) }
             }
@@ -2616,31 +2625,26 @@ private struct PaperGIFRemoteControlEditor: View {
             Text("Runs through Apple Home on the connected iPhone.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-        case .macKey:
+        case .computerKey:
             TextField("Key", text: $control.action.text)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
             ForEach(modifierNames, id: \.self) { modifier in
-                Toggle(modifier.capitalized, isOn: modifierBinding(modifier))
+                Toggle(modifierTitle(modifier), isOn: modifierBinding(modifier))
             }
-        case .macOpen:
+        case .computerOpen:
             Picker("Application", selection: applicationSelectionBinding) {
                 Text("Choose Application").tag("")
                 if !control.action.text.isEmpty &&
                     !applicationCatalog.applications.contains(where: { $0.path == control.action.text }) {
-                    Text("Custom Target").tag(control.action.text)
+                    Text("Custom path or URL").tag(control.action.text)
                 }
                 ForEach(applicationCatalog.applications) { application in
                     Text(application.name).tag(application.path)
                 }
             }
             .task(id: selectedApplicationComputerKey) {
-                await applicationCatalog.load(from: selectedApplicationComputer)
-                let loadedIcon = applicationCatalog.applications
-                    .first(where: { $0.path == control.action.text })?.iconBitmap
-                if control.iconBitmap != loadedIcon {
-                    control.iconBitmap = loadedIcon
-                }
+                await syncApplicationIcon(force: false)
             }
             if applicationCatalog.isLoading {
                 HStack {
@@ -2648,18 +2652,23 @@ private struct PaperGIFRemoteControlEditor: View {
                     Text("Loading applications…")
                         .foregroundStyle(.secondary)
                 }
-            } else if let message = applicationCatalog.message {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            } else {
+                if let message = applicationCatalog.message {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Reload Applications", systemImage: "arrow.clockwise") {
+                    Task { await syncApplicationIcon(force: true) }
+                }
             }
             TextField("App path, bundle ID, or URL", text: applicationTargetBinding)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-        case .macShortcut:
+        case .appleShortcut:
             TextField("Shortcut name", text: $control.action.text)
-        case .macScript:
-            TextField("Shell command", text: $control.action.text, axis: .vertical)
+        case .computerScript:
+            TextField("Approved script command", text: $control.action.text, axis: .vertical)
                 .lineLimit(3...8)
         case .openBuilds:
             TextField("CONTROL address", text: $control.action.host)
@@ -3021,7 +3030,7 @@ private struct PaperGIFRemoteControlEditor: View {
 
     @ViewBuilder private func scheduleFunctionFields(_ entry: PaperGIFRemoteScheduleEntry) -> some View {
         switch control.action.type {
-        case .iPhoneMedia, .macMedia:
+        case .iPhoneMedia, .computerMedia:
             Picker("Command", selection: scheduleTextBinding(entry.id)) {
                 ForEach(mediaCommands, id: \.self) { Text(mediaTitle($0)).tag($0) }
             }
@@ -3091,11 +3100,11 @@ private struct PaperGIFRemoteControlEditor: View {
     }
 
     private var scheduleUsesText: Bool {
-        [.macMedia, .wledPower, .netHomePower, .netHomeMode, .netHomeAuto].contains(control.action.type)
+        [.computerMedia, .wledPower, .netHomePower, .netHomeMode, .netHomeAuto].contains(control.action.type)
     }
 
     private var scheduleUsesValue: Bool {
-        [.macMedia, .wledPreset, .wledBrightness, .netHomeTemperature,
+        [.computerMedia, .wledPreset, .wledBrightness, .netHomeTemperature,
          .netHomeTemperatureStep, .netHomeFan].contains(control.action.type)
     }
 
@@ -3267,7 +3276,7 @@ private struct PaperGIFRemoteControlEditor: View {
                 var textBox = control.textBox ?? PaperGIFRemoteTextBox()
                 textBox.computerID = UUID(uuidString: identifier)
                 control.textBox = textBox
-                if [.macMedia, .macScript, .macShortcut, .openBuilds].contains(control.action.type) {
+                if [.computerMedia, .computerScript, .appleShortcut, .openBuilds].contains(control.action.type) {
                     control.action.computerID = identifier.isEmpty ? nil : identifier
                 }
             }
@@ -3276,7 +3285,7 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private var supportsAutomaticRefresh: Bool {
         switch control.textBox?.source ?? .staticText {
-        case .dateTime, .macScript, .macShortcut, .nowPlaying, .openBuildsPosition:
+        case .dateTime, .computerScript, .appleShortcut, .nowPlaying, .openBuildsPosition:
             true
         case .staticText, .controlValue:
             false
@@ -3443,7 +3452,7 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private var isMacAction: Bool {
         switch control.action.type {
-        case .macMedia, .macKey, .macOpen, .macShortcut, .macScript, .openBuilds,
+        case .computerMedia, .computerKey, .computerOpen, .appleShortcut, .computerScript, .openBuilds,
                .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
              .netHomeMode, .netHomeFan, .netHomeAuto, .module:
             true
@@ -3521,7 +3530,7 @@ private struct PaperGIFRemoteControlEditor: View {
             set: {
                 control.action.computerID = $0.isEmpty ? nil : $0
                 if let source = control.textBox?.source,
-                   [.macScript, .macShortcut, .nowPlaying, .openBuildsPosition].contains(source) {
+                   [.computerScript, .appleShortcut, .nowPlaying, .openBuildsPosition].contains(source) {
                     control.textBox?.computerID = UUID(uuidString: $0)
                 }
                 control.iconBitmap = nil
@@ -3529,13 +3538,30 @@ private struct PaperGIFRemoteControlEditor: View {
         )
     }
 
+    private func syncApplicationIcon(force: Bool) async {
+        // A failed load must not clear an icon that was saved from an earlier successful one.
+        guard await applicationCatalog.load(from: selectedApplicationComputer, force: force) else { return }
+        let loadedIcon = applicationCatalog.applications
+            .first(where: { $0.path == control.action.text })?.iconBitmap
+        if control.iconBitmap != loadedIcon {
+            control.iconBitmap = loadedIcon
+        }
+    }
+
     private var applicationSelectionBinding: Binding<String> {
         Binding(
             get: { control.action.text },
             set: { path in
+                guard !path.isEmpty else { return }
+                let previousName = applicationCatalog.applications.first(where: { $0.path == control.action.text })?.name
+                let application = applicationCatalog.applications.first(where: { $0.path == path })
                 control.action.text = path
-                control.iconBitmap = applicationCatalog.applications
-                    .first(where: { $0.path == path })?.iconBitmap
+                control.iconBitmap = application?.iconBitmap
+                let title = control.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let name = application?.name,
+                   title.isEmpty || title == "Open App or URL" || title == previousName {
+                    control.title = name
+                }
             }
         )
     }
@@ -3622,7 +3648,7 @@ enum PaperGIFRemotePreviewLabelFitting {
         let labelSize: CGSize
         let maximumFontSize: CGFloat
 
-        /// Frames are in button coordinates; the title stays button-centered horizontally.
+        /// Horizontal titles are centered in the space remaining after the icon and halo.
         func frames(in size: CGSize, measuredLabelHeight: CGFloat) -> (icon: CGRect, label: CGRect) {
             let textHeight = min(labelSize.height, max(0, measuredLabelHeight))
             let extent = iconSize > 0 ? iconSize + 2 * iconHalo : 0
@@ -3631,7 +3657,7 @@ enum PaperGIFRemotePreviewLabelFitting {
                 let iconX = textHeight > 0 ? padding + iconHalo : (size.width - iconSize) / 2
                 return (
                     CGRect(x: iconX, y: (size.height - iconSize) / 2, width: iconSize, height: iconSize),
-                    CGRect(x: (size.width - labelSize.width) / 2, y: (size.height - textHeight) / 2,
+                    CGRect(x: padding + extent + spacing, y: (size.height - textHeight) / 2,
                            width: labelSize.width, height: textHeight)
                 )
             }
@@ -3663,34 +3689,55 @@ enum PaperGIFRemotePreviewLabelFitting {
         return Layout(
             horizontal: horizontal, padding: padding, spacing: spacing, iconSize: iconSize,
             iconHalo: halo,
-            labelSize: CGSize(width: horizontal ? max(0, innerWidth - 2 * (iconExtent + spacing)) : innerWidth,
+            labelSize: CGSize(width: horizontal ? max(0, innerWidth - iconExtent - spacing) : innerWidth,
                               height: horizontal ? innerHeight : max(0, innerHeight - iconExtent - spacing)),
             maximumFontSize: CGFloat(min(24, max(9, maxButtonTextSize))) * scale
         )
     }
 
+    static func normalizedTitle(_ title: String) -> String {
+        title.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: .newlines).joined(separator: "\n")
+    }
+
+    static func widestWordWidth(_ title: String, fontSize: CGFloat) -> CGFloat {
+        guard fontSize > 0, fontSize.isFinite else { return 0 }
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+        return title.split(whereSeparator: { $0.isWhitespace }).map {
+            ceil((String($0) as NSString).size(withAttributes: [.font: font]).width)
+        }.max() ?? 0
+    }
+
     static func measuredSize(_ title: String, fontSize: CGFloat, width: CGFloat) -> CGSize {
-        guard !title.isEmpty, fontSize > 0, fontSize.isFinite, width > 0, width.isFinite else { return .zero }
+        guard !title.isEmpty, fontSize > 0, fontSize.isFinite else { return .zero }
+        // Use the same safe whole-point text width as the SwiftUI frame.
+        let width = floor(width)
+        guard width > 0, width.isFinite else { return CGSize(width: CGFloat.infinity, height: CGFloat.infinity) }
+        // Reject character fallback BEFORE asking the native engine to wrap.
+        let wordWidth = widestWordWidth(title, fontSize: fontSize)
+        guard wordWidth <= width else { return CGSize(width: wordWidth, height: .infinity) }
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
         // Reserve SwiftUI's rounded baseline/descent, not a shorter native line fragment.
         paragraph.minimumLineHeight = round(font.ascender) + ceil(-font.descender) + ceil(font.leading)
-        // Match SwiftUI's native word wrapping, including character fallback for long words.
         paragraph.lineBreakMode = .byWordWrapping
-        return (title as NSString).boundingRect(
+        let measured = (normalizedTitle(title) as NSString).boundingRect(
             with: CGSize(width: width, height: CGFloat.greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font,
                          .paragraphStyle: paragraph],
             context: nil
         ).size
+        // Reserve SwiftUI's rounded intrinsic dimensions for the complete multiline label.
+        return CGSize(width: ceil(measured.width), height: ceil(measured.height))
     }
 
     static func fontSize(for title: String, in bounds: CGSize, maximum: CGFloat) -> CGFloat {
         guard bounds.width > 0, bounds.height > 0, bounds.width.isFinite, bounds.height.isFinite,
               maximum > 0, maximum.isFinite else { return 0 }
         func fits(_ size: CGFloat) -> Bool {
+            guard widestWordWidth(title, fontSize: size) <= bounds.width else { return false }
             let measured = measuredSize(title, fontSize: size, width: bounds.width)
             return measured.width <= bounds.width && measured.height <= bounds.height
         }
@@ -3748,12 +3795,13 @@ private struct PaperGIFRemotePreviewLabel: View {
     private func label(size: CGSize, fontSize: CGFloat) -> some View {
         Group {
             if fontSize > 0 && !control.title.isEmpty {
-                Text(verbatim: control.title)
+                Text(verbatim: PaperGIFRemotePreviewLabelFitting.normalizedTitle(control.title))
                     .font(Font(UIFont.systemFont(ofSize: fontSize, weight: .semibold)))
                     .lineLimit(nil)
                     .allowsTightening(false)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: floor(size.width))
             }
         }
         .frame(width: size.width, height: control.title.isEmpty ? 0 : size.height)
@@ -3830,20 +3878,21 @@ private final class PaperGIFMacApplicationCatalog: ObservableObject {
 
     private var loadedConfigurationKey: String?
 
-    func load(from computer: PaperGIFRemoteComputer?) async {
+    /// Returns true when `applications` reflects a successful load from `computer`.
+    @discardableResult
+    func load(from computer: PaperGIFRemoteComputer?, force: Bool = false) async -> Bool {
         guard let computer else {
             applications = []
-            message = "Pair a Mac to load its applications."
+            message = "Pair a computer to load its applications."
             loadedConfigurationKey = nil
-            return
+            return false
         }
         let configurationKey = "\(computer.id.uuidString)|\(computer.host)|\(computer.port)|\(computer.token)"
-        guard loadedConfigurationKey != configurationKey else { return }
+        guard force || loadedConfigurationKey != configurationKey else { return !isLoading }
         loadedConfigurationKey = configurationKey
-
+        applications = []
         isLoading = true
         message = nil
-        defer { isLoading = false }
 
         var components = URLComponents()
         components.scheme = "http"
@@ -3851,8 +3900,8 @@ private final class PaperGIFMacApplicationCatalog: ObservableObject {
         components.port = computer.port
         components.path = "/applications"
         guard let url = components.url else {
-            message = "This computer address isn’t valid."
-            return
+            fail(configurationKey, "This computer address isn’t valid.")
+            return false
         }
 
         var request = URLRequest(url: url)
@@ -3860,17 +3909,32 @@ private final class PaperGIFMacApplicationCatalog: ObservableObject {
         request.setValue("Bearer \(computer.token)", forHTTPHeaderField: "Authorization")
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
+            guard loadedConfigurationKey == configurationKey else { return false }
             guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
-                message = "Couldn’t load applications from \(computer.name)."
-                return
+                fail(configurationKey, "Couldn’t load applications from \(computer.name).")
+                return false
             }
-            applications = try JSONDecoder().decode([PaperGIFMacApplication].self, from: data)
-            if applications.isEmpty {
-                message = "No applications were found on \(computer.name)."
-            }
+            let decoded = try JSONDecoder().decode([PaperGIFMacApplication].self, from: data)
+            applications = decoded
+            isLoading = false
+            message = decoded.isEmpty ? "No applications were found on \(computer.name)." : nil
+            return true
+        } catch is DecodingError {
+            fail(configurationKey, "\(computer.name) sent an application list this app can’t read.")
         } catch {
-            message = "Couldn’t reach \(computer.name). Make sure paperGIF Mac is running."
+            fail(configurationKey, Task.isCancelled
+                ? nil
+                : "Couldn’t reach \(computer.name). Make sure its paperGIF companion is running.")
         }
+        return false
+    }
+
+    // Failures are not cached so the next appearance or Reload tries again.
+    private func fail(_ configurationKey: String, _ failureMessage: String?) {
+        guard loadedConfigurationKey == configurationKey else { return }
+        loadedConfigurationKey = nil
+        isLoading = false
+        message = failureMessage
     }
 }
 

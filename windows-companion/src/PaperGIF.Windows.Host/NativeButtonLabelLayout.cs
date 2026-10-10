@@ -7,7 +7,7 @@ namespace PaperGIF.Windows.Host;
 internal sealed class NativeButtonLabelLayout : IDisposable
 {
     private NativeButtonLabelLayout(string text, Font font, RectangleF contentBounds,
-        SizeF measuredSize, int nativeSize, bool fits)
+        SizeF measuredSize, float nativeSize, bool fits)
     {
         Text = text;
         Font = font;
@@ -21,48 +21,67 @@ internal sealed class NativeButtonLabelLayout : IDisposable
     public Font Font { get; }
     public RectangleF ContentBounds { get; }
     public SizeF MeasuredSize { get; }
-    public int NativeSize { get; }
+    public float NativeSize { get; }
     public bool Fits { get; }
     public RectangleF TextBounds => new(ContentBounds.Left,
         ContentBounds.Top + (ContentBounds.Height - MeasuredSize.Height) / 2,
         ContentBounds.Width, MeasuredSize.Height);
 
-    internal static StringFormat CreateFormat() => new(StringFormat.GenericTypographic)
+    internal static StringFormat CreateFormat(bool singleLine = false) => new(StringFormat.GenericTypographic)
     {
         Alignment = StringAlignment.Center,
         LineAlignment = StringAlignment.Center,
         Trimming = StringTrimming.None,
-        FormatFlags = StringFormatFlags.MeasureTrailingSpaces,
+        FormatFlags = StringFormatFlags.MeasureTrailingSpaces |
+            (singleLine ? StringFormatFlags.NoWrap : 0),
     };
 
     public static NativeButtonLabelLayout Fit(Graphics graphics, string text,
-        RectangleF contentBounds, int maximumNativeSize, float screenScale)
+        RectangleF contentBounds, int maximumNativeSize, float screenScale, bool wordOnlyWrap = true)
     {
         var maximum = Math.Clamp(maximumNativeSize,
             RemoteProfile.MinimumButtonTextSize, RemoteProfile.MaximumButtonTextSize);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(screenScale);
         using var format = CreateFormat();
-        for (var size = maximum; size >= RemoteProfile.MinimumButtonTextSize; size--)
+        using var wordFormat = CreateFormat(singleLine: true);
+        var words = wordOnlyWrap
+            ? text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            : Array.Empty<string>();
+        var validBounds = contentBounds.Width > 0 && contentBounds.Height > 0;
+        for (float size = maximum; ;)
         {
             // Device coordinates are 540×960 pixels. Pixel units avoid adding Windows
             // monitor DPI to the preview's screen.Width / 540 scale a second time.
             var font = new Font("Segoe UI Variable Text Semibold", size * screenScale,
                 FontStyle.Regular, GraphicsUnit.Pixel);
-            // Measure with unrestricted height, not the draw rectangle: otherwise a
-            // truncated last line could be mistaken for a label that fully fits.
+            // Native wrapping can fall back to breaking an oversized word. Reject
+            // that font first, so buttons/ordinary sliders wrap only between words.
+            var widestWord = 0f;
+            foreach (var word in words)
+            {
+                widestWord = Math.Max(widestWord,
+                    graphics.MeasureString(word, font, PointF.Empty, wordFormat).Width);
+            }
+            // Measure the complete wrapped block with unrestricted height so a
+            // truncated last line cannot be mistaken for a fully fitting label.
+            // Text boxes/seek labels keep their existing measurement/minimum size.
             var measured = graphics.MeasureString(text, font,
-                new SizeF(Math.Max(1, contentBounds.Width), 1_000_000), format,
+                new SizeF(Math.Max(wordOnlyWrap ? float.Epsilon : 1, contentBounds.Width), 1_000_000), format,
                 out var charactersFitted, out _);
-            var fits = contentBounds.Width > 0 && contentBounds.Height > 0 &&
+            var fits = validBounds && widestWord <= contentBounds.Width &&
                 charactersFitted == text.Length && measured.Width <= contentBounds.Width &&
                 measured.Height <= contentBounds.Height;
-            if (fits || size == RemoteProfile.MinimumButtonTextSize)
+            // The user setting is a maximum, not a minimum fitting size. Continue
+            // below 9 (and below 1 for exceptionally long words), using native fonts.
+            var nextSize = size > 1 ? size - 1 : size / 2;
+            if (fits || !validBounds || (!wordOnlyWrap && size == RemoteProfile.MinimumButtonTextSize) ||
+                nextSize * screenScale <= 0)
             {
                 return new NativeButtonLabelLayout(text, font, contentBounds, measured, size, fits);
             }
             font.Dispose();
+            size = nextSize;
         }
-        throw new InvalidOperationException("No native button font candidate was evaluated.");
     }
 
     public void Draw(Graphics graphics, Brush brush)

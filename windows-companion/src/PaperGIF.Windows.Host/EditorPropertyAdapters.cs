@@ -1,9 +1,10 @@
 using System.ComponentModel;
+using System.Globalization;
 using PaperGIF.Windows.Core.Models;
 
 namespace PaperGIF.Windows.Host;
 
-internal sealed class ControlProperties(RemoteControl control, RemotePage page, RemoteEditorStore store)
+internal sealed class ControlProperties(RemoteControl control, RemotePage page, RemoteEditorStore store) : ICustomTypeDescriptor
 {
     [Category("Appearance")]
     public string Title { get => control.Title; set { control.Title = value; store.Commit(); } }
@@ -14,7 +15,7 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
     [Category("Appearance"), DisplayName("Tint (hex)")]
     public string TintHex { get => control.TintHex; set { control.TintHex = value; store.Commit(); } }
 
-    [Category("Layout")]
+    [Category("Layout"), TypeConverter(typeof(RemoteControlKindNameConverter))]
     public RemoteControlKind Kind
     {
         get => control.Kind;
@@ -88,14 +89,30 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
         set { control.SliderOutlineInsetPixels = Math.Clamp(value, 1, 32); store.Commit(); }
     }
 
-    [Category("Action"), DisplayName("Type")]
-    public RemoteActionType ActionType { get => control.Action.Type; set { control.Action.Type = value; store.Commit(); } }
+    [Category("Action"), DisplayName("Type"), TypeConverter(typeof(RemoteActionTypeNameConverter))]
+    public RemoteActionType ActionType
+    {
+        get => control.Action.Type;
+        set { RemoteEditorStore.ApplyActionDefaults(control, value); store.Commit(); }
+    }
 
-    [Category("Action"), DisplayName("Computer ID")]
+    [Browsable(false)]
     public string ComputerID { get => control.Action.ComputerID ?? string.Empty; set { control.Action.ComputerID = EmptyToNull(value); store.Commit(); } }
 
     [Category("Action"), DisplayName("Target / command")]
-    public string ActionText { get => control.Action.Text; set { control.Action.Text = value; store.Commit(); } }
+    public string ActionText
+    {
+        get => control.Action.Text;
+        set
+        {
+            control.Action.Text = value;
+            if (control.Action.Type == RemoteActionType.ComputerOpen)
+            {
+                control.IconBitmap = null;
+            }
+            store.Commit();
+        }
+    }
 
     [Category("Action")]
     public string Host { get => control.Action.Host; set { control.Action.Host = value; store.Commit(); } }
@@ -142,16 +159,17 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
         }
     }
 
-    [Category("Schedule"), DisplayName("Enabled")]
+    // Legacy single-schedule fields; the Schedules dialog owns these.
+    [Browsable(false)]
     public bool ScheduleEnabled { get => control.Action.ScheduleEnabled ?? false; set { control.Action.ScheduleEnabled = value; store.Commit(); } }
 
-    [Category("Schedule"), DisplayName("Hour")]
+    [Browsable(false)]
     public int ScheduleHour { get => control.Action.ScheduleHour ?? 8; set { control.Action.ScheduleHour = Math.Clamp(value, 0, 23); store.Commit(); } }
 
-    [Category("Schedule"), DisplayName("Minute")]
+    [Browsable(false)]
     public int ScheduleMinute { get => control.Action.ScheduleMinute ?? 0; set { control.Action.ScheduleMinute = Math.Clamp(value, 0, 59); store.Commit(); } }
 
-    [Category("Text Box"), DisplayName("Source")]
+    [Category("Text Box"), DisplayName("Source"), TypeConverter(typeof(RemoteTextSourceNameConverter))]
     public RemoteTextSource TextSource { get => TextBox.Source; set { TextBox.Source = value; store.Commit(); } }
 
     [Category("Text Box"), DisplayName("Text / source")]
@@ -163,42 +181,42 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
     [Category("Text Box"), DisplayName("Date format")]
     public string DateFormat { get => TextBox.DateFormat; set { TextBox.DateFormat = value; store.Commit(); } }
 
-    [Category("Text Box"), DisplayName("Horizontal alignment")]
+    [Category("Text Box"), DisplayName("Horizontal alignment"), TypeConverter(typeof(HorizontalAlignmentNameConverter))]
     public RemoteTextHorizontalAlignment HorizontalAlignment
     {
         get => TextBox.HorizontalAlignment;
         set { TextBox.HorizontalAlignment = value; store.Commit(); }
     }
 
-    [Category("Text Box"), DisplayName("Vertical alignment")]
+    [Category("Text Box"), DisplayName("Vertical alignment"), TypeConverter(typeof(VerticalAlignmentNameConverter))]
     public RemoteTextVerticalAlignment VerticalAlignment
     {
         get => TextBox.VerticalAlignment;
         set { TextBox.VerticalAlignment = value; store.Commit(); }
     }
 
-    [Category("Text Box"), DisplayName("Tap behavior")]
+    [Category("Text Box"), DisplayName("When tapped"), TypeConverter(typeof(TapBehaviorNameConverter))]
     public RemoteTextTapBehavior TapBehavior
     {
         get => TextBox.TapBehavior;
         set { TextBox.TapBehavior = value; store.Commit(); }
     }
 
-    [Category("Text Box"), DisplayName("Referenced control ID")]
+    [Browsable(false)]
     public string ReferencedControlID
     {
         get => TextBox.ReferencedControlID?.ToString() ?? string.Empty;
         set { TextBox.ReferencedControlID = Guid.TryParse(value, out var id) ? id : null; store.Commit(); }
     }
 
-    [Category("Text Box"), DisplayName("Computer ID")]
+    [Browsable(false)]
     public string TextComputerID
     {
         get => TextBox.ComputerID?.ToString() ?? string.Empty;
         set { TextBox.ComputerID = Guid.TryParse(value, out var id) ? id : null; store.Commit(); }
     }
 
-    [Category("Text Box"), DisplayName("Text size")]
+    [Category("Text Box"), DisplayName("Text size"), TypeConverter(typeof(TextSizeNameConverter))]
     public RemoteTextSize TextSize { get => TextBox.TextSize; set { TextBox.TextSize = value; store.Commit(); } }
 
     [Category("Text Box"), DisplayName("Refresh seconds")]
@@ -217,6 +235,56 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
 
     private RemoteTextBox TextBox => control.TextBox ??= new RemoteTextBox();
     private static string? EmptyToNull(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    // Shows only the fields that apply to this control; the option rows above the grid cover the rest.
+    private bool IsVisible(PropertyDescriptor property)
+    {
+        var type = control.Action.Type;
+        var isTextBox = control.Kind == RemoteControlKind.TextBox;
+        if (property.Category == "Text Box")
+        {
+            return isTextBox;
+        }
+        if (property.Category == "Slider")
+        {
+            return control.Kind == RemoteControlKind.Slider;
+        }
+        if (property.Name == nameof(ButtonHeight) || property.Name == nameof(IsToggle))
+        {
+            return control.Kind == RemoteControlKind.Button;
+        }
+        if (property.Category is "Action" or "Climate" &&
+            isTextBox && control.TextBox?.TapBehavior != RemoteTextTapBehavior.Action)
+        {
+            return false;
+        }
+        return property.Name switch
+        {
+            nameof(DeadbandTenths) or nameof(HumidityThreshold) or nameof(MinimumCycleMinutes) =>
+                type == RemoteActionType.NetHomeAuto,
+            nameof(ActionText) => type is RemoteActionType.AppleShortcut or RemoteActionType.ComputerScript or
+                RemoteActionType.Module or RemoteActionType.EWeLinkPower,
+            nameof(Host) => type is RemoteActionType.EWeLinkPower or RemoteActionType.Module,
+            nameof(Value) => type is RemoteActionType.NetHomeAuto or RemoteActionType.Module,
+            nameof(ValueTenths) => false,
+            nameof(Modifiers) => type == RemoteActionType.OpenBuilds,
+            _ => true,
+        };
+    }
+
+    AttributeCollection ICustomTypeDescriptor.GetAttributes() => TypeDescriptor.GetAttributes(this, true);
+    string? ICustomTypeDescriptor.GetClassName() => TypeDescriptor.GetClassName(this, true);
+    string? ICustomTypeDescriptor.GetComponentName() => TypeDescriptor.GetComponentName(this, true);
+    TypeConverter ICustomTypeDescriptor.GetConverter() => TypeDescriptor.GetConverter(this, true);
+    EventDescriptor? ICustomTypeDescriptor.GetDefaultEvent() => TypeDescriptor.GetDefaultEvent(this, true);
+    PropertyDescriptor? ICustomTypeDescriptor.GetDefaultProperty() => TypeDescriptor.GetDefaultProperty(this, true);
+    object? ICustomTypeDescriptor.GetEditor(Type editorBaseType) => TypeDescriptor.GetEditor(this, editorBaseType, true);
+    EventDescriptorCollection ICustomTypeDescriptor.GetEvents() => TypeDescriptor.GetEvents(this, true);
+    EventDescriptorCollection ICustomTypeDescriptor.GetEvents(Attribute[]? attributes) => TypeDescriptor.GetEvents(this, attributes, true);
+    PropertyDescriptorCollection ICustomTypeDescriptor.GetProperties() => ((ICustomTypeDescriptor)this).GetProperties(null);
+    PropertyDescriptorCollection ICustomTypeDescriptor.GetProperties(Attribute[]? attributes) =>
+        new(TypeDescriptor.GetProperties(this, attributes, true).Cast<PropertyDescriptor>().Where(IsVisible).ToArray());
+    object? ICustomTypeDescriptor.GetPropertyOwner(PropertyDescriptor? property) => this;
 }
 
 internal sealed class ProfileProperties(RemoteEditorStore store)
@@ -281,3 +349,104 @@ internal sealed class RemoteIconNameConverter : StringConverter
     public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context) =>
         new(RemoteIconGlyphs.Names.Order(StringComparer.Ordinal).Prepend(string.Empty).ToArray());
 }
+
+internal class DisplayNameEnumConverter<T>(IReadOnlyDictionary<T, string> names) : EnumConverter(typeof(T))
+    where T : struct, Enum
+{
+    public override object? ConvertTo(
+        ITypeDescriptorContext? context, CultureInfo? culture, object? value, Type destinationType) =>
+        destinationType == typeof(string) && value is T member && names.TryGetValue(member, out var name)
+            ? name
+            : base.ConvertTo(context, culture, value, destinationType);
+
+    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture, object value)
+    {
+        foreach (var (member, name) in names)
+        {
+            if (value is string text && text == name)
+            {
+                return member;
+            }
+        }
+        return base.ConvertFrom(context, culture, value);
+    }
+}
+
+internal sealed class RemoteActionTypeNameConverter() : DisplayNameEnumConverter<RemoteActionType>(Names)
+{
+    internal static readonly Dictionary<RemoteActionType, string> Names = new()
+    {
+        [RemoteActionType.IPhoneMedia] = "iPhone media",
+        [RemoteActionType.IPhoneHomePower] = "Apple Home power",
+        [RemoteActionType.ComputerMedia] = "Media",
+        [RemoteActionType.ComputerKey] = "Keyboard shortcut",
+        [RemoteActionType.ComputerOpen] = "Open app or URL",
+        [RemoteActionType.AppleShortcut] = "Apple Shortcut (Mac only)",
+        [RemoteActionType.ComputerScript] = "Approved script",
+        [RemoteActionType.OpenBuilds] = "OpenBuilds CONTROL",
+        [RemoteActionType.WledPower] = "WLED power",
+        [RemoteActionType.WledPreset] = "WLED preset",
+        [RemoteActionType.WledBrightness] = "WLED brightness",
+        [RemoteActionType.EWeLinkPower] = "eWeLink power",
+        [RemoteActionType.LocalHTTP] = "Local HTTP request",
+        [RemoteActionType.NetHomePower] = "NetHome power",
+        [RemoteActionType.NetHomeTemperature] = "NetHome temperature",
+        [RemoteActionType.NetHomeTemperatureStep] = "NetHome temperature step",
+        [RemoteActionType.NetHomeMode] = "NetHome mode",
+        [RemoteActionType.NetHomeFan] = "NetHome fan",
+        [RemoteActionType.NetHomeAuto] = "Sensor auto mode",
+        [RemoteActionType.Module] = "Module action",
+        [RemoteActionType.Page] = "Open page",
+    };
+}
+
+internal sealed class RemoteTextSourceNameConverter() : DisplayNameEnumConverter<RemoteTextSource>(Names)
+{
+    internal static readonly Dictionary<RemoteTextSource, string> Names = new()
+    {
+        [RemoteTextSource.StaticText] = "Static text",
+        [RemoteTextSource.DateTime] = "Date and time",
+        [RemoteTextSource.ComputerScript] = "Script output",
+        [RemoteTextSource.AppleShortcut] = "Apple Shortcut output (Mac only)",
+        [RemoteTextSource.ControlValue] = "Control value",
+        [RemoteTextSource.NowPlaying] = "Now playing",
+        [RemoteTextSource.OpenBuildsPosition] = "OpenBuilds position",
+    };
+}
+
+internal sealed class RemoteControlKindNameConverter() : DisplayNameEnumConverter<RemoteControlKind>(new Dictionary<RemoteControlKind, string>
+{
+    [RemoteControlKind.Button] = "Button",
+    [RemoteControlKind.Slider] = "Slider",
+    [RemoteControlKind.TextBox] = "Text box",
+});
+
+internal sealed class HorizontalAlignmentNameConverter() : DisplayNameEnumConverter<RemoteTextHorizontalAlignment>(new Dictionary<RemoteTextHorizontalAlignment, string>
+{
+    [RemoteTextHorizontalAlignment.Leading] = "Left",
+    [RemoteTextHorizontalAlignment.Center] = "Center",
+    [RemoteTextHorizontalAlignment.Trailing] = "Right",
+});
+
+internal sealed class VerticalAlignmentNameConverter() : DisplayNameEnumConverter<RemoteTextVerticalAlignment>(new Dictionary<RemoteTextVerticalAlignment, string>
+{
+    [RemoteTextVerticalAlignment.Top] = "Top",
+    [RemoteTextVerticalAlignment.Center] = "Center",
+    [RemoteTextVerticalAlignment.Bottom] = "Bottom",
+});
+
+internal sealed class TapBehaviorNameConverter() : DisplayNameEnumConverter<RemoteTextTapBehavior>(new Dictionary<RemoteTextTapBehavior, string>
+{
+    [RemoteTextTapBehavior.DisplayOnly] = "Do nothing",
+    [RemoteTextTapBehavior.Refresh] = "Refresh",
+    [RemoteTextTapBehavior.Action] = "Run action",
+});
+
+internal sealed class TextSizeNameConverter() : DisplayNameEnumConverter<RemoteTextSize>(new Dictionary<RemoteTextSize, string>
+{
+    [RemoteTextSize.Small] = "Small",
+    [RemoteTextSize.Medium] = "Medium",
+    [RemoteTextSize.Large] = "Large",
+    [RemoteTextSize.ExtraLarge] = "Extra large",
+    [RemoteTextSize.AutoFit] = "Auto fit",
+});

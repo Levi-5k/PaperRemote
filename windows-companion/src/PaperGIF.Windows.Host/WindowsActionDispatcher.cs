@@ -124,7 +124,7 @@ internal sealed class WindowsActionDispatcher(
             KeyDown(modifierKey);
         }
         PressAndRelease((byte)translated);
-        foreach (var modifierKey in modifierKeys.Reverse())
+        foreach (var modifierKey in Enumerable.Reverse(modifierKeys))
         {
             KeyUp(modifierKey);
         }

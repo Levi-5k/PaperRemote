@@ -70,7 +70,7 @@ public sealed class ModuleCatalogTests
         Assert.Equal(8, page.GridRows);
         Assert.Equal(8, page.Controls.Count);
         Assert.All(page.Controls, control =>
-            Assert.Equal(PaperGIF.Windows.Core.Models.RemoteActionType.MacMedia, control.Action.Type));
+            Assert.Equal(PaperGIF.Windows.Core.Models.RemoteActionType.ComputerMedia, control.Action.Type));
         Assert.Equal(0, page.Controls.Single(control => control.Action.Text == "seek").LayoutSlot);
         Assert.Equal(7, page.Controls.Single(control => control.Action.Text == "playPause").LayoutSlot);
         Assert.Equal(15, page.Controls.Single(control => control.Action.Text == "volume").LayoutSlot);
@@ -127,7 +127,7 @@ public sealed class ModuleCatalogTests
         var module = JsonSerializer.Deserialize<PaperModuleManifest>(json, RemoteProfileJson.Options)!;
 
         Assert.Equal(7, module.Controls.Count);
-        Assert.All(module.Controls, definition => Assert.Equal(RemoteActionType.MacKey, definition.Control.Action.Type));
+        Assert.All(module.Controls, definition => Assert.Equal(RemoteActionType.ComputerKey, definition.Control.Action.Type));
         var definition = Assert.Single(module.Pages);
         var page = ModuleCatalogService.ClonePage(definition, module.Id);
         Assert.Equal("Presentation", page.Name);
@@ -203,5 +203,26 @@ public sealed class ModuleCatalogTests
                 Assert.Equal(textComputerId, control.TextBox?.ComputerID);
                 Assert.StartsWith("10.0.0.25|", control.TextBox?.SourceText);
             });
+    }
+
+    [Fact]
+    public void UpdatingModulePageKeepsComputerTargetsForEveryComputerAction()
+    {
+        var json = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "presentation-controls.json"));
+        var module = JsonSerializer.Deserialize<PaperModuleManifest>(json, RemoteProfileJson.Options)!;
+        var definition = Assert.Single(module.Pages);
+        var pageComputer = Guid.NewGuid().ToString();
+        var otherComputer = Guid.NewGuid().ToString();
+        var existing = ModuleCatalogService.ClonePage(definition, module.Id);
+        RemoteEditorStore.TargetComputer(existing.Controls, pageComputer);
+        existing.Controls[1].Action.ComputerID = otherComputer;
+        existing.Controls.RemoveAt(existing.Controls.Count - 1);
+
+        var updated = ModuleCatalogService.UpdatedPage(existing, definition, module.Id);
+
+        Assert.Equal(definition.Page.Controls.Count, updated.Controls.Count);
+        Assert.Equal(otherComputer, updated.Controls[1].Action.ComputerID);
+        Assert.All(updated.Controls.Where((_, index) => index != 1),
+            control => Assert.Equal(pageComputer, control.Action.ComputerID));
     }
 }

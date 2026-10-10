@@ -27,17 +27,17 @@ struct RemoteControlTemplate: Identifiable, Sendable {
     }
 
     static let all: [Self] = [
-        template("blank-button", "Basic", "Button", "Configure a custom action", "circle.fill", .button, .init(type: .macMedia, text: "playPause")),
+        template("blank-button", "Basic", "Button", "Configure a custom action", "circle.fill", .button, .init(type: .computerMedia, text: "playPause")),
         template("blank-slider", "Basic", "Slider", "Configure a compact slider", "slider.horizontal.3", .slider, .init(type: .wledBrightness)),
-        template("blank-text", "Basic", "Text Box", "Display static or dynamic text", "text.alignleft", .textBox, .init(type: .macMedia, text: "playPause"), textBox: RemoteTextBox()),
+        template("blank-text", "Basic", "Text Box", "Display static or dynamic text", "text.alignleft", .textBox, .init(type: .computerMedia, text: "playPause"), textBox: RemoteTextBox()),
         media("previous", "Playback", "Previous", "Previous track", "backward.fill", "previous"),
         media("play-pause", "Playback", "Play / Pause", "Toggle playback", "playpause.fill", "playPause"),
         media("next", "Playback", "Next", "Next track", "forward.fill", "next"),
-        media("volume-down", "Volume", "Volume Down", "Lower Mac volume", "speaker.fill", "volumeDown"),
-        template("volume-preset", "Volume", "Volume Preset", "Set Mac volume to a chosen level", "speaker.wave.2.fill", .button, .init(type: .macMedia, text: "volume", value: 128)),
-        template("volume-slider", "Volume", "Volume Slider", "Set Mac volume continuously", "speaker.wave.2.fill", .slider, .init(type: .macMedia, text: "volume", value: 128)),
-        media("mute", "Volume", "Mute", "Toggle Mac mute", "speaker.slash.fill", "mute"),
-        media("volume-up", "Volume", "Volume Up", "Raise Mac volume", "speaker.wave.2.fill", "volumeUp"),
+        media("volume-down", "Volume", "Volume Down", "Lower computer volume", "speaker.fill", "volumeDown"),
+        template("volume-preset", "Volume", "Volume Preset", "Set computer volume to a chosen level", "speaker.wave.2.fill", .button, .init(type: .computerMedia, text: "volume", value: 128)),
+        template("volume-slider", "Volume", "Volume Slider", "Set computer volume continuously", "speaker.wave.2.fill", .slider, .init(type: .computerMedia, text: "volume", value: 128)),
+        media("mute", "Volume", "Mute", "Toggle computer mute", "speaker.slash.fill", "mute"),
+        media("volume-up", "Volume", "Volume Up", "Raise computer volume", "speaker.wave.2.fill", "volumeUp"),
 
         key("undo", "Editing", "Undo", "Command-Z", "arrow.left", "z", ["command"]),
         key("redo", "Editing", "Redo", "Shift-Command-Z", "arrow.right", "z", ["command", "shift"]),
@@ -72,9 +72,9 @@ struct RemoteControlTemplate: Identifiable, Sendable {
         key("screenshot", "System", "Screenshot", "Shift-Command-3", "display", "3", ["shift", "command"]),
         key("screenshot-region", "System", "Capture Region", "Shift-Command-4", "display", "4", ["shift", "command"]),
 
-        template("open", "Launch", "Open App or URL", "Choose an app, file, or URL", "display", .button, .init(type: .macOpen, text: "https://")),
-        template("shortcut", "Automation", "Run Shortcut", "Run an Apple Shortcut by name", "bolt.fill", .button, .init(type: .macShortcut)),
-        template("script", "Automation", "Run Approved Script", "Run a command allowed in Settings", "gearshape.fill", .button, .init(type: .macScript)),
+        template("open", "Launch", "Open App or URL", "Choose an app, file, or URL", "display", .button, .init(type: .computerOpen)),
+        template("shortcut", "Automation", "Run Shortcut", "Run an Apple Shortcut by name", "bolt.fill", .button, .init(type: .appleShortcut)),
+        template("script", "Automation", "Run Approved Script", "Run a command allowed in Settings", "gearshape.fill", .button, .init(type: .computerScript)),
 
         template("wled-toggle", "Lighting", "Lights", "Toggle WLED power", "lightbulb.fill", .button, .init(type: .wledPower, text: "toggle")),
         template("wled-on", "Lighting", "Lights On", "Turn WLED on", "lightbulb.fill", .button, .init(type: .wledPower, text: "on")),
@@ -108,14 +108,14 @@ struct RemoteControlTemplate: Identifiable, Sendable {
         _ id: String, _ category: String, _ title: String, _ detail: String,
         _ symbol: String, _ command: String
     ) -> Self {
-        template(id, category, title, detail, symbol, .button, .init(type: .macMedia, text: command))
+        template(id, category, title, detail, symbol, .button, .init(type: .computerMedia, text: command))
     }
 
     private static func key(
         _ id: String, _ category: String, _ title: String, _ detail: String,
         _ symbol: String, _ key: String, _ modifiers: [String]
     ) -> Self {
-        template(id, category, title, detail, symbol, .button, .init(type: .macKey, text: key, modifiers: modifiers))
+        template(id, category, title, detail, symbol, .button, .init(type: .computerKey, text: key, modifiers: modifiers))
     }
 
     private static func template(

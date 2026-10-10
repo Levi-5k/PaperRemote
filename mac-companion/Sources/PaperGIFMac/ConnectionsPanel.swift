@@ -434,7 +434,7 @@ struct ConnectionsPanel: View {
             selectedComputerID = computer.id
             computerStatus = isPairing ? "Paired with \(name)." : "Connected to \(name)."
         } catch {
-            computerStatus = "Could not reach \(name). Make sure paperGIF Mac is running."
+            computerStatus = "Could not reach \(name). Make sure its paperGIF companion is running."
         }
     }
 

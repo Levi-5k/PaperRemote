@@ -19,9 +19,10 @@ $stagingDirectory = Join-Path $env:TEMP 'paperGIF-publish'
 Remove-Item $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
 dotnet publish $project `
     --configuration Release `
-    --framework net8.0-windows10.0.22621.0 `
-    --output $stagingDirectory `
-    --no-restore
+    --framework net11.0-windows10.0.22621.0 `
+    --runtime win-x64 `
+    --self-contained true `
+    --output $stagingDirectory
 if ($LASTEXITCODE -ne 0) {
     throw "paperGIF publish failed with exit code $LASTEXITCODE."
 }

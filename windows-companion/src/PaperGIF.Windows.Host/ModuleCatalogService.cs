@@ -141,17 +141,20 @@ internal sealed class ModuleCatalogService
             page.OpenBuildsController = existing.OpenBuildsController;
         }
 
-        var actionComputerId = existing.Controls.Select(control => control.Action.ComputerID)
-            .FirstOrDefault(value => value is not null);
+        var pageComputerId = existing.Controls
+            .Where(control => RemoteEditorStore.RunsOnComputer(control.Action.Type))
+            .Select(control => control.Action.ComputerID)
+            .FirstOrDefault(value => !string.IsNullOrEmpty(value)) ??
+            existing.Controls.Select(control => control.TextBox?.ComputerID?.ToString())
+                .FirstOrDefault(value => value is not null);
         var actionHost = existing.Controls.Select(control => control.Action.Host)
             .FirstOrDefault(value => !string.IsNullOrEmpty(value));
-        var textComputerId = existing.Controls.Select(control => control.TextBox?.ComputerID)
-            .FirstOrDefault(value => value is not null);
         var textHost = existing.Controls
             .Where(control => control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition)
             .Select(control => control.TextBox!.SourceText.Split('|')[0])
             .FirstOrDefault();
 
+        RemoteEditorStore.TargetComputer(page.Controls, pageComputerId);
         foreach (var control in page.Controls)
         {
             var previous = existing.Controls.FirstOrDefault(candidate =>
@@ -159,18 +162,14 @@ internal sealed class ModuleCatalogService
             if (previous is not null)
             {
                 control.Id = previous.Id;
+                KeepComputerTargets(control, previous);
             }
-            if (control.Action.Type == RemoteActionType.OpenBuilds)
+            if (control.Action.Type == RemoteActionType.OpenBuilds && actionHost is not null)
             {
-                control.Action.ComputerID = actionComputerId;
-                if (actionHost is not null)
-                {
-                    control.Action.Host = actionHost;
-                }
+                control.Action.Host = actionHost;
             }
             if (control.TextBox?.Source == RemoteTextSource.OpenBuildsPosition)
             {
-                control.TextBox.ComputerID = textComputerId;
                 if (textHost is not null)
                 {
                     var parts = control.TextBox.SourceText.Split('|');
@@ -180,6 +179,22 @@ internal sealed class ModuleCatalogService
             }
         }
         return page;
+    }
+
+    private static void KeepComputerTargets(RemoteControl control, RemoteControl previous)
+    {
+        if (previous.Action.Type == control.Action.Type && !string.IsNullOrEmpty(previous.Action.ComputerID))
+        {
+            control.Action.ComputerID = previous.Action.ComputerID;
+        }
+        if (control.TextBox is { } textBox)
+        {
+            textBox.ComputerID = previous.TextBox?.ComputerID ?? textBox.ComputerID;
+            if (textBox.TapAction is { } tapAction && previous.TextBox?.TapAction?.ComputerID is { Length: > 0 } tapComputerId)
+            {
+                tapAction.ComputerID = tapComputerId;
+            }
+        }
     }
 
     internal static bool IsVersion(string candidate, string newerThan) =>

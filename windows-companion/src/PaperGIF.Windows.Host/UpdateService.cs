@@ -113,7 +113,7 @@ internal sealed class UpdateService : IDisposable
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        var downloads = new Dictionary<string, Uri>(StringComparer.Ordinal);
+        Dictionary<string, Uri> downloads = [with(StringComparer.Ordinal)];
         if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
         {
             foreach (var asset in assets.EnumerateArray())

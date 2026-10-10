@@ -108,8 +108,9 @@ struct PaperGIFOpenBuildsController: Codable, Equatable, Sendable {
 enum PaperGIFRemoteTextSource: String, Codable, CaseIterable, Identifiable, Sendable {
     case staticText
     case dateTime
-    case macScript
-    case macShortcut
+    // Raw values are the legacy wire names; see protocol/README.md.
+    case computerScript = "macScript"
+    case appleShortcut = "macShortcut"
     case controlValue
     case nowPlaying
     case openBuildsPosition
@@ -209,11 +210,12 @@ struct PaperGIFRemoteIcon: Identifiable, Sendable {
 enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Sendable {
     case iPhoneMedia
     case iPhoneHomePower
-    case macMedia
-    case macKey
-    case macOpen
-    case macShortcut
-    case macScript
+    // Raw values are the legacy wire names; see protocol/README.md.
+    case computerMedia = "macMedia"
+    case computerKey = "macKey"
+    case computerOpen = "macOpen"
+    case appleShortcut = "macShortcut"
+    case computerScript = "macScript"
     case openBuilds
     case wledPower
     case wledPreset
@@ -235,11 +237,11 @@ enum PaperGIFRemoteActionType: String, Codable, CaseIterable, Identifiable, Send
         switch self {
         case .iPhoneMedia: "iPhone media"
         case .iPhoneHomePower: "Apple Home power"
-        case .macMedia: "Media"
-        case .macKey: "Mac keyboard shortcut"
-        case .macOpen: "Open app or URL"
-        case .macShortcut: "Run Apple Shortcut"
-        case .macScript: "Run script"
+        case .computerMedia: "Media"
+        case .computerKey: "Keyboard shortcut"
+        case .computerOpen: "Open app or URL"
+        case .appleShortcut: "Run Apple Shortcut (Mac only)"
+        case .computerScript: "Run script"
         case .openBuilds: "OpenBuilds CONTROL"
         case .wledPower: "WLED power"
         case .wledPreset: "WLED preset"
@@ -278,7 +280,7 @@ struct PaperGIFRemoteAction: Codable, Equatable, Sendable {
     var scheduleMinute: Int?
     var schedules: [PaperGIFRemoteScheduleEntry]?
 
-    static let playPause = PaperGIFRemoteAction(type: .macMedia, text: "playPause")
+    static let playPause = PaperGIFRemoteAction(type: .computerMedia, text: "playPause")
 }
 
 struct PaperGIFRemoteScheduleEntry: Codable, Equatable, Identifiable, Sendable {
@@ -363,12 +365,12 @@ struct PaperGIFRemoteControl: Codable, Equatable, Identifiable, Sendable {
         action.scheduleHour = nil
         action.scheduleMinute = nil
         action.schedules = nil
-        if action.type != .macOpen {
+        if action.type != .computerOpen {
             iconBitmap = nil
         }
         switch action.type {
-        case .iPhoneMedia, .macMedia:
-            let wasMedia = previousType == .iPhoneMedia || previousType == .macMedia
+        case .iPhoneMedia, .computerMedia:
+            let wasMedia = previousType == .iPhoneMedia || previousType == .computerMedia
             let command: String
             if wasMedia && (kind != .slider || ["seek", "volume"].contains(action.text)) {
                 command = action.text
@@ -417,7 +419,7 @@ struct PaperGIFRemoteControl: Codable, Equatable, Identifiable, Sendable {
         if [.wledBrightness, .netHomeTemperature, .netHomeFan].contains(action.type) {
             kind = .slider
             isToggle = nil
-        } else if ![.macMedia, .iPhoneMedia].contains(action.type), kind == .slider {
+        } else if ![.computerMedia, .iPhoneMedia].contains(action.type), kind == .slider {
             kind = .button
         }
     }
@@ -1042,9 +1044,9 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
 
     static let starter = PaperGIFRemoteProfile(pages: [
         PaperGIFRemotePage(name: "Main", controls: [
-            .button(title: "Previous", symbol: "backward.fill", action: .init(type: .macMedia, text: "previous")),
+            .button(title: "Previous", symbol: "backward.fill", action: .init(type: .computerMedia, text: "previous")),
             .button(title: "Play", symbol: "playpause.fill", action: .playPause),
-            .button(title: "Next", symbol: "forward.fill", action: .init(type: .macMedia, text: "next")),
+            .button(title: "Next", symbol: "forward.fill", action: .init(type: .computerMedia, text: "next")),
             .button(title: "WLED", symbol: "lightbulb.fill", tintHex: "F2C14E", action: .init(type: .wledPower, text: "toggle")),
         ])
     ])
@@ -1052,9 +1054,9 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     var usesStarterLayout: Bool {
         guard pages.count == 1, pages[0].name == "Main" else { return false }
         return pages[0].controls.map { ($0.action.type, $0.action.text) }.elementsEqual([
-            (.macMedia, "previous"),
-            (.macMedia, "playPause"),
-            (.macMedia, "next"),
+            (.computerMedia, "previous"),
+            (.computerMedia, "playPause"),
+            (.computerMedia, "next"),
             (.wledPower, "toggle"),
         ], by: ==)
     }

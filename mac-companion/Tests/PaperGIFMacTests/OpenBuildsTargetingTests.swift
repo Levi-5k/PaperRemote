@@ -36,9 +36,25 @@ final class OpenBuildsTargetingTests: XCTestCase {
         XCTAssertEqual(RemoteEditorStore.targetingOpenBuilds(explicit, computerID: local).action.computerID, "other")
         let remote = control(.openBuilds, host: "192.168.50.40:3000")
         XCTAssertNil(RemoteEditorStore.targetingOpenBuilds(remote, computerID: local).action.computerID)
-        let media = control(.macMedia, host: "")
+        let media = control(.computerMedia, host: "")
         XCTAssertNil(RemoteEditorStore.targetingOpenBuilds(media, computerID: local).action.computerID)
         let unknownLocal = control(.openBuilds, host: "127.0.0.1")
         XCTAssertNil(RemoteEditorStore.targetingOpenBuilds(unknownLocal, computerID: nil).action.computerID)
+    }
+
+    func testModulePageControlsAlwaysTargetThisComputer() {
+        let remoteOpenBuilds = control(.openBuilds, host: "192.168.50.40:3000", computerID: "other")
+        XCTAssertEqual(remoteOpenBuilds.targetingComputer(local).action.computerID, local)
+        XCTAssertEqual(control(.computerMedia, host: "").targetingComputer(local).action.computerID, local)
+        XCTAssertNil(control(.wledPower, host: "lights.local").targetingComputer(local).action.computerID)
+
+        var readout = control(.wledPower, host: "lights.local")
+        readout.kind = .textBox
+        readout.textBox = RemoteTextBox(source: .openBuildsPosition, sourceText: "192.168.50.40:3000|x|mm")
+        readout.textBox?.tapAction = RemoteAction(type: .computerKey, host: "")
+        let targeted = readout.targetingComputer(local)
+        XCTAssertEqual(targeted.textBox?.computerID, UUID(uuidString: local))
+        XCTAssertEqual(targeted.textBox?.tapAction?.computerID, local)
+        XCTAssertNil(targeted.action.computerID)
     }
 }

@@ -27,6 +27,9 @@ private struct ManageRequest: Decodable {
     let setupCode: String?
     let name: String?
     let device: Int?
+    /// Only for factory-new Wi-Fi devices joining the network during setup; never stored.
+    let wifiSSID: String?
+    let wifiPassword: String?
 }
 
 private struct ManageResponse: Encodable {
@@ -66,6 +69,8 @@ private struct MatterState: Codable {
     var nextNodeID: UInt64
     var nodes: [MatterNode]
     var fabricCreated: Bool
+    /// Highest device number ever handed out, so a removed device's buttons never control a newer device.
+    var lastAssignedNumber: Int?
 }
 
 @available(macOS 13.3, *)
@@ -167,11 +172,13 @@ private final class MatterKeypair: NSObject, MTRKeypair {
 @available(macOS 13.3, *)
 private final class CommissioningDelegate: NSObject, MTRDeviceControllerDelegate {
     let nodeID: NSNumber
+    let parameters: MTRCommissioningParameters
     let semaphore = DispatchSemaphore(value: 0)
     private(set) var error: Error?
 
-    init(nodeID: NSNumber) {
+    init(nodeID: NSNumber, parameters: MTRCommissioningParameters) {
         self.nodeID = nodeID
+        self.parameters = parameters
     }
 
     func controller(
@@ -186,7 +193,7 @@ private final class CommissioningDelegate: NSObject, MTRDeviceControllerDelegate
         do {
             try controller.commissionNode(
                 withID: nodeID,
-                commissioningParams: MTRCommissioningParameters()
+                commissioningParams: parameters
             )
         } catch {
             self.error = error
@@ -214,6 +221,13 @@ private final class CommissioningDelegate: NSObject, MTRDeviceControllerDelegate
 }
 
 @available(macOS 13.3, *)
+private final class DeviceObserver: NSObject, MTRDeviceDelegate {
+    func device(_ device: MTRDevice, stateChanged state: MTRDeviceState) {}
+    func device(_ device: MTRDevice, receivedAttributeReport attributeReport: [[String: Any]]) {}
+    func device(_ device: MTRDevice, receivedEventReport eventReport: [[String: Any]]) {}
+}
+
+@available(macOS 13.3, *)
 private final class MatterHub {
     private let stateURL: URL
     private var state: MatterState
@@ -221,6 +235,8 @@ private final class MatterHub {
     private let controller: MTRDeviceController
     private let callbackQueue = DispatchQueue(label: "paperGIF.module.matter.callbacks")
     private var commissioningDelegate: CommissioningDelegate?
+    private let deviceObserver = DeviceObserver()
+    private var observedNodeIDs: Set<UInt64> = []
 
     init(stateDirectory: URL) throws {
         try FileManager.default.createDirectory(
@@ -253,9 +269,17 @@ private final class MatterHub {
             state.fabricCreated = true
             try saveState()
         }
-        if Self.assignMissingNumbers(&state.nodes) {
+        if Self.assignMissingNumbers(&state) {
             try saveState()
         }
+        state.nodes.forEach(observe)
+    }
+
+    /// A delegate makes Matter.framework keep a subscription, so state reads come from live reports.
+    private func observe(_ node: MatterNode) {
+        guard observedNodeIDs.insert(node.id).inserted else { return }
+        MTRDevice(nodeID: NSNumber(value: node.id), controller: controller)
+            .setDelegate(deviceObserver, queue: callbackQueue)
     }
 
     deinit {
@@ -274,7 +298,12 @@ private final class MatterHub {
         return files.filter { $0.pathExtension == "der" }.compactMap { try? Data(contentsOf: $0) }
     }
 
-    func commission(setupCode: String, name: String = "Matter switch") throws -> MatterNode {
+    func commission(
+        setupCode: String,
+        name: String = "Matter switch",
+        wifiSSID: String? = nil,
+        wifiPassword: String? = nil
+    ) throws -> MatterNode {
         let payload: MTRSetupPayload
         if #available(macOS 14.6, *) {
             guard let parsed = MTRSetupPayload(payload: setupCode) else {
@@ -289,7 +318,13 @@ private final class MatterHub {
         // Never reuse a node ID from a failed attempt; the controller may hold a stale session for it.
         state.nextNodeID += 1
         try saveState()
-        let delegate = CommissioningDelegate(nodeID: NSNumber(value: nodeID))
+        let parameters = MTRCommissioningParameters()
+        // Devices already on the network (an Apple Home pairing-mode code) ignore these.
+        if let wifiSSID, !wifiSSID.isEmpty {
+            parameters.wifiSSID = Data(wifiSSID.utf8)
+            parameters.wifiCredentials = Data((wifiPassword ?? "").utf8)
+        }
+        let delegate = CommissioningDelegate(nodeID: NSNumber(value: nodeID), parameters: parameters)
         commissioningDelegate = delegate
         controller.setDeviceControllerDelegate(delegate, queue: callbackQueue)
         try controller.setupCommissioningSession(
@@ -308,10 +343,11 @@ private final class MatterHub {
             id: nodeID,
             name: name,
             endpoint: 1,
-            number: (state.nodes.map(\.number).max() ?? 0) + 1
+            number: Self.nextNumber(&state)
         )
         state.nodes.append(node)
         try saveState()
+        observe(node)
         return node
     }
 
@@ -327,22 +363,82 @@ private final class MatterHub {
             }
             let trimmedName = String((request.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
             do {
-                let node = try commission(setupCode: setupCode, name: trimmedName.isEmpty ? "Matter switch" : trimmedName)
+                let node = try commission(
+                    setupCode: setupCode,
+                    name: trimmedName.isEmpty ? "Matter switch" : trimmedName,
+                    wifiSSID: request.wifiSSID,
+                    wifiPassword: request.wifiPassword
+                )
                 return ManageResponse(succeeded: true, message: "Added \(node.name).", devices: state.nodes)
             } catch {
                 return ManageResponse(succeeded: false, message: error.localizedDescription, devices: state.nodes)
             }
+        case "rename":
+            let trimmedName = String((request.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+            guard let index = state.nodes.firstIndex(where: { $0.number == request.device }), !trimmedName.isEmpty else {
+                return ManageResponse(succeeded: false, message: "Choose a device and enter a name.", devices: state.nodes)
+            }
+            state.nodes[index].name = trimmedName
+            return saved(message: "Renamed to \(trimmedName).")
+        case "remove":
+            guard let index = state.nodes.firstIndex(where: { $0.number == request.device }) else {
+                return ManageResponse(succeeded: false, message: "That device is no longer on this Mac.", devices: state.nodes)
+            }
+            let node = state.nodes[index]
+            let leftDevice = removeFabric(from: node)
+            state.nodes.remove(at: index)
+            return saved(message: leftDevice
+                ? "Removed \(node.name)."
+                : "Removed \(node.name) from this Mac. It didn't respond, so if the Home app still lists a paperGIF connection for it, remove that there.")
         default:
             return ManageResponse(succeeded: false, message: "Unsupported request", devices: state.nodes)
         }
     }
 
-    private static func assignMissingNumbers(_ nodes: inout [MatterNode]) -> Bool {
-        var next = (nodes.map(\.number).max() ?? 0) + 1
+    private func saved(message: String) -> ManageResponse {
+        do {
+            try saveState()
+            return ManageResponse(succeeded: true, message: message, devices: state.nodes)
+        } catch {
+            return ManageResponse(succeeded: false, message: error.localizedDescription, devices: state.nodes)
+        }
+    }
+
+    /// Best effort: asks the device to drop this Mac's fabric so it doesn't keep a stale controller.
+    private func removeFabric(from node: MatterNode) -> Bool {
+        let device = MTRBaseDevice(nodeID: NSNumber(value: node.id), controller: controller)
+        guard let credentials = MTRBaseClusterOperationalCredentials(
+            device: device,
+            endpointID: 0,
+            queue: callbackQueue
+        ) else { return false }
+        let semaphore = DispatchSemaphore(value: 0)
+        var fabricIndex: NSNumber?
+        credentials.readAttributeCurrentFabricIndex { value, _ in
+            fabricIndex = value
+            semaphore.signal()
+        }
+        guard semaphore.wait(timeout: .now() + 10) == .success, let fabricIndex else { return false }
+        let parameters = MTROperationalCredentialsClusterRemoveFabricParams()
+        parameters.fabricIndex = fabricIndex
+        var removed = false
+        credentials.removeFabric(with: parameters) { response, error in
+            removed = error == nil && response?.statusCode.intValue ?? 0 == 0
+            semaphore.signal()
+        }
+        return semaphore.wait(timeout: .now() + 10) == .success && removed
+    }
+
+    private static func nextNumber(_ state: inout MatterState) -> Int {
+        let number = max(state.lastAssignedNumber ?? 0, state.nodes.map(\.number).max() ?? 0) + 1
+        state.lastAssignedNumber = number
+        return number
+    }
+
+    private static func assignMissingNumbers(_ state: inout MatterState) -> Bool {
         var changed = false
-        for index in nodes.indices where nodes[index].number <= 0 {
-            nodes[index].number = next
-            next += 1
+        for index in state.nodes.indices where state.nodes[index].number <= 0 {
+            state.nodes[index].number = nextNumber(&state)
             changed = true
         }
         return changed
@@ -399,6 +495,17 @@ private final class MatterHub {
     private func readPowerState(deviceNumber: Int) -> ManageResponse {
         guard let node = node(numbered: deviceNumber) else {
             return ManageResponse(succeeded: false, message: "No such Matter device", devices: state.nodes)
+        }
+        observe(node)
+        let liveDevice = MTRDevice(nodeID: NSNumber(value: node.id), controller: controller)
+        if liveDevice.state == .reachable,
+           let cached = MTRClusterOnOff(
+               device: liveDevice,
+               endpointID: NSNumber(value: node.endpoint),
+               queue: callbackQueue
+           )?.readAttributeOnOff(with: nil),
+           let on = (cached[MTRValueKey] as? NSNumber)?.boolValue {
+            return ManageResponse(succeeded: true, message: nil, devices: state.nodes, on: on)
         }
         let device = MTRBaseDevice(nodeID: NSNumber(value: node.id), controller: controller)
         guard let cluster = MTRBaseClusterOnOff(

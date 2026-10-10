@@ -21,7 +21,9 @@ credentials in protocol fixtures.
    be renamed without a migration period.
 2. `macMedia`, `macKey`, `macOpen`, `macShortcut`, and `macScript` are legacy
    protocol names. New platforms may present platform-specific labels while
-   continuing to use these values on the wire.
+   continuing to use these values on the wire. App code names them
+   `computerMedia`, `computerKey`, `computerOpen`, `appleShortcut`, and
+   `computerScript` (text sources `computerScript` and `appleShortcut`).
 3. `openBuilds` actions are executed by the selected desktop companion and may
    contain only the command names documented in `companion-api.md`.
 4. Readers must tolerate optional fields they do not use. Writers must respect

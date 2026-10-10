@@ -31,14 +31,17 @@ final class RemotePreviewLabelLayoutTests: XCTestCase {
         XCTAssertGreaterThan(previous, 9)
     }
 
-    func testHorizontalTitleIsButtonCenteredWithSymmetricIconReservation() {
+    func testHorizontalTitleUsesAllRemainingWidthAfterOneIconReservation() {
         for size in [CGSize(width: 38, height: 12), CGSize(width: 56, height: 22), CGSize(width: 300, height: 80)] {
             let layout = RemotePreviewLabelFitting.layout(size: size, scale: 0.5, compact: true)
             let font = RemotePreviewLabelFitting.fontSize(for: "Up Left", in: layout.labelSize, maximum: layout.maximumFontSize)
             let measured = RemotePreviewLabelFitting.measuredSize("Up Left", fontSize: font, width: layout.labelSize.width)
             let frames = layout.frames(in: size, measuredLabelHeight: measured.height)
             XCTAssertTrue(layout.horizontal)
-            XCTAssertEqual(frames.label.midX, size.width / 2, accuracy: 0.0001)
+            let extent = layout.iconSize + 2 * layout.iconHalo
+            XCTAssertEqual(layout.labelSize.width, size.width - 2 * layout.padding - extent - layout.spacing, accuracy: 0.0001)
+            XCTAssertEqual(frames.label.midX, (layout.padding + extent + layout.spacing + size.width - layout.padding) / 2, accuracy: 0.0001)
+            XCTAssertEqual(frames.label.maxX, size.width - layout.padding, accuracy: 0.0001)
             XCTAssertEqual(frames.label.midY, size.height / 2, accuracy: 0.0001)
             XCTAssertGreaterThanOrEqual(frames.label.minX, frames.icon.maxX + layout.iconHalo + layout.spacing - 0.0001)
             checkSafeEdges(layout, frames: frames, size: size)
@@ -47,7 +50,7 @@ final class RemotePreviewLabelLayoutTests: XCTestCase {
 
     func testVerticalGroupCentersActualMeasuredTextNotAvailableArea() {
         let size = CGSize(width: 100, height: 240)
-        for title in ["Go", "A longer title that wraps onto several lines", ""] {
+        for title in ["Go", "A longer title that may use multiple lines", ""] {
             let layout = RemotePreviewLabelFitting.layout(size: size, scale: 1, compact: false, hasTitle: !title.isEmpty)
             let font = RemotePreviewLabelFitting.fontSize(for: title, in: layout.labelSize, maximum: layout.maximumFontSize)
             let measured = RemotePreviewLabelFitting.measuredSize(title, fontSize: font, width: layout.labelSize.width)
@@ -68,18 +71,74 @@ final class RemotePreviewLabelLayoutTests: XCTestCase {
     }
 
     @MainActor
-    func testActualSwiftUIHeightFitsMeasuredCenteredFrame() {
-        for title in ["Go", "Supercalifragilisticexpialidocious", "Line one\nLine two\nLine three"] {
+    func testActualSwiftUIMultilineFitsMeasuredFrame() {
+        for title in ["Go", "Up Left Down Right", "Supercalifragilisticexpialidocious", "Line one\nLine two\nLine three"] {
             let size = CGSize(width: 45, height: 110)
             let layout = RemotePreviewLabelFitting.layout(size: size, scale: 0.5, compact: false, maxButtonTextSize: 17)
             let font = RemotePreviewLabelFitting.fontSize(for: title, in: layout.labelSize, maximum: layout.maximumFontSize)
             let measured = RemotePreviewLabelFitting.measuredSize(title, fontSize: font, width: layout.labelSize.width)
             let frames = layout.frames(in: size, measuredLabelHeight: measured.height)
-            let view = NSHostingView(rootView: Text(verbatim: title)
+            let view = NSHostingView(rootView: Text(verbatim: RemotePreviewLabelFitting.normalizedTitle(title))
                 .font(Font(NSFont.systemFont(ofSize: font, weight: .semibold)))
                 .lineLimit(nil).allowsTightening(false).multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true).frame(width: frames.label.width))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: floor(frames.label.width)))
+            XCTAssertLessThanOrEqual(view.fittingSize.width, frames.label.width + 0.0001)
             XCTAssertLessThanOrEqual(view.fittingSize.height, frames.label.height + 0.0001)
+        }
+    }
+
+    func testWordWrappedMeasurementPreservesNewlinesAndShrinksWholeWords() {
+        XCTAssertEqual(RemotePreviewLabelFitting.normalizedTitle("Line one\r\nLine two\rLine three\u{2028}Line four"),
+                       "Line one\nLine two\nLine three\nLine four")
+        let bounds = CGSize(width: 80, height: 200)
+        let title = "Up Left Down Right"
+        XCTAssertEqual(RemotePreviewLabelFitting.fontSize(for: title, in: bounds, maximum: 24), 24)
+        XCTAssertGreaterThan(RemotePreviewLabelFitting.measuredSize(title, fontSize: 24, width: 80).height,
+                             RemotePreviewLabelFitting.measuredSize("Go", fontSize: 24, width: 80).height)
+        XCTAssertGreaterThan(RemotePreviewLabelFitting.measuredSize("Go\n\nGo", fontSize: 24, width: 80).height,
+                             RemotePreviewLabelFitting.measuredSize("Go\nGo", fontSize: 24, width: 80).height)
+        for word in ["Supercalifragilisticexpialidocious", "第一行很长的按钮标题第二行", "word-with/slashes"] {
+            let rejected = RemotePreviewLabelFitting.measuredSize(word, fontSize: 24, width: 80)
+            XCTAssertGreaterThan(rejected.width, 80)
+            XCTAssertTrue(rejected.height.isInfinite)
+            let fitted = RemotePreviewLabelFitting.fontSize(for: word, in: bounds, maximum: 24)
+            XCTAssertGreaterThan(fitted, 0)
+            XCTAssertLessThan(fitted, 24)
+            XCTAssertLessThanOrEqual(RemotePreviewLabelFitting.widestWordWidth(word, fontSize: fitted), 80)
+            XCTAssertEqual(RemotePreviewLabelFitting.measuredSize(word, fontSize: fitted, width: 80).height,
+                           RemotePreviewLabelFitting.measuredSize("Go", fontSize: fitted, width: 80).height)
+        }
+        for title in ["Jog X Negative Y Positive", "Supercalifragilisticexpialidocious",
+                      "第一行很长的按钮标题第二行", "Line one\nLine two\nLine three"] {
+            let measured = RemotePreviewLabelFitting.measuredSize(title, fontSize: 24, width: 20)
+            XCTAssertGreaterThan(measured.width, 20)
+            XCTAssertTrue(measured.height.isInfinite)
+            for bounds in [CGSize(width: 20, height: 100), CGSize(width: 100, height: 5)] {
+                let fitted = RemotePreviewLabelFitting.fontSize(for: title, in: bounds, maximum: 24)
+                XCTAssertGreaterThan(fitted, 0)
+                XCTAssertLessThan(fitted, 24)
+                XCTAssertLessThanOrEqual(RemotePreviewLabelFitting.widestWordWidth(title, fontSize: fitted), bounds.width)
+                let actual = RemotePreviewLabelFitting.measuredSize(title, fontSize: fitted, width: bounds.width)
+                XCTAssertLessThanOrEqual(actual.width, bounds.width)
+                XCTAssertLessThanOrEqual(actual.height, bounds.height)
+                let larger = RemotePreviewLabelFitting.measuredSize(title, fontSize: fitted + 0.001, width: bounds.width)
+                XCTAssertTrue(larger.width > bounds.width || larger.height > bounds.height)
+            }
+        }
+    }
+
+    func testShortHorizontalLabelsKeepMaximumAndNoIconUsesFullWidth() {
+        for hasIcon in [false, true] {
+            let size = CGSize(width: 300, height: 80)
+            let layout = RemotePreviewLabelFitting.layout(size: size, scale: 1, compact: true, hasIcon: hasIcon)
+            for title in ["Go", "Up Left", "Play"] {
+                XCTAssertEqual(RemotePreviewLabelFitting.fontSize(for: title, in: layout.labelSize, maximum: layout.maximumFontSize), 24)
+            }
+            if !hasIcon {
+                XCTAssertEqual(layout.labelSize.width, size.width - 2 * layout.padding)
+                XCTAssertEqual(layout.frames(in: size, measuredLabelHeight: 20).label.midX, size.width / 2)
+            }
         }
     }
 

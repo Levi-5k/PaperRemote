@@ -99,7 +99,23 @@ public static class RemoteProfileJson
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
             WriteIndented = false,
         };
-        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        options.Converters.Add(new JsonStringEnumConverter(new LegacyEnumNamingPolicy()));
         return options;
+    }
+
+    // Renamed enum members keep their legacy wire names; see protocol/README.md.
+    private sealed class LegacyEnumNamingPolicy : JsonNamingPolicy
+    {
+        private static readonly Dictionary<string, string> LegacyNames = new(StringComparer.Ordinal)
+        {
+            [nameof(RemoteActionType.ComputerMedia)] = "macMedia",
+            [nameof(RemoteActionType.ComputerKey)] = "macKey",
+            [nameof(RemoteActionType.ComputerOpen)] = "macOpen",
+            [nameof(RemoteActionType.AppleShortcut)] = "macShortcut",
+            [nameof(RemoteActionType.ComputerScript)] = "macScript",
+        };
+
+        public override string ConvertName(string name) =>
+            LegacyNames.TryGetValue(name, out var legacyName) ? legacyName : CamelCase.ConvertName(name);
     }
 }

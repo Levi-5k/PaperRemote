@@ -27,9 +27,11 @@ internal sealed class ScheduleEditorDialog : Form
         StartPosition = FormStartPosition.CenterParent;
         Font = new Font("Segoe UI", 9F);
 
-        var split = new SplitContainer { Dock = DockStyle.Fill, SplitterDistance = 205, FixedPanel = FixedPanel.Panel1 };
+        var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1 };
         scheduleList.Dock = DockStyle.Fill;
         scheduleList.DisplayMember = nameof(RemoteScheduleEntry.Id);
+        scheduleList.FormattingEnabled = true;
+        scheduleList.Format += FormatSchedule;
         scheduleList.SelectedIndexChanged += (_, _) => LoadSelection();
         var listButtons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 44, Padding = new Padding(6) };
         var add = new Button { Text = "Add", Width = 70 };
@@ -77,7 +79,7 @@ internal sealed class ScheduleEditorDialog : Form
         var hint = new Label
         {
             AutoSize = true,
-            ForeColor = Color.DimGray,
+            ForeColor = EditorTheme.Muted,
             Text = "Each schedule runs the selected action with the values shown above.",
         };
         fields.Controls.Add(hint, 1, 5);
@@ -89,6 +91,8 @@ internal sealed class ScheduleEditorDialog : Form
         fields.Controls.Add(dialogButtons, 1, 6);
         split.Panel2.Controls.Add(fields);
         Controls.Add(split);
+        // Before docking the split is only 150px wide, which silently clamps the distance.
+        split.SplitterDistance = 205;
         AcceptButton = save;
         CancelButton = cancel;
 
@@ -103,6 +107,7 @@ internal sealed class ScheduleEditorDialog : Form
     public static bool Edit(IWin32Window owner, RemoteAction action)
     {
         using var dialog = new ScheduleEditorDialog(action);
+        EditorTheme.StyleDialog(dialog);
         if (dialog.ShowDialog(owner) != DialogResult.OK)
         {
             return false;
@@ -161,7 +166,10 @@ internal sealed class ScheduleEditorDialog : Form
         {
             weekdays.SetItemChecked(index, entry.Weekdays.Contains(index + 1));
         }
-        text.Text = entry.Text ?? string.Empty;
+        var savedText = entry.Text ?? string.Empty;
+        // Older builds saved the label ("Play / Pause") instead of the command.
+        text.SelectedValue = (text.DataSource as IEnumerable<EditorChoice>)?
+            .FirstOrDefault(choice => choice.DisplayName == savedText)?.Value ?? savedText;
         value.Value = Math.Clamp(entry.Value ?? 0, (int)value.Minimum, (int)value.Maximum);
         valueTenths.Value = Math.Clamp(entry.ValueTenths ?? 0, (int)valueTenths.Minimum, (int)valueTenths.Maximum);
         ConfigureValueFields();
@@ -177,18 +185,21 @@ internal sealed class ScheduleEditorDialog : Form
         entry.Hour = time.Value.Hour;
         entry.Minute = time.Value.Minute;
         entry.Weekdays = weekdays.CheckedIndices.Cast<int>().Select(index => index + 1).ToList();
-        entry.Text = UsesText(action.Type) && !string.IsNullOrWhiteSpace(text.Text) ? text.Text : null;
-        entry.Value = UsesValue(action.Type, text.Text) ? (int)value.Value : null;
+        var command = SelectedCommand;
+        entry.Text = UsesText(action.Type) && !string.IsNullOrWhiteSpace(command) ? command : null;
+        entry.Value = UsesValue(action.Type, command) ? (int)value.Value : null;
         entry.ValueTenths = action.Type == RemoteActionType.NetHomeTemperature
             ? (int)valueTenths.Value : null;
         RefreshList(entry.Id);
     }
 
+    private string SelectedCommand => text.SelectedValue as string ?? string.Empty;
+
     private void ConfigureActionFields()
     {
         var choices = action.Type switch
         {
-            RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia => new[]
+            RemoteActionType.IPhoneMedia or RemoteActionType.ComputerMedia => new[]
             {
                 new EditorChoice("previous", "Previous"),
                 new EditorChoice("playPause", "Play / Pause"),
@@ -206,7 +217,7 @@ internal sealed class ScheduleEditorDialog : Form
             [new("cool", "Cooling"), new("heat", "Heating")],
             _ => [],
         };
-        textLabel.Text = action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia ? "Command" :
+        textLabel.Text = action.Type is RemoteActionType.IPhoneMedia or RemoteActionType.ComputerMedia ? "Command" :
             action.Type is RemoteActionType.WledPower or RemoteActionType.NetHomePower ? "Power" :
             action.Type == RemoteActionType.NetHomeMode ? "Mode" : "Control";
         text.DataSource = choices;
@@ -254,20 +265,20 @@ internal sealed class ScheduleEditorDialog : Form
 
     private void ConfigureValueFields()
     {
-        valueLabel.Visible = value.Visible = UsesValue(action.Type, text.Text);
+        valueLabel.Visible = value.Visible = UsesValue(action.Type, SelectedCommand);
         valueTenthsLabel.Visible = valueTenths.Visible =
             action.Type == RemoteActionType.NetHomeTemperature;
     }
 
     private static bool UsesText(RemoteActionType type) => type is
-        RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia or RemoteActionType.WledPower or
+        RemoteActionType.IPhoneMedia or RemoteActionType.ComputerMedia or RemoteActionType.WledPower or
         RemoteActionType.NetHomePower or RemoteActionType.NetHomeMode or
         RemoteActionType.NetHomeAuto;
 
     private static bool UsesValue(RemoteActionType type, string command) =>
         type is RemoteActionType.WledPreset or RemoteActionType.WledBrightness or
             RemoteActionType.NetHomeTemperatureStep or RemoteActionType.NetHomeFan ||
-        type is RemoteActionType.IPhoneMedia or RemoteActionType.MacMedia && command == "volume";
+        type is RemoteActionType.IPhoneMedia or RemoteActionType.ComputerMedia && command == "volume";
 
     private void RefreshList(Guid? selectedId = null)
     {
@@ -275,7 +286,6 @@ internal sealed class ScheduleEditorDialog : Form
         selectedId ??= (scheduleList.SelectedItem as RemoteScheduleEntry)?.Id;
         scheduleList.DataSource = null;
         scheduleList.DataSource = schedules;
-        scheduleList.Format += FormatSchedule;
         if (selectedId is not null)
         {
             scheduleList.SelectedItem = schedules.FirstOrDefault(entry => entry.Id == selectedId);

@@ -311,16 +311,7 @@ internal sealed class CompanionWindow : Form
 
     private static string FormatAction(ActionSnapshot action)
     {
-        var actionName = action.Type switch
-        {
-            "iPhoneMedia" => "iPhone media",
-            "macMedia" => "Media",
-            "macKey" => "Keyboard",
-            "macOpen" => "Open",
-            "macScript" => "Script",
-            _ => action.Type,
-        };
-        var detail = string.IsNullOrWhiteSpace(action.Text) ? actionName : $"{actionName}: {action.Text}";
+        var detail = ActionDescriptions.Describe(action.Type, action.Text);
         return $"{(action.Succeeded ? "Last action" : "Last action failed")}  •  {detail}  •  {action.ReceivedAt.LocalDateTime:t}";
     }
 

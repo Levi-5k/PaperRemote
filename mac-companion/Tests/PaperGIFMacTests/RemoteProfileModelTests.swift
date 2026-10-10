@@ -166,7 +166,7 @@ final class RemoteProfileModelTests: XCTestCase {
             title: "Status",
             symbol: "",
             kind: .textBox,
-            action: .init(type: .macMedia),
+            action: .init(type: .computerMedia),
             layoutSlot: 2,
             textBox: RemoteTextBox(gridWidth: 2, gridHeight: 3)
         )
@@ -182,7 +182,7 @@ final class RemoteProfileModelTests: XCTestCase {
             title: "Play",
             symbol: "play.fill",
             kind: .button,
-            action: .init(type: .macMedia, text: "playPause")
+            action: .init(type: .computerMedia, text: "playPause")
         )
 
         let placement = try XCTUnwrap(RemoteGrid.placement(for: control, at: 3))
@@ -197,7 +197,7 @@ final class RemoteProfileModelTests: XCTestCase {
             title: "Mute",
             symbol: "speaker.slash.fill",
             kind: .button,
-            action: .init(type: .macMedia, text: "mute")
+            action: .init(type: .computerMedia, text: "mute")
         )
         control.buttonHeight = 1
 

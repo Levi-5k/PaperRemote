@@ -45,7 +45,7 @@ internal static class CompanionSettingsDialog
         var explanation = new Label
         {
             AutoSize = true,
-            ForeColor = SystemColors.GrayText,
+            ForeColor = EditorTheme.Muted,
             Padding = new Padding(0, 8, 0, 8),
             Text = "Enter one exact PowerShell script path per line. Port changes restart the companion.",
         };
@@ -69,6 +69,7 @@ internal static class CompanionSettingsDialog
         form.Controls.Add(layout);
         form.AcceptButton = save;
         form.CancelButton = cancel;
+        EditorTheme.StyleDialog(form);
 
         if (form.ShowDialog() != DialogResult.OK)
         {

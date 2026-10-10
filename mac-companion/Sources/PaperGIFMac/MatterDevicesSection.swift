@@ -1,8 +1,12 @@
+import CoreWLAN
 import SwiftUI
 
 struct MatterDevicesSection: View {
     @ObservedObject var manager: MatterDeviceManager
     @State private var showingSetup = false
+    @State private var renaming: MatterDeviceManager.Device?
+    @State private var newName = ""
+    @State private var removing: MatterDeviceManager.Device?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -35,12 +39,53 @@ struct MatterDevicesSection: View {
                     Text("#\(device.number)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
+                    Menu {
+                        Button("Rename…") {
+                            newName = device.name
+                            renaming = device
+                        }
+                        Button("Remove…", role: .destructive) { removing = device }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .disabled(manager.isBusy)
                 }
+            }
+            if let status = manager.status, !manager.isAdding {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .task { await manager.refresh() }
         .sheet(isPresented: $showingSetup) {
             MatterSetupSheet(manager: manager)
+        }
+        .alert("Rename Device", isPresented: Binding(
+            get: { renaming != nil },
+            set: { if !$0 { renaming = nil } }
+        )) {
+            TextField("Name", text: $newName)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") {
+                if let device = renaming {
+                    Task { await manager.rename(device, to: newName) }
+                }
+            }
+        }
+        .confirmationDialog(
+            "Remove \(removing?.name ?? "device") from this Mac?",
+            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+            presenting: removing
+        ) { device in
+            Button("Remove", role: .destructive) {
+                Task { await manager.remove(device) }
+            }
+        } message: { device in
+            Text("Buttons set to #\(device.number) will stop working. The device stays in Apple Home.")
         }
     }
 }
@@ -55,6 +100,9 @@ private struct MatterSetupSheet: View {
     @State private var step = Step.pairingMode
     @State private var name = ""
     @State private var pairingCode = ""
+    @State private var isNewDevice = false
+    @State private var wifiSSID = ""
+    @State private var wifiPassword = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -75,7 +123,7 @@ private struct MatterSetupSheet: View {
             buttons
         }
         .padding(20)
-        .frame(width: 460, height: 380)
+        .frame(width: 480, height: 430)
         .interactiveDismissDisabled(step == .adding)
     }
 
@@ -92,14 +140,30 @@ private struct MatterSetupSheet: View {
         switch step {
         case .pairingMode:
             VStack(alignment: .leading, spacing: 10) {
-                Text("Your device can stay in Apple Home. Apple Home creates a one-time code that lets this Mac control it too.")
-                    .fixedSize(horizontal: false, vertical: true)
-                instruction(1, "On your iPhone, open the **Home** app.")
-                instruction(2, "Touch and hold the device, then tap the **settings** button (or scroll to the bottom).")
-                instruction(3, "Tap **Turn On Pairing Mode**, then copy the **Setup Code** it shows.")
-                Text("The code only works for a few minutes, so continue right away.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Picker("", selection: $isNewDevice) {
+                    Text("Already in Apple Home").tag(false)
+                    Text("New or reset device").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                if isNewDevice {
+                    Text("Use the setup code printed on the device or its box, usually an 11-digit number beside the QR code.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    instruction(1, "Plug the device in and put it in **pairing mode** (see its manual; often hold the button until a light blinks).")
+                    instruction(2, "Keep it near this Mac. It's found over Bluetooth, then joined to your Wi-Fi.")
+                    Text("Thread-only devices need a Thread border router and can't be added here yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Your device can stay in Apple Home. Apple Home creates a one-time code that lets this Mac control it too.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    instruction(1, "On your iPhone, open the **Home** app.")
+                    instruction(2, "Touch and hold the device, then tap the **settings** button (or scroll to the bottom).")
+                    instruction(3, "Tap **Turn On Pairing Mode**, then copy the **Setup Code** it shows.")
+                    Text("The code only works for a few minutes, so continue right away.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         case .enterCode:
             VStack(alignment: .leading, spacing: 10) {
@@ -112,6 +176,18 @@ private struct MatterSetupSheet: View {
                     Text("Setup codes have 11 digits, like 1234-567-8901.")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                }
+                if isNewDevice {
+                    Text("Wi-Fi network for the device").font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        TextField("Network name", text: $wifiSSID)
+                        SecureField("Password", text: $wifiPassword)
+                    }
+                }
+            }
+            .onAppear {
+                if isNewDevice && wifiSSID.isEmpty {
+                    wifiSSID = CWWiFiClient.shared().interface()?.ssid() ?? ""
                 }
             }
         case .adding:
@@ -139,7 +215,12 @@ private struct MatterSetupSheet: View {
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("Things to check:").font(.caption.weight(.semibold))
-                    Text("• Pairing mode may have expired. Turn it on again in the Home app for a new code.")
+                    if isNewDevice {
+                        Text("• The device must still be in pairing mode and close to this Mac.")
+                        Text("• Check the Wi-Fi name and password. Many devices only join 2.4 GHz networks.")
+                    } else {
+                        Text("• Pairing mode may have expired. Turn it on again in the Home app for a new code.")
+                    }
                     Text("• The code must be typed exactly as shown.")
                     Text("• The device and this Mac must be on the same home network.")
                 }
@@ -162,7 +243,8 @@ private struct MatterSetupSheet: View {
                 Button("Back") { step = .pairingMode }
                 Button("Add Device") { startAdding() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(!MatterDeviceManager.isPlausiblePairingCode(pairingCode))
+                    .disabled(!MatterDeviceManager.isPlausiblePairingCode(pairingCode) ||
+                        isNewDevice && wifiSSID.trimmingCharacters(in: .whitespaces).isEmpty)
             case .adding:
                 EmptyView()
             case .finished:
@@ -196,7 +278,13 @@ private struct MatterSetupSheet: View {
     private func startAdding() {
         step = .adding
         Task {
-            await manager.add(pairingCode: pairingCode, name: name)
+            await manager.add(
+                pairingCode: pairingCode,
+                name: name,
+                wifiSSID: isNewDevice ? wifiSSID.trimmingCharacters(in: .whitespaces) : nil,
+                wifiPassword: isNewDevice ? wifiPassword : nil
+            )
+            wifiPassword = ""
             step = .finished
         }
     }

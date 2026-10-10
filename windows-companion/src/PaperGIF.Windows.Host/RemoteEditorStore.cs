@@ -99,28 +99,120 @@ internal sealed class RemoteEditorStore : IDisposable
         Commit();
     }
 
-    public void AddPage(RemotePage page, string? openBuildsComputerId = null)
+    public void AddPage(RemotePage page)
     {
         if (Profile.Pages.Count >= 8)
         {
             return;
         }
-        TargetOpenBuilds(page.Controls, openBuildsComputerId ?? LocalComputerId);
+        EnsureLocalComputer();
+        TargetComputer(page.Controls, LocalComputerId, includeModuleActions: false);
         Profile.Pages.Add(page);
         SelectedPageId = page.Id;
         SelectedControlId = null;
         Commit();
     }
 
-    // The paired computer running OpenBuilds CONTROL, preferring this one.
-    public async Task<RemoteComputer?> OpenBuildsComputerAsync()
+    internal static bool RunsOnComputer(RemoteActionType type) => type is
+        RemoteActionType.ComputerMedia or RemoteActionType.ComputerKey or RemoteActionType.ComputerOpen or
+        RemoteActionType.AppleShortcut or RemoteActionType.ComputerScript or RemoteActionType.OpenBuilds or
+        RemoteActionType.Module or RemoteActionType.NetHomePower or RemoteActionType.NetHomeTemperature or
+        RemoteActionType.NetHomeTemperatureStep or RemoteActionType.NetHomeMode or
+        RemoteActionType.NetHomeFan or RemoteActionType.NetHomeAuto;
+
+    private static bool RunsOnComputer(RemoteTextSource source) => source is
+        RemoteTextSource.ComputerScript or RemoteTextSource.AppleShortcut or
+        RemoteTextSource.NowPlaying or RemoteTextSource.OpenBuildsPosition;
+
+    // Module runtimes such as Matter exist only in the Mac companion, so this PC never targets itself for them.
+    internal static void TargetComputer(
+        IEnumerable<RemoteControl> controls,
+        string? computerId,
+        bool replaceExisting = true,
+        bool includeModuleActions = true)
     {
-        var computers = Profile.Computers.ToList();
-        var running = await Task.WhenAll(computers.Select(computer =>
-            OpenBuildsControlService.IsRunningAsync(computer.Host)));
-        var candidates = computers.Where((_, index) => running[index]).ToList();
-        return candidates.FirstOrDefault(computer => computer.Token == configuration.Token) ??
-            candidates.FirstOrDefault();
+        if (string.IsNullOrEmpty(computerId))
+        {
+            return;
+        }
+        bool Targets(RemoteActionType type) =>
+            RunsOnComputer(type) && (includeModuleActions || type != RemoteActionType.Module);
+        Guid? textComputerId = Guid.TryParse(computerId, out var parsedId) ? parsedId : null;
+        foreach (var control in controls)
+        {
+            if (Targets(control.Action.Type) && (replaceExisting || string.IsNullOrEmpty(control.Action.ComputerID)))
+            {
+                control.Action.ComputerID = computerId;
+            }
+            if (control.TextBox is not { } textBox)
+            {
+                continue;
+            }
+            if (textComputerId is not null && RunsOnComputer(textBox.Source) && (replaceExisting || textBox.ComputerID is null))
+            {
+                textBox.ComputerID = textComputerId;
+            }
+            if (textBox.TapAction is { } tapAction && Targets(tapAction.Type) &&
+                (replaceExisting || string.IsNullOrEmpty(tapAction.ComputerID)))
+            {
+                tapAction.ComputerID = computerId;
+            }
+        }
+    }
+
+    // Mirrors the Mac editor so a type change never keeps the previous action's text or values.
+    internal static void ApplyActionDefaults(RemoteControl control, RemoteActionType type)
+    {
+        if (control.Action.Type == type)
+        {
+            return;
+        }
+        var host = control.Action.Host;
+        var computerId = control.Action.ComputerID;
+        control.IconBitmap = null;
+        control.Action = type switch
+        {
+            RemoteActionType.IPhoneMedia => new() { Text = "playPause" },
+            RemoteActionType.ComputerMedia => new() { Text = "playPause", ComputerID = computerId },
+            RemoteActionType.IPhoneHomePower => new() { Host = host, Text = "toggle" },
+            RemoteActionType.ComputerKey => new() { Text = "space", ComputerID = computerId },
+            RemoteActionType.OpenBuilds => new() { Host = "127.0.0.1", Text = "jogXPositive", Value = 1, ComputerID = computerId },
+            RemoteActionType.WledPower or RemoteActionType.EWeLinkPower => new() { Host = host, Text = "toggle" },
+            RemoteActionType.WledPreset => new() { Host = host, Value = 1 },
+            RemoteActionType.WledBrightness => new() { Host = host, Value = 128 },
+            RemoteActionType.LocalHTTP => new() { Host = host, Text = "/", HttpMethod = "GET" },
+            RemoteActionType.NetHomePower => new() { Host = host, Text = "toggle", ComputerID = computerId },
+            RemoteActionType.NetHomeTemperature => new() { Host = host, Value = 22, ValueTenths = 220, ComputerID = computerId },
+            RemoteActionType.NetHomeTemperatureStep => new() { Host = host, Value = 1, ComputerID = computerId },
+            RemoteActionType.NetHomeMode => new() { Host = host, Text = "auto", ComputerID = computerId },
+            RemoteActionType.NetHomeFan => new() { Host = host, Value = 40, ComputerID = computerId },
+            RemoteActionType.NetHomeAuto => new()
+            {
+                Host = host, Text = "cool", Value = 22, ComputerID = computerId,
+                DeadbandTenths = 10, HumidityThreshold = 65, MinimumCycleMinutes = 10,
+            },
+            RemoteActionType.Page => new(),
+            _ => new() { ComputerID = computerId },
+        };
+        control.Action.Type = type;
+        if (type == RemoteActionType.ComputerOpen)
+        {
+            control.Title = "Open App or URL";
+        }
+        if (control.Kind == RemoteControlKind.TextBox)
+        {
+            return;
+        }
+        control.Kind = type is RemoteActionType.WledBrightness or RemoteActionType.NetHomeTemperature or
+            RemoteActionType.NetHomeFan ? RemoteControlKind.Slider : RemoteControlKind.Button;
+        if (control.Kind == RemoteControlKind.Slider)
+        {
+            control.IsToggle = null;
+        }
+        else if (type is RemoteActionType.NetHomeAuto or RemoteActionType.EWeLinkPower or RemoteActionType.IPhoneHomePower)
+        {
+            control.IsToggle = true;
+        }
     }
 
     public int UpdateModulePages(PaperModuleManifest module)
@@ -192,6 +284,7 @@ internal sealed class RemoteEditorStore : IDisposable
             return false;
         }
         TargetOpenBuilds([control], ExistingOpenBuildsComputerId ?? LocalComputerId);
+        TargetComputer([control], LocalComputerId, replaceExisting: false, includeModuleActions: false);
         page.Controls.Add(control);
         SelectedControlId = control.Id;
         Commit();
@@ -200,6 +293,12 @@ internal sealed class RemoteEditorStore : IDisposable
 
     private string? LocalComputerId =>
         Profile.Computers.FirstOrDefault(computer => computer.Token == configuration.Token)?.Id.ToString();
+
+    public string? EnsureLocalComputerId()
+    {
+        EnsureLocalComputer();
+        return LocalComputerId;
+    }
 
     private string? ExistingOpenBuildsComputerId => Profile.Pages
         .SelectMany(page => page.Controls)

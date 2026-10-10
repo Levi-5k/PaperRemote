@@ -284,6 +284,13 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
             case .installing(let item): "Installing \(item)…"
             }
         }
+
+        var item: String {
+            switch self {
+            case .checking: ""
+            case .downloading(let item), .installing(let item): item
+            }
+        }
     }
 
     @Published private(set) var release: AvailableRelease?
@@ -292,6 +299,9 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
     @Published private(set) var activity: Activity?
     @Published private(set) var problem: String?
     @Published private(set) var notice: String?
+    @Published private(set) var lastChecked: Date?
+    /// Set to open the Updates page in the controls editor.
+    @Published var isShowingUpdates = false
 
     var menuChanged: ((_ title: String, _ enabled: Bool) -> Void)?
     var firmwareTarget: (() -> FirmwareTarget?)?
@@ -339,6 +349,7 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
         defer { setActivity(nil) }
         do {
             release = try await ReleaseClient.latest()
+            lastChecked = Date()
             problem = nil
         } catch {
             DiagnosticLog.error("Update check failed", error: error)
@@ -373,46 +384,11 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
         notice = nil
     }
 
-    /// Menu command: checks, then asks about each available update.
-    func checkForUpdates(userInitiated: Bool) async {
-        await refresh()
-        guard let release else {
-            if userInitiated, let problem { inform(title: "Could Not Check for Updates", message: problem) }
-            return
-        }
-        if let appUpdate, confirm(
-            title: "paperGIF Mac \(appUpdate.version) Is Available",
-            message: "You have \(currentAppVersion). paperGIF Mac will download, verify, install, and relaunch.\n\n\(appUpdate.notes)",
-            action: "Install and Relaunch"
-        ) {
-            await installAppUpdate()
-            if let problem { inform(title: "Could Not Install the Update", message: problem) }
-            return
-        }
-        if firmwareNeedsUSB {
-            inform(
-                title: "M5Paper Needs a One-Time USB Update",
-                message: "This M5Paper's firmware is too old to update over Wi-Fi. Flash firmware \(release.version) over USB once; later updates install from here."
-            )
-        } else if let firmwareUpdate, let deviceFirmware, confirm(
-            title: "M5Paper Firmware \(firmwareUpdate.version) Is Available",
-            message: "The M5Paper has \(deviceFirmware). It shows its progress on screen and restarts when the update finishes.",
-            action: "Update M5Paper"
-        ) {
-            await installFirmwareUpdate()
-            if let problem {
-                inform(title: "Could Not Update the M5Paper", message: problem)
-            } else if let notice {
-                inform(title: "M5Paper Updated", message: notice)
-            }
-        } else if userInitiated && appUpdate == nil && firmwareUpdate == nil {
-            let firmwareLine = deviceFirmware.map { "M5Paper firmware \($0)" }
-                ?? "M5Paper not found on the network, so its firmware was not checked"
-            inform(
-                title: "paperGIF Is Up to Date",
-                message: "paperGIF Mac \(currentAppVersion)\n\(firmwareLine)\nLatest release: \(release.version)"
-            )
-        }
+    /// Menu command and notification click: opens the Updates page and checks again.
+    func showUpdates() {
+        openUpdates?()
+        isShowingUpdates = true
+        Task { await refresh() }
     }
 
     func installAppUpdate() async {
@@ -486,7 +462,7 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        Task { @MainActor in self.openUpdates?() }
+        Task { @MainActor in self.showUpdates() }
         completionHandler()
     }
 
@@ -578,23 +554,5 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
-    }
-
-    private func confirm(title: String, message: String, action: String) -> Bool {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.addButton(withTitle: action)
-        alert.addButton(withTitle: "Later")
-        return alert.runModal() == .alertFirstButtonReturn
-    }
-
-    private func inform(title: String, message: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.runModal()
     }
 }

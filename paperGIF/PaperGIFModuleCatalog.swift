@@ -201,7 +201,7 @@ enum PaperGIFModuleCatalog {
 
     private static func requiresComputer(_ type: PaperGIFRemoteActionType) -> Bool {
         switch type {
-        case .macMedia, .macKey, .macOpen, .macShortcut, .macScript, .openBuilds,
+        case .computerMedia, .computerKey, .computerOpen, .appleShortcut, .computerScript, .openBuilds,
              .netHomePower, .netHomeTemperature, .netHomeTemperatureStep,
                .netHomeMode, .netHomeFan, .netHomeAuto, .module:
             true
@@ -213,7 +213,7 @@ enum PaperGIFModuleCatalog {
 
     private static func requiresComputer(_ source: PaperGIFRemoteTextSource) -> Bool {
         switch source {
-        case .macScript, .macShortcut, .nowPlaying, .openBuildsPosition:
+        case .computerScript, .appleShortcut, .nowPlaying, .openBuildsPosition:
             true
         case .staticText, .dateTime, .controlValue:
             false

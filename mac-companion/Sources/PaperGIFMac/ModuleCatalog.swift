@@ -129,9 +129,10 @@ final class ModuleCatalog: ObservableObject {
             page.openBuildsController = controller
         }
 
-        let actionComputerID = existing.controls.lazy.compactMap(\.action.computerID).first
+        let pageComputerID = existing.controls.lazy.compactMap {
+            $0.action.type.runsOnComputer ? $0.action.computerID : nil
+        }.first ?? existing.controls.lazy.compactMap { $0.textBox?.computerID?.uuidString }.first
         let actionHost = existing.controls.lazy.map(\.action.host).first { !$0.isEmpty }
-        let textComputerID = existing.controls.lazy.compactMap(\.textBox?.computerID).first
         let textHost = existing.controls.lazy.compactMap { control -> String? in
             guard control.textBox?.source == .openBuildsPosition,
                   let sourceText = control.textBox?.sourceText else { return nil }
@@ -139,19 +140,19 @@ final class ModuleCatalog: ObservableObject {
         }.first
 
         for index in page.controls.indices {
+            if let pageComputerID {
+                page.controls[index] = page.controls[index].targetingComputer(pageComputerID)
+            }
             if let previous = existing.controls.first(where: {
                 $0.kind == page.controls[index].kind && $0.title == page.controls[index].title
             }) {
                 page.controls[index].id = previous.id
+                page.controls[index].keepComputerTargets(of: previous)
             }
-            if page.controls[index].action.type == .openBuilds {
-                page.controls[index].action.computerID = actionComputerID
-                if let actionHost {
-                    page.controls[index].action.host = actionHost
-                }
+            if page.controls[index].action.type == .openBuilds, let actionHost {
+                page.controls[index].action.host = actionHost
             }
             if page.controls[index].textBox?.source == .openBuildsPosition {
-                page.controls[index].textBox?.computerID = textComputerID
                 if let textHost,
                    let sourceText = page.controls[index].textBox?.sourceText {
                     var components = sourceText.split(

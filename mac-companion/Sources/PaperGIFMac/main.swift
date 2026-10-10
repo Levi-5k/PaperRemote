@@ -479,24 +479,41 @@ private final class CompanionServer {
         return String(describing: host)
     }
 
+    private static let applicationCacheLock = NSLock()
+    private static var cachedApplications: (loadedAt: Date, applications: [InstalledApplication])?
+
+    // Walking every bundle and rendering icons is slow, and each editor inspector asks again.
     private static func installedApplications() -> [InstalledApplication] {
+        applicationCacheLock.lock()
+        defer { applicationCacheLock.unlock() }
+        if let cachedApplications, Date().timeIntervalSince(cachedApplications.loadedAt) < 60 {
+            return cachedApplications.applications
+        }
+        let applications = scanInstalledApplications()
+        cachedApplications = (Date(), applications)
+        return applications
+    }
+
+    private static func scanInstalledApplications() -> [InstalledApplication] {
         let fileManager = FileManager.default
-        var roots = Set(fileManager.urls(
+        // Earlier roots win when the same bundle identifier is installed twice.
+        var roots = fileManager.urls(
             for: .applicationDirectory,
             in: [.userDomainMask, .localDomainMask, .networkDomainMask, .systemDomainMask]
-        ).map(\.standardizedFileURL))
-        roots.insert(URL(fileURLWithPath: "/System/Library/CoreServices", isDirectory: true))
+        ).map(\.standardizedFileURL)
+        roots.append(URL(fileURLWithPath: "/System/Library/CoreServices", isDirectory: true))
 
         for volume in fileManager.mountedVolumeURLs(
             includingResourceValuesForKeys: [.volumeIsLocalKey],
             options: [.skipHiddenVolumes]
         ) ?? [] {
             guard volume.path != "/" else { continue }
-            roots.insert(volume.appendingPathComponent("Applications", isDirectory: true))
+            roots.append(volume.appendingPathComponent("Applications", isDirectory: true))
         }
 
+        var visitedRoots = Set<URL>()
         var applicationsByIdentifier: [String: InstalledApplication] = [:]
-        for root in roots where fileManager.fileExists(atPath: root.path) {
+        for root in roots where visitedRoots.insert(root).inserted && fileManager.fileExists(atPath: root.path) {
             guard let enumerator = fileManager.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.isDirectoryKey],
@@ -506,10 +523,16 @@ private final class CompanionServer {
             for case let url as URL in enumerator where url.pathExtension.lowercased() == "app" {
                 enumerator.skipDescendants()
                 let bundle = Bundle(url: url)
+                let isBackgroundApp = ["LSUIElement", "LSBackgroundOnly"].contains { key in
+                    let value = bundle?.object(forInfoDictionaryKey: key)
+                    return (value as? NSNumber)?.boolValue == true || (value as? String) == "1"
+                }
+                if isBackgroundApp { continue }
+                let identifier = bundle?.bundleIdentifier ?? url.standardizedFileURL.path
+                guard applicationsByIdentifier[identifier] == nil else { continue }
                 let name = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
                     ?? bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
                     ?? url.deletingPathExtension().lastPathComponent
-                let identifier = bundle?.bundleIdentifier ?? url.standardizedFileURL.path
                 applicationsByIdentifier[identifier] = InstalledApplication(
                     name: name,
                     path: url.standardizedFileURL.path,
@@ -618,10 +641,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var nowPlayingSubscriptions: [String: Set<String>] = [:]
     private var playbackStateSubscriptions: [String: Set<String>] = [:]
     private var outputVolumeSubscriptions: [String: Set<String>] = [:]
-    /// M5Paper host -> control ID -> module ID, for toggle buttons that show a module device's real state.
-    private var moduleStateSubscriptions: [String: [String: String]] = [:]
+    /// M5Paper host -> control ID -> "moduleID#device" source and when the M5Paper last asked for it.
+    private var moduleStateSubscriptions: [String: [String: (source: String, seenAt: Date)]] = [:]
     private var lastModuleStates: [String: Bool] = [:]
     private var moduleStateTimer: DispatchSourceTimer?
+    /// moduleStateQueue only. Unreachable devices are skipped for a while so presses aren't stuck behind reads.
+    private var moduleStateRetryAfter: [String: Date] = [:]
     private let moduleStateQueue = DispatchQueue(label: "paperGIF.companion.module-state", qos: .utility)
     private var nowPlayingNotificationObservers: [NSObjectProtocol] = []
     private var distributedNowPlayingObservers: [NSObjectProtocol] = []
@@ -912,9 +937,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor private func startUpdateChecks() {
         let service = UpdateService()
-        service.menuChanged = { [weak self] title, enabled in
+        service.menuChanged = { [weak self] title, _ in
+            // Stays enabled while busy: it opens the Updates page, which shows progress.
             self?.updateMenuItem.title = title
-            self?.updateMenuItem.action = enabled ? #selector(self?.checkForUpdates) : nil
         }
         service.firmwareTarget = { [weak self] in
             guard let self else { return nil }
@@ -932,7 +957,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor @objc private func checkForUpdates() {
-        Task { await updateService?.checkForUpdates(userInitiated: true) }
+        updateService?.showUpdates()
     }
 
     @objc private func forgetPairedDevices() {
@@ -1141,7 +1166,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 outputVolumeSubscriptions[subscriberHost] = outputVolumeControlIDs
             }
             if let subscriberHost, !moduleStateControls.isEmpty {
-                moduleStateSubscriptions[subscriberHost] = moduleStateControls
+                // Merge: after a press the M5Paper re-polls only that button, not the page's other toggles.
+                let now = Date()
+                for (controlID, source) in moduleStateControls {
+                    moduleStateSubscriptions[subscriberHost, default: [:]][controlID] = (source, now)
+                }
                 startModuleStatePolling()
             }
             permittedScripts = allowedScripts
@@ -1163,7 +1192,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             : nowPlayingText()?.trimmingCharacters(in: .whitespacesAndNewlines)
         let volume = outputVolumeControlIDs.isEmpty ? nil : outputVolumeValue()
         let moduleStates = Dictionary(uniqueKeysWithValues: Set(moduleStateControls.values).map {
-            ($0, moduleState(for: $0))
+            ($0, moduleState(for: $0, waitingAtMost: 2))
         })
         if !moduleStates.isEmpty {
             DispatchQueue.main.sync {
@@ -1255,7 +1284,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// `source` is "moduleID#deviceNumber" from the M5Paper; device 0 means the module's default. Blocking.
-    private func moduleState(for source: String) -> Bool? {
+    /// Gives up after `waitingAtMost` seconds if the module is busy, e.g. adding a device for up to two minutes.
+    private func moduleState(for source: String, waitingAtMost timeout: TimeInterval) -> Bool? {
         struct StateResponse: Decodable {
             let succeeded: Bool
             let on: Bool?
@@ -1264,7 +1294,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let moduleID = parts.first, !moduleID.isEmpty else { return nil }
         var request = ModuleManageRequest(command: "state")
         request.device = parts.count == 2 ? Int(parts[1]) : nil
-        guard let data = try? moduleRuntimeHost.manage(moduleID: moduleID, request),
+        guard let data = try? moduleRuntimeHost.manage(moduleID: moduleID, request, waitingAtMost: timeout),
               let response = try? JSONDecoder().decode(StateResponse.self, from: data),
               response.succeeded else { return nil }
         return response.on
@@ -1282,9 +1312,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func pollModuleStates() {
         var subscriptions: [String: [String: String]] = [:]
-        DispatchQueue.main.sync { subscriptions = moduleStateSubscriptions }
+        DispatchQueue.main.sync {
+            // The M5Paper re-asks every 60 s while a page is shown; drop pages it left or slept through.
+            let cutoff = Date().addingTimeInterval(-150)
+            moduleStateSubscriptions = moduleStateSubscriptions
+                .mapValues { $0.filter { $0.value.seenAt >= cutoff } }
+                .filter { !$0.value.isEmpty }
+            if moduleStateSubscriptions.isEmpty {
+                moduleStateTimer?.cancel()
+                moduleStateTimer = nil
+            }
+            subscriptions = moduleStateSubscriptions.mapValues { $0.mapValues(\.source) }
+        }
         for moduleID in Set(subscriptions.values.flatMap(\.values)) {
-            guard let on = moduleState(for: moduleID) else { continue }
+            if let retryAfter = moduleStateRetryAfter[moduleID], retryAfter > Date() { continue }
+            guard let on = moduleState(for: moduleID, waitingAtMost: 1) else {
+                moduleStateRetryAfter[moduleID] = Date().addingTimeInterval(15)
+                continue
+            }
+            moduleStateRetryAfter[moduleID] = nil
             var changed = false
             DispatchQueue.main.sync {
                 changed = lastModuleStates[moduleID] != on

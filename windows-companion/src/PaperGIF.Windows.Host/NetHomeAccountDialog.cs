@@ -33,7 +33,7 @@ internal sealed class NetHomeAccountDialog : Form
         layout.Controls.Add(new Label
         {
             AutoSize = true,
-            ForeColor = Color.DimGray,
+            ForeColor = EditorTheme.Muted,
             Text = "Credentials are encrypted for your Windows account.",
         }, 1, 2);
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
@@ -45,6 +45,7 @@ internal sealed class NetHomeAccountDialog : Form
         Controls.Add(layout);
         AcceptButton = connect;
         CancelButton = cancel;
+        EditorTheme.StyleDialog(this);
     }
 
     private static void AddField(TableLayoutPanel layout, string label, Control field, int row)

@@ -175,18 +175,6 @@ final class OpenBuildsControlService {
         return nil
     }
 
-    static func isRunning(on host: String) async -> Bool {
-        for endpoint in endpoints(host: host) {
-            var request = URLRequest(url: endpoint.appendingPathComponent("api/version"))
-            request.timeoutInterval = 1.25
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  (response as? HTTPURLResponse)?.statusCode == 200,
-                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            if payload["application"] as? String == "OMD" { return true }
-        }
-        return false
-    }
-
     static func endpoints(host: String) -> [URL] {
         let rawHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let rawTarget = rawHost.isEmpty ? "127.0.0.1" : rawHost

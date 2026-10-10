@@ -27,6 +27,9 @@ internal sealed class UpdateCoordinator : IDisposable
     public string? Activity { get; private set; }
     public string? Problem { get; private set; }
     public string? Notice { get; private set; }
+    public DateTime? LastChecked { get; private set; }
+
+    public bool HasUpdate => AppUpdate is not null || FirmwareUpdate is not null;
 
     public static string CurrentVersion => UpdateService.CurrentVersion;
 
@@ -60,6 +63,7 @@ internal sealed class UpdateCoordinator : IDisposable
             try
             {
                 Release = await service.LatestAsync();
+                LastChecked = DateTime.UtcNow;
                 Problem = null;
             }
             catch (Exception exception) when (IsUpdateFailure(exception))

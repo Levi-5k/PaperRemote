@@ -13,16 +13,16 @@ internal static class RemoteControlCatalog
 {
     public static IReadOnlyList<RemoteControlTemplate> All { get; } =
     [
-        Template("blank-button", "Basic", "Button", "Configure a custom action", RemoteControlKind.Button, RemoteActionType.MacMedia, "playPause"),
+        Template("blank-button", "Basic", "Button", "Configure a custom action", RemoteControlKind.Button, RemoteActionType.ComputerMedia, "playPause"),
         Template("blank-slider", "Basic", "Slider", "Configure a compact slider", RemoteControlKind.Slider, RemoteActionType.WledBrightness),
         TextTemplate("blank-text", "Basic", "Text Box", "Display static or dynamic text"),
-        Template("previous", "Playback", "Previous", "Previous track", RemoteControlKind.Button, RemoteActionType.MacMedia, "previous"),
-        Template("play-pause", "Playback", "Play / Pause", "Toggle playback", RemoteControlKind.Button, RemoteActionType.MacMedia, "playPause"),
-        Template("next", "Playback", "Next", "Next track", RemoteControlKind.Button, RemoteActionType.MacMedia, "next"),
-        Template("volume-down", "Volume", "Volume Down", "Lower computer volume", RemoteControlKind.Button, RemoteActionType.MacMedia, "volumeDown"),
-        Template("volume", "Volume", "Volume Slider", "Set computer volume", RemoteControlKind.Slider, RemoteActionType.MacMedia, "volume", 128),
-        Template("mute", "Volume", "Mute", "Toggle computer mute", RemoteControlKind.Button, RemoteActionType.MacMedia, "mute"),
-        Template("volume-up", "Volume", "Volume Up", "Raise computer volume", RemoteControlKind.Button, RemoteActionType.MacMedia, "volumeUp"),
+        Template("previous", "Playback", "Previous", "Previous track", RemoteControlKind.Button, RemoteActionType.ComputerMedia, "previous"),
+        Template("play-pause", "Playback", "Play / Pause", "Toggle playback", RemoteControlKind.Button, RemoteActionType.ComputerMedia, "playPause"),
+        Template("next", "Playback", "Next", "Next track", RemoteControlKind.Button, RemoteActionType.ComputerMedia, "next"),
+        Template("volume-down", "Volume", "Volume Down", "Lower computer volume", RemoteControlKind.Button, RemoteActionType.ComputerMedia, "volumeDown"),
+        Template("volume", "Volume", "Volume Slider", "Set computer volume", RemoteControlKind.Slider, RemoteActionType.ComputerMedia, "volume", 128),
+        Template("mute", "Volume", "Mute", "Toggle computer mute", RemoteControlKind.Button, RemoteActionType.ComputerMedia, "mute"),
+        Template("volume-up", "Volume", "Volume Up", "Raise computer volume", RemoteControlKind.Button, RemoteActionType.ComputerMedia, "volumeUp"),
         Key("undo", "Editing", "Undo", "Ctrl+Z", "z", "control"),
         Key("redo", "Editing", "Redo", "Ctrl+Shift+Z", "z", "control", "shift"),
         Key("cut", "Editing", "Cut", "Ctrl+X", "x", "control"),
@@ -42,8 +42,8 @@ internal static class RemoteControlCatalog
         Key("arrow-down", "Navigation", "Down", "Down arrow", "down"),
         Key("arrow-left", "Navigation", "Left", "Left arrow", "left"),
         Key("arrow-right", "Navigation", "Right", "Right arrow", "right"),
-        Template("open", "Launch", "Open App or URL", "Choose an app, file, or URL", RemoteControlKind.Button, RemoteActionType.MacOpen, "https://"),
-        Template("script", "Automation", "Run Approved Script", "Run an allowed PowerShell script", RemoteControlKind.Button, RemoteActionType.MacScript),
+        Template("open", "Launch", "Open App or URL", "Choose an app, file, or URL", RemoteControlKind.Button, RemoteActionType.ComputerOpen),
+        Template("script", "Automation", "Run Approved Script", "Run an allowed PowerShell script", RemoteControlKind.Button, RemoteActionType.ComputerScript),
         Template("wled-toggle", "Lighting", "Lights", "Toggle WLED power", RemoteControlKind.Button, RemoteActionType.WledPower, "toggle"),
         Template("wled-on", "Lighting", "Lights On", "Turn WLED on", RemoteControlKind.Button, RemoteActionType.WledPower, "on"),
         Template("wled-off", "Lighting", "Lights Off", "Turn WLED off", RemoteControlKind.Button, RemoteActionType.WledPower, "off"),
@@ -103,7 +103,7 @@ internal static class RemoteControlCatalog
                 Kind = RemoteControlKind.Button,
                 Action = new RemoteAction
                 {
-                    Type = RemoteActionType.MacKey,
+                    Type = RemoteActionType.ComputerKey,
                     Text = key,
                     Modifiers = [.. modifiers],
                 },
@@ -122,7 +122,7 @@ internal static class RemoteControlCatalog
             {
                 Title = title,
                 Kind = RemoteControlKind.TextBox,
-                Action = new RemoteAction { Type = RemoteActionType.MacMedia, Text = "playPause" },
+                Action = new RemoteAction { Type = RemoteActionType.ComputerMedia, Text = "playPause" },
                 TextBox = new RemoteTextBox(),
             });
 }
