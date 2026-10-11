@@ -37,6 +37,8 @@
       "minimum": 0,
       "maximum": 500
     },
+    "buttonBackground": { "$ref": "#/$defs/buttonBackground" },
+    "buttonTexture": { "$ref": "#/$defs/buttonTexture" },
     "temperatureUnit": {
       "enum": ["celsius", "fahrenheit"]
     },
@@ -54,6 +56,33 @@
     }
   },
   "$defs": {
+    "buttonBackground": {
+      "enum": ["outline", "filled", "shaded", "borderless"]
+    },
+    "buttonTexture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["none", "pattern", "image"] },
+        "pattern": {
+          "enum": [
+            "hexagons", "triangles", "grid", "dots", "diagonal",
+            "checker", "waves", "rings", "spiral", "truchet"
+          ]
+        },
+        "scale": { "type": "integer", "minimum": 6, "maximum": 64 },
+        "lineWidth": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "imageID": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "mode": { "enum": ["threshold", "monochrome", "halftone", "combined"] },
+        "threshold": { "type": "integer", "minimum": 32, "maximum": 224 },
+        "levels": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "dotSpacing": { "type": "integer", "minimum": 3, "maximum": 24 },
+        "angle": { "type": "integer", "minimum": 0, "maximum": 90 },
+        "dotGain": { "type": "integer", "minimum": -50, "maximum": 50 },
+        "fade": { "type": "integer", "minimum": 0, "maximum": 90 }
+      }
+    },
     "uuid": {
       "type": "string",
       "format": "uuid"
@@ -139,6 +168,18 @@
           "type": ["integer", "null"],
           "minimum": 1,
           "maximum": 32
+        },
+        "buttonBackground": {
+          "oneOf": [
+            { "$ref": "#/$defs/buttonBackground" },
+            { "type": "null" }
+          ]
+        },
+        "buttonTexture": {
+          "oneOf": [
+            { "$ref": "#/$defs/buttonTexture" },
+            { "type": "null" }
+          ]
         },
         "action": { "$ref": "#/$defs/action" },
         "layoutSlot": {

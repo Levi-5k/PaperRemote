@@ -31,6 +31,8 @@
 #include "monochrome_damage.h"
 #include "power_policy.h"
 #include "psram_json_allocator.h"
+#include "remote_button_style.h"
+#include "remote_button_texture.h"
 #include "remote_computer.h"
 #include "remote_icon_raster.h"
 #include "remote_network_queue.h"
@@ -95,6 +97,8 @@ constexpr char kSettingsBackupPath[] = "/library/settings.bak";
 constexpr char kRemoteProfilePath[] = "/library/remote.json";
 constexpr char kRemoteProfileTemporaryPath[] = "/library/remote.tmp";
 constexpr char kRemoteProfileBackupPath[] = "/library/remote.bak";
+constexpr char kButtonImageDirectory[] = "/button-images";
+constexpr char kButtonImageTemporaryPath[] = "/button-images/upload.tmp";
 constexpr char kWifiPassword[] = "paperdisplay";
 
 constexpr uint8_t kBeginUpload = 0x10;
@@ -124,6 +128,9 @@ constexpr uint8_t kFinishRemoteProfile = 0x42;
 constexpr uint8_t kRemoteProfileComplete = 0x43;
 constexpr uint8_t kRemoteProfileDataReceived = 0x44;
 constexpr uint8_t kRemoteProfileProgress = 0x45;
+constexpr uint8_t kBeginButtonImage = 0x46;
+constexpr uint8_t kFinishButtonImage = 0x47;
+constexpr uint8_t kButtonImageComplete = 0x48;
 constexpr uint8_t kLocalMediaState = 0x61;
 constexpr uint8_t kClaimIPhoneController = 0x62;
 constexpr uint8_t kHomePowerResult = 0x63;
@@ -316,6 +323,9 @@ struct RemoteControl {
     uint8_t gridWidth = 1;
     uint8_t gridHeight = 1;
     uint8_t sliderOutlineInsetPixels = 0;
+    // Resolved at parse time from the profile default and the control's override.
+    remote_button_style::Background buttonBackground = remote_button_style::Background::outline;
+    remote_button_texture::Texture buttonTexture;
     char textSource[20] = {};
     char sourceText[193] = {};
     char referencedControlId[40] = {};
@@ -435,6 +445,7 @@ struct RemoteProfile {
     uint8_t buttonQualityRefreshInterval = 10;
     uint8_t maxButtonTextSize = 24;
     uint16_t elementRefreshDelayMilliseconds = 20;
+    remote_button_texture::Texture buttonTexture;
     bool useFahrenheit = false;
     int16_t timeZoneOffsetMinutes = 0;
     m5::rtc_datetime_t deviceClock;
@@ -690,6 +701,16 @@ uint32_t activeRemoteLastRepeatAt = 0;
 uint32_t activeRemoteSliderRenderedAt = 0;
 uint32_t activeRemoteSliderSentAt = 0;
 int16_t activeRemoteSliderSentValue = -1;
+struct RemoteTabDrag {
+    bool active = false;
+    int8_t hoveredPage = -1;
+    int16_t startX = 0;
+    int16_t drawnX = -1;
+    // Truncated millis() so the struct stays 12 bytes; only short dwell deltas are compared.
+    uint16_t hoveredAt = 0;
+    uint32_t renderedAt = 0;
+};
+RemoteTabDrag remoteTabDrag;
 char recentSliderReleaseControlId[40] = {};
 int16_t recentSliderReleaseValue = -1;
 uint32_t recentSliderReleaseAt = 0;
@@ -741,9 +762,30 @@ RTC_DATA_ATTR uint32_t wifiTxPowerCheckedAt = 0;
 RTC_DATA_ATTR uint32_t nextSchedulePollAt = 0;
 RTC_DATA_ATTR volatile uint32_t bluetoothFastAdvertisingUntil = 0;
 RTC_DATA_ATTR bool bluetoothAdvertisingSlow = false;
+RTC_DATA_ATTR bool remotePageQualityRefreshPending = false;
+// Persisted in settings.bin byte 8; when off, cleanup refreshes after interactions are skipped.
+RTC_DATA_ATTR bool remoteQualityRefreshes = true;
 RTC_DATA_ATTR SemaphoreHandle_t loopWakeSemaphore = nullptr;
 RTC_DATA_ATTR ClimateAutomationStore climateAutomationStore;
 RTC_DATA_ATTR ScheduleRunStore scheduleRunStore;
+
+struct ButtonImageCacheEntry {
+    char id[remote_button_texture::kImageIdBytes] = {};
+    uint16_t width = 0;
+    uint16_t height = 0;
+    uint8_t* pixels = nullptr;
+    uint32_t usedAt = 0;
+};
+
+// PSRAM state for button images; BLE image uploads reuse remoteProfileUpload's transfer state.
+struct ButtonTextureRuntime {
+    ButtonImageCacheEntry images[4];
+    char uploadId[remote_button_texture::kImageIdBytes] = {};
+    volatile bool uploading = false;
+    // BLE profile uploads install on the loop task; parsing overflows nimble_host's 4 KB stack.
+    volatile bool profileInstallPending = false;
+};
+RTC_DATA_ATTR ButtonTextureRuntime* buttonTextureRuntime = nullptr;
 float climateTemperatureC = 0;
 float climateHumidityPercent = 0;
 bool climateReadingAvailable = false;
@@ -830,7 +872,7 @@ void ensureBluetoothAdvertising();
 void suspendBluetoothForWifiUpload();
 void resumeBluetoothAfterWifiUpload();
 void setBluetoothTransferPerformance(bool transferring);
-void displayRemote();
+void displayRemote(bool fastFirst = false);
 void displayRemoteProfileChanges(const RemoteProfile& previousProfile, uint8_t previousPageIndex);
 void redrawRemoteTextBox(RemotePage& page, uint8_t controlIndex);
 void syncOpenBuildsControllerActions(RemotePage& page);
@@ -1482,6 +1524,7 @@ void persistSettings() {
         static_cast<uint8_t>(screensaverStyle),
         static_cast<uint8_t>(imagesOnlyOnBattery ? 1 : 0),
         static_cast<uint8_t>(remoteSleepNever ? 1 : 0),
+        static_cast<uint8_t>(remoteQualityRefreshes ? 1 : 0),
     };
     const bool written = file.write(settings, sizeof(settings)) == sizeof(settings);
     file.flush();
@@ -1505,6 +1548,7 @@ bool restoreSettingsFrom(const char* path) {
     const int style = file.read();
     const int batteryOnly = file.read();
     const int sleepNever = file.read();
+    const int qualityRefreshes = file.read();
     file.close();
     if (enabled < 0) {
         return false;
@@ -1522,6 +1566,7 @@ bool restoreSettingsFrom(const char* path) {
         ? ScreensaverStyle::geometricSnake : ScreensaverStyle::media;
     imagesOnlyOnBattery = batteryOnly == 1; // Missing sixth byte defaults off.
     remoteSleepNever = sleepNever == 1; // Missing seventh byte defaults off.
+    remoteQualityRefreshes = qualityRefreshes != 0; // Missing eighth byte defaults on.
     return true;
 }
 
@@ -1635,6 +1680,30 @@ uint8_t parseRemoteIconBitmap(const char* hex, uint8_t* bitmap) {
     return dimension;
 }
 
+__attribute__((noinline)) void parseButtonTexture(
+    JsonObjectConst json, remote_button_texture::Texture& texture) {
+    using namespace remote_button_texture;
+    texture = Texture();
+    if (json.isNull()) {
+        return;
+    }
+    parseKind(json["kind"] | "none", texture.kind);
+    parsePattern(json["pattern"] | "hexagons", texture.pattern);
+    texture.scale = constrain(json["scale"] | 16, 6, 64);
+    texture.lineWidth = constrain(json["lineWidth"] | 1, 1, 8);
+    parseMode(json["mode"] | "monochrome", texture.mode);
+    texture.threshold = constrain(json["threshold"] | 128, 32, 224);
+    texture.levels = constrain(json["levels"] | 16, 0, 16);
+    texture.dotSpacing = constrain(json["dotSpacing"] | 8, 3, 24);
+    texture.angle = constrain(json["angle"] | 45, 0, 90);
+    texture.dotGain = constrain(json["dotGain"] | 0, -50, 50);
+    texture.fade = constrain(json["fade"] | 50, 0, 90);
+    if (texture.kind == Kind::image &&
+        !normalizeImageId(json["imageID"] | "", texture.imageId)) {
+        texture.kind = Kind::none;
+    }
+}
+
 bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     memset(&output, 0, sizeof(output));
     File file = SD.open(path, FILE_READ);
@@ -1710,6 +1779,8 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
         };
     }
 
+    const char* systemButtonBackground = document["buttonBackground"] | "outline";
+    parseButtonTexture(document["buttonTexture"].as<JsonObjectConst>(), output.buttonTexture);
     for (JsonObject pageJson : document["pages"].as<JsonArray>()) {
         if (output.pageCount >= kMaximumRemotePages) {
             break;
@@ -1753,6 +1824,15 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
             control.kind = strcmp(kind, "slider") == 0 ? 1 : strcmp(kind, "textBox") == 0 ? 2 : 0;
             control.slider = control.kind == 1;
             control.toggle = control.kind == 0 && (controlJson["isToggle"] | false);
+            control.buttonBackground = remote_button_style::resolve(
+                systemButtonBackground,
+                controlJson["buttonBackground"] | static_cast<const char*>(nullptr));
+            if (controlJson["buttonTexture"].is<JsonObjectConst>()) {
+                parseButtonTexture(
+                    controlJson["buttonTexture"].as<JsonObjectConst>(), control.buttonTexture);
+            } else {
+                control.buttonTexture = output.buttonTexture;
+            }
             control.layoutSlot = constrain(
                 controlJson["layoutSlot"] | -1, -1,
                 static_cast<int>(page.gridColumns * page.gridRows - 1));
@@ -2503,7 +2583,13 @@ void cancelRemoteProfileUpload(bool notifyFailure) {
     remoteProfileUpload.file.close();
     remoteProfileUpload = RemoteProfileUploadState{};
     setBluetoothTransferPerformance(false);
-    if (SD.exists(kRemoteProfileTemporaryPath)) {
+    if (buttonTextureRuntime != nullptr) {
+        buttonTextureRuntime->profileInstallPending = false;
+    }
+    if (buttonTextureRuntime != nullptr && buttonTextureRuntime->uploading) {
+        buttonTextureRuntime->uploading = false;
+        SD.remove(kButtonImageTemporaryPath);
+    } else if (SD.exists(kRemoteProfileTemporaryPath)) {
         SD.remove(kRemoteProfileTemporaryPath);
     }
     if (notifyFailure) {
@@ -3276,7 +3362,7 @@ void configureWifiServer() {
                         if (control.kind == 2) {
                             redrawRemoteTextBox(page, controlIndex);
                         } else if (!activelyDragging) {
-                            displayRemoteSliderValue(page, controlIndex, true);
+                            displayRemoteSliderValue(page, controlIndex, false);
                         }
                     }
                 }
@@ -3871,6 +3957,22 @@ void finishUpload() {
     completeUpload();
 }
 
+bool openRemoteTransfer(const char* path, uint32_t expectedBytes, uint32_t expectedCrc) {
+    cancelRemoteProfileUpload(false);
+    remoteProfileUpload.file = SD.open(path, FILE_WRITE);
+    if (!remoteProfileUpload.file) {
+        return false;
+    }
+    remoteProfileUpload.expectedBytes = expectedBytes;
+    remoteProfileUpload.expectedCrc = expectedCrc;
+    remoteProfileUpload.nextAcknowledgementAt = min(kUploadWindowBytes, expectedBytes);
+    remoteProfileUpload.runningCrc = UINT32_MAX;
+    remoteProfileUpload.lastActivityAt = millis();
+    remoteProfileUpload.active = true;
+    setBluetoothTransferPerformance(true);
+    return true;
+}
+
 void beginRemoteProfileUpload(const uint8_t* value, size_t length) {
     if (length != 9 || upload.active) {
         notifyControl(kUploadFailed);
@@ -3878,25 +3980,78 @@ void beginRemoteProfileUpload(const uint8_t* value, size_t length) {
     }
     const uint32_t expectedBytes = readLittleEndian32(value + 1);
     if (expectedBytes == 0 || expectedBytes > kMaximumRemoteProfileBytes ||
+        !sdHasSpaceFor(expectedBytes) ||
+        !openRemoteTransfer(kRemoteProfileTemporaryPath, expectedBytes, readLittleEndian32(value + 5))) {
+        notifyControl(kUploadFailed);
+        return;
+    }
+    notifyControl(kRemoteProfileReady);
+}
+
+// [opcode][size u32][crc32 u32][36-character image UUID]
+void beginButtonImageUpload(const uint8_t* value, size_t length) {
+    using namespace remote_button_texture;
+    char text[kImageIdBytes] = {};
+    char id[kImageIdBytes];
+    if (length != 9 + kImageIdBytes - 1 || upload.active || buttonTextureRuntime == nullptr) {
+        notifyControl(kUploadFailed);
+        return;
+    }
+    memcpy(text, value + 9, kImageIdBytes - 1);
+    const uint32_t expectedBytes = readLittleEndian32(value + 1);
+    if (!normalizeImageId(text, id) || expectedBytes <= kImageHeaderBytes ||
+        expectedBytes > kImageHeaderBytes + kMaximumImageSide * kMaximumImageSide ||
         !sdHasSpaceFor(expectedBytes)) {
         notifyControl(kUploadFailed);
         return;
     }
-
-    cancelRemoteProfileUpload(false);
-    remoteProfileUpload.file = SD.open(kRemoteProfileTemporaryPath, FILE_WRITE);
-    if (!remoteProfileUpload.file) {
+    SD.mkdir(kButtonImageDirectory);
+    if (!openRemoteTransfer(kButtonImageTemporaryPath, expectedBytes, readLittleEndian32(value + 5))) {
         notifyControl(kUploadFailed);
         return;
     }
-    remoteProfileUpload.expectedBytes = expectedBytes;
-    remoteProfileUpload.expectedCrc = readLittleEndian32(value + 5);
-    remoteProfileUpload.nextAcknowledgementAt = min(kUploadWindowBytes, expectedBytes);
-    remoteProfileUpload.runningCrc = UINT32_MAX;
-    remoteProfileUpload.lastActivityAt = millis();
-    remoteProfileUpload.active = true;
-    setBluetoothTransferPerformance(true);
+    strlcpy(buttonTextureRuntime->uploadId, id, sizeof(buttonTextureRuntime->uploadId));
+    buttonTextureRuntime->uploading = true;
     notifyControl(kRemoteProfileReady);
+}
+
+void buttonImagePath(const char* id, char* path, size_t pathBytes) {
+    snprintf(path, pathBytes, "%s/%s.pbg", kButtonImageDirectory, id);
+}
+
+bool installButtonImage() {
+    File file = SD.open(kButtonImageTemporaryPath, FILE_READ);
+    uint8_t header[remote_button_texture::kImageHeaderBytes];
+    uint16_t width = 0;
+    uint16_t height = 0;
+    const bool valid = file && file.read(header, sizeof(header)) == sizeof(header) &&
+        remote_button_texture::parseImageHeader(header, file.size(), width, height);
+    if (file) {
+        file.close();
+    }
+    char path[64];
+    buttonImagePath(buttonTextureRuntime->uploadId, path, sizeof(path));
+    if (!valid) {
+        return false;
+    }
+    SD.remove(path);
+    if (!SD.rename(kButtonImageTemporaryPath, path)) {
+        return false;
+    }
+    Serial.printf("Button image installed: %s %ux%u\n", buttonTextureRuntime->uploadId, width, height);
+    if (remoteVisible && remoteProfile != nullptr && remotePageIndex < remoteProfile->pageCount) {
+        const RemotePage& page = remoteProfile->pages[remotePageIndex];
+        for (uint8_t index = 0; index < page.controlCount; ++index) {
+            const auto& texture = page.controls[index].buttonTexture;
+            if (texture.kind == remote_button_texture::Kind::image &&
+                strcmp(texture.imageId, buttonTextureRuntime->uploadId) == 0) {
+                remoteProfileDisplayPending = true;
+                remoteProfileDisplayAt = millis() + 500;
+                break;
+            }
+        }
+    }
+    return true;
 }
 
 void completeRemoteProfileUpload() {
@@ -3912,6 +4067,21 @@ void completeRemoteProfileUpload() {
     if (receivedCrc != expectedCrc) {
         cancelRemoteProfileUpload(false);
         notifyControl(kUploadFailed);
+        return;
+    }
+    if (buttonTextureRuntime != nullptr && buttonTextureRuntime->uploading) {
+        if (!installButtonImage()) {
+            cancelRemoteProfileUpload(false);
+            notifyControl(kUploadFailed);
+            return;
+        }
+        buttonTextureRuntime->uploading = false;
+        notifyControl(kButtonImageComplete);
+        setBluetoothTransferPerformance(false);
+        return;
+    }
+    if (buttonTextureRuntime != nullptr) {
+        buttonTextureRuntime->profileInstallPending = true;
         return;
     }
     if (!installTemporaryRemoteProfile()) {
@@ -4007,6 +4177,11 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
         } else if (value[0] == kBeginRemoteProfile && value.size() == 9) {
             beginRemoteProfileUpload(value.data(), value.size());
         } else if (value[0] == kFinishRemoteProfile && value.size() == 1) {
+            finishRemoteProfileUpload();
+        } else if (value[0] == kBeginButtonImage &&
+                   value.size() == 9 + remote_button_texture::kImageIdBytes - 1) {
+            beginButtonImageUpload(value.data(), value.size());
+        } else if (value[0] == kFinishButtonImage && value.size() == 1) {
             finishRemoteProfileUpload();
         } else if (value[0] == kClaimIPhoneController && value.size() == 1) {
             bluetoothConnectionHandle = connectionInfo.getConnHandle();
@@ -4326,6 +4501,8 @@ void drawSettingsRow(const char* title, const char* detail, int32_t y) {
     M5.Display.drawString(">", 466, y + 48);
 }
 
+void drawToggleRow(const char* label, bool enabled, int32_t y);
+
 void displaySettings() {
     boostCpu();
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
@@ -4343,10 +4520,11 @@ void displaySettings() {
     drawSettingsRow("LIBRARY", "Choose stored screen saver media", 150);
     drawSettingsRow("SCREEN SAVER", "Playback and interval options", 312);
     drawSettingsRow("WI-FI TRANSFER", wifiActive ? "Transfer network is active" : "Start transfer network", 474);
+    drawToggleRow("QUALITY REFRESH", remoteQualityRefreshes, 636);
 
     M5.Display.setFont(&fonts::FreeSans12pt7b);
-    M5.Display.drawString("Remote layout is configured in the iPhone app.", 34, 700);
-    M5.Display.drawString("Firmware " PAPERGIF_FIRMWARE_VERSION, 34, 740);
+    M5.Display.drawString("Remote layout is configured in the iPhone app.", 34, 780);
+    M5.Display.drawString("Firmware " PAPERGIF_FIRMWARE_VERSION, 34, 820);
     M5.Display.endWrite();
     settingsVisible = true;
     remoteVisible = false;
@@ -4910,6 +5088,118 @@ void drawFittedRemoteTitle(const char* text, int32_t x, int32_t y,
     layoutRemoteTitle(text, area, choice, alignment, textHeight, true);
 }
 
+bool cachedButtonImage(const char* id, remote_button_texture::ImageView& view) {
+    ButtonTextureRuntime* runtime = buttonTextureRuntime;
+    if (runtime == nullptr) {
+        return false;
+    }
+    for (ButtonImageCacheEntry& entry : runtime->images) {
+        if (entry.pixels != nullptr && strcmp(entry.id, id) == 0) {
+            entry.usedAt = millis();
+            view.pixels = entry.pixels;
+            view.width = entry.width;
+            view.height = entry.height;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Loop task only, and never inside M5.Display.startWrite(): the SD card shares the panel's SPI bus.
+bool loadButtonImage(const char* id) {
+    ButtonTextureRuntime* runtime = buttonTextureRuntime;
+    remote_button_texture::ImageView view;
+    if (runtime == nullptr || !sdReady) {
+        return false;
+    }
+    if (cachedButtonImage(id, view)) {
+        return true;
+    }
+    ButtonImageCacheEntry* slot = &runtime->images[0];
+    for (ButtonImageCacheEntry& entry : runtime->images) {
+        if (slot->pixels != nullptr && (entry.pixels == nullptr || entry.usedAt < slot->usedAt)) {
+            slot = &entry;
+        }
+    }
+    char path[64];
+    buttonImagePath(id, path, sizeof(path));
+    File file = SD.open(path, FILE_READ);
+    if (!file) {
+        return false;
+    }
+    uint8_t header[remote_button_texture::kImageHeaderBytes];
+    uint16_t width = 0;
+    uint16_t height = 0;
+    if (file.read(header, sizeof(header)) != sizeof(header) ||
+        !remote_button_texture::parseImageHeader(header, file.size(), width, height)) {
+        file.close();
+        return false;
+    }
+    const size_t pixelBytes = static_cast<size_t>(width) * height;
+    uint8_t* pixels = static_cast<uint8_t*>(
+        heap_caps_malloc(pixelBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    const bool loaded = pixels != nullptr && file.read(pixels, pixelBytes) == pixelBytes;
+    file.close();
+    if (!loaded) {
+        heap_caps_free(pixels);
+        return false;
+    }
+    heap_caps_free(slot->pixels);
+    strlcpy(slot->id, id, sizeof(slot->id));
+    slot->width = width;
+    slot->height = height;
+    slot->pixels = pixels;
+    slot->usedAt = millis();
+    return true;
+}
+
+void prepareRemoteButtonImages(const RemotePage& page) {
+    for (uint8_t index = 0; index < page.controlCount; ++index) {
+        const RemoteControl& control = page.controls[index];
+        if (control.kind == 0 && !control.slider &&
+            control.buttonTexture.kind == remote_button_texture::Kind::image) {
+            loadButtonImage(control.buttonTexture.imageId);
+        }
+    }
+}
+
+// Draws the idle button's textured fill; false leaves the caller to draw a solid fill.
+__attribute__((noinline)) bool drawRemoteButtonTexture(
+    const remote_button_texture::Texture& texture,
+    int32_t x, int32_t y, int32_t width, int32_t height, int32_t radius,
+    const remote_button_style::Colors& style) {
+    using namespace remote_button_texture;
+    if (texture.kind == Kind::none || width <= 0 || height <= 0) {
+        return false;
+    }
+    ImageView image;
+    if (texture.kind == Kind::image && !cachedButtonImage(texture.imageId, image)) {
+        return false;
+    }
+    const Renderer renderer(texture, image, luminance565(style.fill),
+        luminance565(style.foreground), width, height, radius);
+    constexpr int32_t kStripRows = 16;
+    auto* strip = static_cast<lgfx::rgb565_t*>(heap_caps_malloc(
+        static_cast<size_t>(width) * kStripRows * sizeof(lgfx::rgb565_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (strip == nullptr) {
+        return false;
+    }
+    for (int32_t top = 0; top < height; top += kStripRows) {
+        const int32_t rows = min(kStripRows, height - top);
+        for (int32_t row = 0; row < rows; ++row) {
+            lgfx::rgb565_t* line = strip + row * width;
+            for (int32_t column = 0; column < width; ++column) {
+                const uint8_t gray = renderer.level(column, top + row) * 17;
+                line[column] = lgfx::rgb565_t(gray, gray, gray);
+            }
+        }
+        M5.Display.pushImage(x, y + top, width, rows, strip);
+    }
+    heap_caps_free(strip);
+    return true;
+}
+
 void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = false) {
     if (index >= page.controlCount) {
         return;
@@ -5121,12 +5411,14 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
     const char* displayedSymbol = playbackStateAvailable
         ? (control.toggleOn ? "pause.fill" : "play.fill")
         : control.symbol;
-    // RGB565: LovyanGFX reads uint32_t colors as RGB888, turning 0xFFFF white into cyan.
-    const uint16_t foreground = active ? TFT_WHITE : TFT_BLACK;
-    const uint16_t background = active ? TFT_BLACK : TFT_WHITE;
+    const auto style = remote_button_style::colors(control.buttonBackground, active);
+    const uint16_t foreground = style.foreground;
+    const uint16_t background = style.fill;
     const int32_t radius = min<int32_t>(openBuildsButton ? 8 : 10, min(width, height) / 2);
-    M5.Display.fillRoundRect(x, y, width, height, radius, background);
-    if (!active) {
+    if (active || !drawRemoteButtonTexture(control.buttonTexture, x, y, width, height, radius, style)) {
+        M5.Display.fillRoundRect(x, y, width, height, radius, background);
+    }
+    if (style.border) {
         M5.Display.drawRoundRect(x, y, width, height, radius, foreground);
     }
     M5.Display.setTextColor(foreground, background);
@@ -5198,30 +5490,48 @@ void endRemoteElementRefresh() {
     }
 }
 
-void drawRemotePageTabs(uint8_t selectedPageIndex) {
+constexpr int32_t kRemoteTabBarLeft = 24;
+constexpr int32_t kRemoteTabBarTop = 850;
+constexpr int32_t kRemoteTabBarWidth = 492;
+constexpr int32_t kRemoteTabBarBottom = 918;
+
+// dragCenterX >= 0 draws a free-floating selection pill centered there instead of selecting a tab.
+void drawRemotePageTabs(uint8_t selectedPageIndex, int32_t dragCenterX = -1) {
     if (remoteProfile == nullptr || remoteProfile->pageCount == 0) {
         return;
     }
-    constexpr int32_t left = 24;
-    constexpr int32_t top = 850;
-    constexpr int32_t width = 492;
-    constexpr int32_t bottom = 918;
+    constexpr int32_t left = kRemoteTabBarLeft;
+    constexpr int32_t top = kRemoteTabBarTop;
+    constexpr int32_t width = kRemoteTabBarWidth;
+    constexpr int32_t bottom = kRemoteTabBarBottom;
+    const bool dragging = dragCenterX >= 0;
+    const int32_t pillWidth = width / remoteProfile->pageCount;
+    const int32_t pillLeft = dragCenterX - pillWidth / 2;
+    const int32_t pillRight = pillLeft + pillWidth;
     M5.Display.fillRect(left, top, width, bottom - top, TFT_WHITE);
     for (uint8_t index = 0; index < remoteProfile->pageCount; ++index) {
+        const bool selected = !dragging && index == selectedPageIndex;
         const int32_t tabLeft = left + index * width / remoteProfile->pageCount;
         const int32_t tabRight = left + (index + 1) * width / remoteProfile->pageCount;
-        const int32_t tabTop = index == selectedPageIndex ? top : top + 8;
+        const int32_t tabTop = selected ? top : top + 8;
         const int32_t tabWidth = tabRight - tabLeft;
-        const uint16_t background = index == selectedPageIndex ? TFT_BLACK : TFT_WHITE;
-        const uint16_t foreground = index == selectedPageIndex ? TFT_WHITE : TFT_BLACK;
         M5.Display.fillRoundRect(
-            tabLeft, tabTop, tabWidth, bottom - tabTop, 7, background);
+            tabLeft, tabTop, tabWidth, bottom - tabTop, 7, selected ? TFT_BLACK : TFT_WHITE);
         M5.Display.drawRoundRect(
             tabLeft, tabTop, tabWidth, bottom - tabTop, 7, TFT_BLACK);
-        M5.Display.setClipRect(tabLeft + 4, tabTop + 2, max<int32_t>(1, tabWidth - 8), bottom - tabTop - 4);
-        M5.Display.setTextColor(foreground, background);
-        M5.Display.setTextDatum(textdatum_t::top_left);
-        const int32_t textWidth = max<int32_t>(1, tabWidth - 8);
+    }
+    if (dragging) {
+        M5.Display.fillRoundRect(pillLeft, top, pillWidth, bottom - top, 7, TFT_BLACK);
+    }
+    M5.Display.setTextDatum(textdatum_t::top_left);
+    for (uint8_t index = 0; index < remoteProfile->pageCount; ++index) {
+        const bool selected = !dragging && index == selectedPageIndex;
+        const int32_t tabLeft = left + index * width / remoteProfile->pageCount;
+        const int32_t tabRight = left + (index + 1) * width / remoteProfile->pageCount;
+        const int32_t tabTop = selected ? top : top + 8;
+        const int32_t textLeft = tabLeft + 4;
+        const int32_t textRight = max<int32_t>(textLeft + 1, tabRight - 4);
+        const int32_t textWidth = textRight - textLeft;
         const int32_t textHeight = bottom - tabTop - 4;
         const char* pageName = remoteProfile->pages[index].name;
         const lgfx::IFont* tabFonts[] = {
@@ -5235,19 +5545,48 @@ void drawRemotePageTabs(uint8_t selectedPageIndex) {
                 break;
             }
         }
-        layoutRemoteText(
-            pageName, tabLeft + 4, tabTop + 2, textWidth, textHeight, 1, 1, true);
-        M5.Display.clearClipRect();
+        const auto drawLabel = [&](int32_t clipLeft, int32_t clipRight) {
+            if (clipRight <= clipLeft) {
+                return;
+            }
+            M5.Display.setClipRect(clipLeft, tabTop + 2, clipRight - clipLeft, textHeight);
+            layoutRemoteText(
+                pageName, textLeft, tabTop + 2, textWidth, textHeight, 1, 1, true);
+            M5.Display.clearClipRect();
+        };
+        if (!dragging) {
+            const uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
+            const uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
+            M5.Display.setTextColor(foreground, background);
+            drawLabel(textLeft, textRight);
+            continue;
+        }
+        // Transparent text so glyph boxes cannot square off the pill's rounded corners.
+        M5.Display.setTextColor(TFT_BLACK);
+        drawLabel(textLeft, min(textRight, pillLeft));
+        drawLabel(max(textLeft, pillRight), textRight);
+        M5.Display.setTextColor(TFT_WHITE);
+        drawLabel(max(textLeft, pillLeft), min(textRight, pillRight));
     }
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
 }
 
 int8_t remotePageTabAtX(int32_t x) {
-    if (remoteProfile == nullptr || remoteProfile->pageCount == 0 || x < 24 || x >= 516) {
+    if (remoteProfile == nullptr || remoteProfile->pageCount == 0 ||
+        x < kRemoteTabBarLeft || x >= kRemoteTabBarLeft + kRemoteTabBarWidth) {
         return -1;
     }
-    return min<int32_t>(((x - 23) * remoteProfile->pageCount - 1) / 492,
-        remoteProfile->pageCount - 1);
+    return min<int32_t>(((x - (kRemoteTabBarLeft - 1)) * remoteProfile->pageCount - 1) /
+        kRemoteTabBarWidth, remoteProfile->pageCount - 1);
+}
+
+int32_t remoteTabDragCenterX(int32_t x) {
+    if (remoteProfile == nullptr || remoteProfile->pageCount == 0) {
+        return x;
+    }
+    const int32_t halfTab = kRemoteTabBarWidth / remoteProfile->pageCount / 2;
+    return constrain(x, kRemoteTabBarLeft + halfTab,
+        kRemoteTabBarLeft + kRemoteTabBarWidth - 1 - halfTab);
 }
 
 void displayRemoteProfileChanges(
@@ -5317,6 +5656,8 @@ void displayRemoteProfileChanges(
                  strcmp(previousControl.textSource, control.textSource) == 0 &&
                  strcmp(previousControl.resolvedText, control.resolvedText) == 0);
             const bool sameAppearance = sameFrame && sameTitle && sameSymbol && sameIcon && sameToggle &&
+                previousControl.buttonBackground == control.buttonBackground &&
+                previousControl.buttonTexture == control.buttonTexture &&
                 previousControl.kind == control.kind && sameTextBox && sameSliderAppearance &&
                 previousControl.slider == control.slider &&
                 (!control.slider || previousControl.action.value == control.action.value);
@@ -5382,7 +5723,8 @@ void displayRemoteControlFeedback(size_t index, bool pressed) {
         const uint8_t qualityInterval = max<uint8_t>(
             1, remoteProfile->buttonQualityRefreshInterval);
         ++remoteButtonPressCount;
-        activeRemoteButtonQualityRefresh = remoteButtonPressCount % qualityInterval == 0;
+        activeRemoteButtonQualityRefresh = remoteQualityRefreshes &&
+            remoteButtonPressCount % qualityInterval == 0;
     }
     // Touch processing only records the newest visual state. E-paper must not
     // delay command dispatch or prevent the next press/release from being read.
@@ -5406,8 +5748,8 @@ void displayRemoteSliderValue(
     size_t index,
     bool waitForCompletion = false) {
     M5.Display.waitDisplay();
-    M5.Display.setEpdMode(
-        waitForCompletion ? epd_mode_t::epd_text : epd_mode_t::epd_fastest);
+    M5.Display.setEpdMode(waitForCompletion && remoteQualityRefreshes
+        ? epd_mode_t::epd_text : epd_mode_t::epd_fastest);
     M5.Display.startWrite();
     drawRemoteControl(page, index);
     if (index < page.controlCount &&
@@ -5780,7 +6122,56 @@ void drawRemoteWifiIndicator() {
     }
 }
 
-void displayRemote() {
+void drawRemotePageContents(const RemotePage& page) {
+    drawRemotePageTabs(remotePageIndex);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setTextDatum(textdatum_t::top_left);
+    M5.Display.setFont(&fonts::Orbitron_Light_24);
+    M5.Display.drawString(page.name, 24, 38);
+    M5.Display.setFont(&fonts::FreeSansBold9pt7b);
+    drawRemoteWifiIndicator();
+    displayedHomeWifiState = homeWifiState;
+    displayedHomeWifiFailureReason = homeWifiFailureReason;
+    drawRemoteBatteryIndicator();
+    M5.Display.drawFastHLine(24, 106, 492, TFT_BLACK);
+    drawRemoteStatusLine();
+    if (page.openBuildsController) {
+        drawOpenBuildsControllerSettings(page);
+    }
+    uint8_t orderedIndices[kMaximumRemoteControls];
+    const size_t orderedCount = remoteControlIndicesInDisplayOrder(page, orderedIndices);
+    for (size_t orderedIndex = 0; orderedIndex < orderedCount; ++orderedIndex) {
+        drawRemoteControl(page, orderedIndices[orderedIndex]);
+    }
+}
+
+void renderPendingRemotePageQualityRefresh() {
+    if (!remotePageQualityRefreshPending) {
+        return;
+    }
+    if (!remoteVisible || remoteProfile == nullptr || !remoteQualityRefreshes) {
+        remotePageQualityRefreshPending = false;
+        return;
+    }
+    if (millis() - lastRemoteActivityAt < 1000 || M5.Touch.getCount() > 0 ||
+        activeRemoteControlIndex >= 0 || remoteTabDrag.active ||
+        remoteFeedbackDirtyMask != 0 || remoteStatusRedrawPending ||
+        M5.Display.displayBusy()) {
+        return;
+    }
+    remotePageQualityRefreshPending = false;
+    boostCpu();
+    prepareRemoteButtonImages(remoteProfile->pages[remotePageIndex]);
+    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    M5.Display.startWrite();
+    M5.Display.fillScreen(TFT_WHITE);
+    drawRemotePageContents(remoteProfile->pages[remotePageIndex]);
+    M5.Display.endWrite();
+}
+
+void displayRemoteProgressively();
+
+void displayRemote(bool fastFirst) {
     if (remoteProfile == nullptr || !remoteProfile->configured) {
         return;
     }
@@ -5789,12 +6180,41 @@ void displayRemote() {
     activeRemoteControlVisual = false;
     activeRemoteHoldTriggered = false;
     activeRemoteContinuousJog = false;
+    remoteTabDrag.active = false;
     remoteFeedbackDirtyMask = 0;
     remoteFeedbackPressedMask = 0;
     remoteFeedbackQualityMask = 0;
     remoteStatusRedrawPending = false;
     prepareRemoteTextBoxes();
+    prepareRemoteButtonImages(remoteProfile->pages[remotePageIndex]);
 
+    if (fastFirst) {
+        // One DU pass shows the page and returns to touch handling; GC16 cleanup follows when idle.
+        remoteBatteryLevel = sampleRemoteBatteryLevel();
+        remoteActionStatus[0] = '\0';
+        remoteActionStatusClearAt = 0;
+        M5.Display.waitDisplay();
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.startWrite();
+        M5.Display.fillScreen(TFT_WHITE);
+        drawRemotePageContents(remoteProfile->pages[remotePageIndex]);
+        M5.Display.endWrite();
+        remotePageQualityRefreshPending = true;
+    } else {
+        remotePageQualityRefreshPending = false;
+        displayRemoteProgressively();
+    }
+
+    remoteVisible = true;
+    screensaverActive = false;
+    settingsVisible = false;
+    libraryVisible = false;
+    slideshowMenuVisible = false;
+    wifiModeVisible = false;
+    deepSleepSuspended = false;
+}
+
+void displayRemoteProgressively() {
     M5.Display.waitDisplay();
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
     M5.Display.startWrite();
@@ -5805,23 +6225,16 @@ void displayRemote() {
     const RemotePage& page = remoteProfile->pages[remotePageIndex];
     uint8_t orderedIndices[kMaximumRemoteControls];
     const size_t orderedCount = remoteControlIndicesInDisplayOrder(page, orderedIndices);
-    size_t firstButtonOrderedIndex = orderedCount;
-    for (size_t orderedIndex = 0; orderedIndex < orderedCount; ++orderedIndex) {
-        if (page.controls[orderedIndices[orderedIndex]].kind == 0) {
-            firstButtonOrderedIndex = orderedIndex;
-            break;
-        }
-    }
 
     remoteBatteryLevel = sampleRemoteBatteryLevel();
     remoteActionStatus[0] = '\0';
     remoteActionStatusClearAt = 0;
+    // Small batches refresh concurrently; a batch spanning header + tabs made every later draw wait.
     beginRemoteElementRefresh();
-    drawRemotePageTabs(remotePageIndex);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     M5.Display.setTextDatum(textdatum_t::top_left);
     M5.Display.setFont(&fonts::Orbitron_Light_24);
-    M5.Display.drawString(remoteProfile->pages[remotePageIndex].name, 24, 38);
+    M5.Display.drawString(page.name, 24, 38);
     M5.Display.setFont(&fonts::FreeSansBold9pt7b);
     drawRemoteWifiIndicator();
     displayedHomeWifiState = homeWifiState;
@@ -5829,9 +6242,6 @@ void displayRemote() {
     drawRemoteBatteryIndicator();
     M5.Display.drawFastHLine(24, 106, 492, TFT_BLACK);
     drawRemoteStatusLine();
-    if (firstButtonOrderedIndex < orderedCount) {
-        drawRemoteControl(page, orderedIndices[firstButtonOrderedIndex]);
-    }
     endRemoteElementRefresh();
 
     if (page.openBuildsController) {
@@ -5840,21 +6250,14 @@ void displayRemote() {
         endRemoteElementRefresh();
     }
     for (size_t orderedIndex = 0; orderedIndex < orderedCount; ++orderedIndex) {
-        if (orderedIndex == firstButtonOrderedIndex) {
-            continue;
-        }
         beginRemoteElementRefresh();
         drawRemoteControl(page, orderedIndices[orderedIndex]);
         endRemoteElementRefresh();
     }
 
-    remoteVisible = true;
-    screensaverActive = false;
-    settingsVisible = false;
-    libraryVisible = false;
-    slideshowMenuVisible = false;
-    wifiModeVisible = false;
-    deepSleepSuspended = false;
+    beginRemoteElementRefresh();
+    drawRemotePageTabs(remotePageIndex);
+    endRemoteElementRefresh();
 }
 
 void refreshRemoteConnectionStatus() {
@@ -6664,7 +7067,8 @@ RemoteComputer* resolveRemoteComputer(const char* identifier) {
     const int index = remote_computer::indexFor(*remoteProfile, identifier);
     if (index >= 0) return &remoteProfile->computers[index];
     if (index != remote_computer::legacy) return nullptr;
-    static RemoteComputer legacyComputer;
+    // Rewritten on every use; RTC memory keeps it out of the full internal DRAM segment.
+    RTC_DATA_ATTR static RemoteComputer legacyComputer;
     strlcpy(legacyComputer.host, remoteProfile->macHost, sizeof(legacyComputer.host));
     legacyComputer.port = remoteProfile->macPort;
     strlcpy(legacyComputer.token, remoteProfile->macToken, sizeof(legacyComputer.token));
@@ -7290,7 +7694,7 @@ void applyMacTextBoxResponse(const RemoteTextNetworkResult& result) {
                 }
                 batchChanged = batchChanged || changed || positionChanged;
                 if ((changed || positionChanged) && !useQualityRefresh && !activelyDragging) {
-                    displayRemoteSliderValue(page, index, true);
+                    displayRemoteSliderValue(page, index);
                 }
                 break;
             }
@@ -8529,6 +8933,8 @@ void navigateRemote(int direction) {
     pendingRemotePageIndex = static_cast<uint8_t>(nextPageIndex);
     remotePageNavigationPending = pendingRemotePageIndex != remotePageIndex;
     lastRemoteActivityAt = millis();
+    // DU4 skips the driver's overlap wait; never start it over an in-flight page draw.
+    M5.Display.waitDisplay();
     M5.Display.setEpdMode(epd_mode_t::epd_fastest);
     M5.Display.startWrite();
     drawRemotePageTabs(pendingRemotePageIndex);
@@ -8549,7 +8955,7 @@ void renderPendingRemotePage() {
     }
     remotePageIndex = pendingRemotePageIndex;
     remotePageNavigationPending = false;
-    displayRemote();
+    displayRemote(true);
 }
 
 void selectLibraryItem(size_t index) {
@@ -8813,6 +9219,64 @@ void handleTouch() {
 
     if (remoteVisible) {
         lastRemoteActivityAt = millis();
+        if (remoteTabDrag.active) {
+            if (touch.wasReleased()) {
+                remoteTabDrag.active = false;
+                const int8_t pageIndex = remotePageTabAtX(remoteTabDragCenterX(touch.x));
+                remotePageNavigationPending = false;
+                if (pageIndex >= 0 && pageIndex != remotePageIndex) {
+                    remotePageIndex = pageIndex;
+                    displayRemote(true);
+                } else if (remotePageQualityRefreshPending) {
+                    // A preview already showed this page; snap the pill and let the idle GC16 pass clean up.
+                    M5.Display.waitDisplay();
+                    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+                    M5.Display.startWrite();
+                    drawRemotePageTabs(remotePageIndex);
+                    M5.Display.endWrite();
+                } else {
+                    // Clear DU4 drag ghosting with a full-waveform pass once the finger lifts.
+                    M5.Display.setEpdMode(remoteTabDrag.drawnX >= 0 && remoteQualityRefreshes
+                        ? epd_mode_t::epd_quality : epd_mode_t::epd_fastest);
+                    M5.Display.startWrite();
+                    drawRemotePageTabs(remotePageIndex);
+                    M5.Display.endWrite();
+                }
+            } else if (touch.isPressed()) {
+                const int32_t centerX = remoteTabDragCenterX(touch.x);
+                const bool moved = remoteTabDrag.drawnX >= 0 || abs(touch.x - remoteTabDrag.startX) >= 10;
+                const int8_t hoveredPage = remotePageTabAtX(centerX);
+                const uint16_t now16 = static_cast<uint16_t>(millis());
+                if (hoveredPage != remoteTabDrag.hoveredPage) {
+                    remoteTabDrag.hoveredPage = hoveredPage;
+                    remoteTabDrag.hoveredAt = now16;
+                }
+                // Fast swipes skip previews; resting on a tab for a moment shows its page.
+                if (moved && hoveredPage >= 0 && hoveredPage != remotePageIndex &&
+                    static_cast<uint16_t>(now16 - remoteTabDrag.hoveredAt) >= 400) {
+                    // displayRemote() cancels drags; keep this one alive across the preview.
+                    const RemoteTabDrag drag = remoteTabDrag;
+                    remotePageIndex = hoveredPage;
+                    displayRemote(true);
+                    remoteTabDrag = drag;
+                    remoteTabDrag.drawnX = static_cast<int16_t>(centerX);
+                    remoteTabDrag.renderedAt = millis();
+                } else if (moved && centerX != remoteTabDrag.drawnX &&
+                    millis() - remoteTabDrag.renderedAt >= 80 &&
+                    // The driver skips its overlap wait in DU4; overlapping in-flight updates can hang the IT8951.
+                    !M5.Display.displayBusy()) {
+                    // DU4 cannot cleanly leave the GL16-drawn bar; the first frame uses DU.
+                    M5.Display.setEpdMode(remoteTabDrag.drawnX >= 0
+                        ? epd_mode_t::epd_fastest : epd_mode_t::epd_fast);
+                    M5.Display.startWrite();
+                    drawRemotePageTabs(remotePageIndex, centerX);
+                    M5.Display.endWrite();
+                    remoteTabDrag.drawnX = static_cast<int16_t>(centerX);
+                    remoteTabDrag.renderedAt = millis();
+                }
+            }
+            return;
+        }
         RemotePage& page = remoteProfile->pages[remotePageIndex];
         const OpenBuildsSettingsBlock settings = page.openBuildsController
             ? openBuildsSettingsBlock(page) : OpenBuildsSettingsBlock{};
@@ -8959,6 +9423,13 @@ void handleTouch() {
                         activeRemoteContinuousJog = dispatchRemoteAction(control, false, true);
                     }
                 }
+            } else if (touch.y >= kRemoteTabBarTop && remotePageTabAtX(touch.x) >= 0) {
+                remoteTabDrag.active = true;
+                remoteTabDrag.startX = touch.x;
+                remoteTabDrag.hoveredPage = remotePageTabAtX(touch.x);
+                remoteTabDrag.hoveredAt = static_cast<uint16_t>(millis());
+                remoteTabDrag.drawnX = -1;
+                remoteTabDrag.renderedAt = 0;
             }
             return;
         }
@@ -9084,7 +9555,7 @@ void handleTouch() {
                 activeRemoteControlIndex = -1;
                 activeRemoteControlVisual = false;
                 if (releasedMediaSeek) {
-                    displayRemoteSliderValue(page, releasedControlIndex, true);
+                    displayRemoteSliderValue(page, releasedControlIndex);
                 }
                 if (shouldActivate && !control.slider) {
                     Serial.printf("Remote control released: page=%u index=%d\n",
@@ -9107,7 +9578,7 @@ void handleTouch() {
                     if (pageIndex != remotePageIndex) {
                         remotePageIndex = pageIndex;
                         lastRemoteActivityAt = millis();
-                        displayRemote();
+                        displayRemote(true);
                     } else {
                         M5.Display.setEpdMode(epd_mode_t::epd_fastest);
                         M5.Display.startWrite();
@@ -9139,6 +9610,10 @@ void handleTouch() {
             } else {
                 startWifiMode();
             }
+        } else if (touch.y >= 636 && touch.y < 740 && touch.x >= 32 && touch.x < 508) {
+            remoteQualityRefreshes = !remoteQualityRefreshes;
+            persistSettings();
+            displaySettings();
         }
         return;
     }
@@ -9840,6 +10315,7 @@ void runBackgroundWake() {
 void setup() {
     Serial.begin(115200);
     standbyPanel = nullptr;
+    buttonTextureRuntime = nullptr;
     backgroundWake = false;
     scheduledIPhoneActionWaiting = false;
     homeWifiFastConnectUsed = false;
@@ -9849,6 +10325,8 @@ void setup() {
     nextSchedulePollAt = 0;
     bluetoothFastAdvertisingUntil = 0;
     bluetoothAdvertisingSlow = false;
+    remotePageQualityRefreshPending = false;
+    remoteQualityRefreshes = true;
     loopWakeSemaphore = xSemaphoreCreateBinary();
     remoteQualityRefreshPending = esp_reset_reason() == ESP_RST_DEEPSLEEP;
     homeWifiSessionToken = static_cast<uint64_t>(esp_random()) << 32 | esp_random();
@@ -9938,6 +10416,11 @@ void setup() {
     } else {
         initializeDefaultRemoteProfile();
     }
+    void* buttonTextureMemory = heap_caps_calloc(
+        1, sizeof(ButtonTextureRuntime), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buttonTextureMemory != nullptr) {
+        buttonTextureRuntime = new (buttonTextureMemory) ButtonTextureRuntime();
+    }
 
     sdReady = initializeSdCard();
     if (!sdReady) {
@@ -9967,6 +10450,7 @@ void setup() {
             screensaverStyle == ScreensaverStyle::media ? "media" : "snake",
             imagesOnlyOnBattery ? "on" : "off",
             static_cast<unsigned long>(slideshowIntervalSeconds()));
+        Serial.printf("Quality refresh: %s\n", remoteQualityRefreshes ? "on" : "off");
     }
 
     updateScreensaverBatteryPolicy();
@@ -10119,6 +10603,11 @@ void loop() {
         if (remoteVisible) {
             refreshRemoteConnectionStatus();
         }
+    }
+    if (buttonTextureRuntime != nullptr && buttonTextureRuntime->profileInstallPending) {
+        buttonTextureRuntime->profileInstallPending = false;
+        notifyControl(installTemporaryRemoteProfile() ? kRemoteProfileComplete : kUploadFailed);
+        setBluetoothTransferPerformance(false);
     }
     if (remoteProfileDisplayPending &&
         static_cast<int32_t>(millis() - remoteProfileDisplayAt) >= 0) {
@@ -10305,6 +10794,7 @@ void loop() {
     }
     refreshRemoteMediaPosition();
     renderRemoteFeedback();
+    renderPendingRemotePageQualityRefresh();
     const bool animatedPlaybackActive = !batteryStillActive && !remoteVisible && animationReady &&
         animationHeader.frameCount > 1 && !stillFrameDisplayed;
     const bool latencySensitiveWork = upload.active || remoteProfileUpload.active ||

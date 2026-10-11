@@ -25,6 +25,50 @@ final class RemoteProfileModelTests: XCTestCase {
         }
     }
 
+    func testButtonBackgroundDefaultsOverridesAndRoundTrip() throws {
+        let legacy = try JSONDecoder().decode(RemoteProfile.self, from: Data(#"{"version":6,"pages":[]}"#.utf8))
+        XCTAssertEqual(legacy.buttonBackground, .outline)
+
+        var inherited = RemoteControl(title: "A", symbol: "", kind: .button, action: .init(type: .computerMedia, text: "next"))
+        var overridden = inherited
+        overridden.buttonBackground = .shaded
+        var profile = RemoteProfile(pages: [RemotePage(name: "Main", controls: [inherited, overridden])])
+        profile.buttonBackground = .filled
+        XCTAssertEqual(profile.buttonBackground(for: inherited), .filled)
+        XCTAssertEqual(profile.buttonBackground(for: overridden), .shaded)
+
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: profile.devicePayload) as? [String: Any])
+        XCTAssertEqual(payload["buttonBackground"] as? String, "filled")
+        let controls = try XCTUnwrap((payload["pages"] as? [[String: Any]])?.first?["controls"] as? [[String: Any]])
+        XCTAssertNil(controls[0]["buttonBackground"])
+        XCTAssertEqual(controls[1]["buttonBackground"] as? String, "shaded")
+
+        let decoded = try JSONDecoder().decode(RemoteProfile.self, from: JSONEncoder().encode(profile))
+        XCTAssertEqual(decoded, profile)
+        inherited.buttonBackground = nil
+        XCTAssertEqual(decoded.buttonBackground(for: inherited), .filled)
+    }
+
+    func testButtonTextureInheritsClampsAndRoundTrips() throws {
+        let json = #"{"version":6,"buttonTexture":{"kind":"image","imageID":"0A1B2C3D-4E5F-6789-ABCD-EF0123456789","mode":"halftone","scale":200,"fade":-4,"unknown":1},"pages":[{"name":"Main","controls":[{"id":"00000000-0000-0000-0000-000000000001","title":"A","symbol":"","tintHex":"202020","kind":"button","action":{"type":"page","host":"","text":"","value":0,"modifiers":[]}},{"id":"00000000-0000-0000-0000-000000000002","title":"B","symbol":"","tintHex":"202020","kind":"button","buttonTexture":{"kind":"pattern","pattern":"spiral"},"action":{"type":"page","host":"","text":"","value":0,"modifiers":[]}},{"id":"00000000-0000-0000-0000-000000000003","title":"C","symbol":"","tintHex":"202020","kind":"button","buttonTexture":{"kind":"sparkles"},"action":{"type":"page","host":"","text":"","value":0,"modifiers":[]}}]}]}"#
+        let profile = try JSONDecoder().decode(RemoteProfile.self, from: Data(json.utf8))
+        XCTAssertEqual(profile.buttonTexture.kind, .image)
+        XCTAssertEqual(profile.buttonTexture.mode, .halftone)
+        XCTAssertEqual(profile.buttonTexture.imageID, UUID(uuidString: "0A1B2C3D-4E5F-6789-ABCD-EF0123456789"))
+        XCTAssertEqual(profile.buttonTexture.scale, 64)
+        XCTAssertEqual(profile.buttonTexture.fade, 0)
+        let controls = profile.pages[0].controls
+        XCTAssertEqual(profile.buttonTexture(for: controls[0]), profile.buttonTexture)
+        XCTAssertEqual(profile.buttonTexture(for: controls[1]).pattern, .spiral)
+        XCTAssertEqual(profile.buttonTexture(for: controls[2]).kind, .none)
+
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: profile.devicePayload) as? [String: Any])
+        let texture = try XCTUnwrap(payload["buttonTexture"] as? [String: Any])
+        XCTAssertEqual(texture["imageID"] as? String, "0A1B2C3D-4E5F-6789-ABCD-EF0123456789")
+        XCTAssertEqual(texture["kind"] as? String, "image")
+        XCTAssertEqual(try JSONDecoder().decode(RemoteProfile.self, from: JSONEncoder().encode(profile)), profile)
+    }
+
     func testCanonicalV6FixtureCoversEveryActionType() throws {
         let profile = try JSONDecoder().decode(
             RemoteProfile.self,
@@ -290,26 +334,47 @@ final class RemoteProfileModelTests: XCTestCase {
         XCTAssertEqual(slots, [81, 0])
     }
 
-    func testDropsRejectedOnSettingsRailOrAcrossSeveralControls() {
+    func testDropsRejectedOnSettingsRail() {
         let controls = jogButtons([27, 29, 31])
         XCTAssertNil(RemoteGrid.rearranged(
             controls, moving: 0, to: 33, columns: 9, rows: 14, reserved: rail
         ))
-        XCTAssertNil(RemoteGrid.rearranged(
-            controls, moving: 2, to: 28, columns: 9, rows: 14, reserved: rail
-        ))
     }
 
-    func testSwapRejectedWhenTheOtherControlWouldNotFit() {
+    func testDroppingAcrossSeveralControlsPushesThemAside() throws {
+        let controls = jogButtons([27, 29, 31])
+        let slots = try XCTUnwrap(RemoteGrid.rearranged(
+            controls, moving: 2, to: 28, columns: 9, rows: 14, reserved: rail
+        ))
+        XCTAssertEqual(slots[2], 28)
+        // The first control keeps its offset in the vacated space; the second can't, so it takes the nearest gap.
+        XCTAssertEqual(slots, [30, 11, 28])
+        assertNoOverlap(controls, slots)
+    }
+
+    func testDisplacedControlThatCannotTakeTheVacatedSpaceMovesToTheNearestGap() throws {
         var controls = jogButtons([27, nil])
         controls[1].gridWidth = 3
         controls[1].gridHeight = 1
         controls[1].layoutSlot = 18
-        // The 3-wide control can't take slot 27's place without hitting the 2x2 at 29.
         controls.append(contentsOf: jogButtons([29]))
-        XCTAssertNil(RemoteGrid.rearranged(
+        let slots = try XCTUnwrap(RemoteGrid.rearranged(
             controls, moving: 0, to: 18, columns: 9, rows: 14, reserved: rail
         ))
+        XCTAssertEqual(slots, [18, 9, 29])
+        assertNoOverlap(controls, slots)
+    }
+
+    private func assertNoOverlap(_ controls: [RemoteControl], _ slots: [Int?], file: StaticString = #filePath, line: UInt = #line) {
+        var occupied = rail
+        for (control, slot) in zip(controls, slots) {
+            guard let slot, let placement = RemoteGrid.placement(for: control, at: slot, columns: 9, rows: 14) else {
+                return XCTFail("control could not be placed", file: file, line: line)
+            }
+            let cells = RemoteGrid.cells(for: placement, columns: 9)
+            XCTAssertTrue(occupied.isDisjoint(with: cells), file: file, line: line)
+            occupied.formUnion(cells)
+        }
     }
 
     func testTextBoxAlignmentRoundTripsAndDefaultsLegacyValues() throws {

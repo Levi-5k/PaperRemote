@@ -118,14 +118,16 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         case wifi
     }
 
-    private enum BluetoothTransferKind {
+    private enum BluetoothTransferKind: Equatable {
         case media
         case remoteProfile
+        case buttonImage(UUID)
 
         var finishOpcode: UInt8 {
             switch self {
             case .media: 0x12
             case .remoteProfile: 0x42
+            case .buttonImage: 0x47
             }
         }
     }
@@ -232,6 +234,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private var uploadData: Data?
     private var pendingRemoteProfile: PaperGIFRemoteProfile?
     private var bluetoothTransferKind: BluetoothTransferKind?
+    /// Images the device rejected this session (for example older firmware); the profile still syncs.
+    private var skippedButtonImageIDs = Set<UUID>()
     private var uploadOffset = 0
     private var acknowledgedUploadOffset = 0
     private var isAwaitingCompletion = false
@@ -682,6 +686,9 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             remoteSyncStatus = "Waiting to sync latest changes"
             return
         }
+        if beginNextButtonImageUpload(for: profile) {
+            return
+        }
 
         pendingRemoteProfile = nil
         transferMediaID = nil
@@ -696,6 +703,47 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         guard let profile = pendingRemoteProfile else { return }
         pendingRemoteProfile = nil
         syncRemoteProfile(profile)
+    }
+
+    private var uploadedButtonImagesKey: String? {
+        peripheral.map { "buttonImages.uploaded.\($0.identifier.uuidString)" }
+    }
+
+    private func uploadedButtonImageIDs() -> Set<UUID> {
+        guard let key = uploadedButtonImagesKey else { return [] }
+        return Set((UserDefaults.standard.stringArray(forKey: key) ?? []).compactMap(UUID.init(uuidString:)))
+    }
+
+    private func recordUploadedButtonImage(_ id: UUID) {
+        guard let key = uploadedButtonImagesKey else { return }
+        var ids = uploadedButtonImageIDs()
+        ids.insert(id)
+        UserDefaults.standard.set(ids.map(\.uuidString).sorted(), forKey: key)
+    }
+
+    /// Sends the first button image this M5Paper lacks; the profile follows once images are installed.
+    private func beginNextButtonImageUpload(for profile: PaperGIFRemoteProfile) -> Bool {
+        let uploaded = uploadedButtonImageIDs()
+        for id in profile.referencedButtonImageIDs
+        where !uploaded.contains(id) && !skippedButtonImageIDs.contains(id) {
+            guard let data = PaperGIFButtonImageStore.load(id) else {
+                skippedButtonImageIDs.insert(id)
+                continue
+            }
+            pendingRemoteProfile = profile
+            transferMediaID = nil
+            transferProgress = 0
+            transferStatus = "Sending button image"
+            remoteSyncStatus = "Sending button image"
+            isTransferring = true
+            var command = Data([0x46])
+            command.appendLittleEndian(UInt32(clamping: data.count))
+            command.appendLittleEndian(data.crc32)
+            command.append(contentsOf: id.uuidString.utf8)
+            beginBluetoothTransfer(data, command: command, kind: .buttonImage(id))
+            return true
+        }
+        return false
     }
 
     private func beginBluetoothUpload(_ data: Data, name: String) {
@@ -1164,8 +1212,12 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         switch opcode {
         case 0x11, 0x41:
             preparationTimeout?.cancel()
-            transferStatus = bluetoothTransferKind == .media ? "Sending media" : "Sending remote"
-            remoteSyncStatus = bluetoothTransferKind == .remoteProfile ? transferStatus : remoteSyncStatus
+            switch bluetoothTransferKind {
+            case .media: transferStatus = "Sending media"
+            case .buttonImage: transferStatus = "Sending button image"
+            default: transferStatus = "Sending remote"
+            }
+            remoteSyncStatus = bluetoothTransferKind == .media ? remoteSyncStatus : transferStatus
             pumpUpload()
         case 0x13:
             preparationTimeout?.cancel()
@@ -1191,6 +1243,17 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             bluetoothTransferKind = nil
             syncPendingRemoteProfile()
             sendPendingLocalMediaState()
+        case 0x48:
+            preparationTimeout?.cancel()
+            chunkTimeout?.cancel()
+            completionTimeout?.cancel()
+            if case .buttonImage(let id) = bluetoothTransferKind {
+                recordUploadedButtonImage(id)
+            }
+            isTransferring = false
+            uploadData = nil
+            bluetoothTransferKind = nil
+            syncPendingRemoteProfile()
         case 0x7F:
             if isTransferring {
                 failTransfer("The M5Paper rejected the transfer")
@@ -1520,6 +1583,13 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         if bluetoothTransferKind == .remoteProfile {
             remoteSyncStatus = message
         }
+        let failedImageProfile: PaperGIFRemoteProfile?
+        if case .buttonImage(let id) = bluetoothTransferKind {
+            skippedButtonImageIDs.insert(id)
+            failedImageProfile = pendingRemoteProfile
+        } else {
+            failedImageProfile = nil
+        }
         transferStatus = message
         isTransferring = false
         transferMediaID = nil
@@ -1529,6 +1599,10 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         uploadOffset = 0
         acknowledgedUploadOffset = 0
         isAwaitingCompletion = false
+        if let failedImageProfile {
+            remoteSyncStatus = "Button image not sent; syncing remote"
+            syncRemoteProfile(failedImageProfile)
+        }
     }
 
     private func resetConnection() {

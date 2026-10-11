@@ -388,6 +388,30 @@ struct PaperGIFRemoteView: View {
 
     private var screensaverSection: some View {
         Section("Display") {
+            NavigationLink {
+                PaperGIFButtonBackgroundSettings(
+                    background: Binding(
+                        get: { profile.buttonBackground },
+                        set: { background in
+                            var updatedProfile = profile
+                            updatedProfile.buttonBackground = background
+                            applyLiveProfile(updatedProfile)
+                        }
+                    ),
+                    texture: Binding(
+                        get: { profile.buttonTexture },
+                        set: { texture in
+                            var updatedProfile = profile
+                            updatedProfile.buttonTexture = texture
+                            applyLiveProfile(updatedProfile)
+                        }
+                    )
+                )
+            } label: {
+                LabeledContent("Button background", value: profile.buttonTexture.kind == .none
+                    ? profile.buttonBackground.title
+                    : "\(profile.buttonBackground.title), \(profile.buttonTexture.kind == .pattern ? profile.buttonTexture.pattern.title : "Image")")
+            }
             VStack(alignment: .leading) {
                 Text("Maximum button text size: \(profile.maxButtonTextSize) pt")
                     .monospacedDigit()
@@ -795,6 +819,8 @@ struct PaperGIFRemoteView: View {
                         computers: profile.computers,
                         temperatureUnit: profile.temperatureUnit,
                         maxButtonTextSize: profile.maxButtonTextSize,
+                        buttonBackground: profile.buttonBackground,
+                        buttonTexture: profile.buttonTexture,
                         wledDiscovery: wledDiscovery
                     )
                 } label: {
@@ -1643,6 +1669,8 @@ private struct PaperGIFRemotePageEditor: View {
     let computers: [PaperGIFRemoteComputer]
     let temperatureUnit: PaperGIFTemperatureUnit
     let maxButtonTextSize: Int
+    let buttonBackground: PaperGIFRemoteButtonBackground
+    let buttonTexture: PaperGIFRemoteButtonTexture
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     @State private var selectedControlID: UUID?
 
@@ -1655,6 +1683,8 @@ private struct PaperGIFRemotePageEditor: View {
                     pageNames: pages.map(\.name),
                     temperatureUnit: temperatureUnit,
                     maxButtonTextSize: maxButtonTextSize,
+                    buttonBackground: buttonBackground,
+                    buttonTexture: buttonTexture,
                     onEditControl: { selectedControlID = $0 }
                 )
                 .aspectRatio(540.0 / 960.0, contentMode: .fit)
@@ -1679,6 +1709,8 @@ private struct PaperGIFRemotePageEditor: View {
                             temperatureUnit: temperatureUnit,
                             gridColumns: page.gridColumns,
                             gridRows: page.gridRows,
+                            defaultButtonBackground: buttonBackground,
+                            defaultButtonTexture: buttonTexture,
                             wledDiscovery: wledDiscovery
                         )
                     } label: {
@@ -1743,6 +1775,8 @@ private struct PaperGIFRemotePageEditor: View {
                     temperatureUnit: temperatureUnit,
                     gridColumns: page.gridColumns,
                     gridRows: page.gridRows,
+                    defaultButtonBackground: buttonBackground,
+                    defaultButtonTexture: buttonTexture,
                     wledDiscovery: wledDiscovery
                 )
             }
@@ -1829,6 +1863,8 @@ private struct PaperGIFRemotePagePreview: View {
     let pageNames: [String]
     let temperatureUnit: PaperGIFTemperatureUnit
     let maxButtonTextSize: Int
+    var buttonBackground: PaperGIFRemoteButtonBackground = .outline
+    var buttonTexture = PaperGIFRemoteButtonTexture()
     let onEditControl: (UUID) -> Void
     @State private var draggedControlID: UUID?
     @State private var dragLocation: CGPoint?
@@ -2012,8 +2048,13 @@ private struct PaperGIFRemoteTabsPreview: View {
                 RoundedRectangle(cornerRadius: 10 * scale)
                     .stroke(Color.black, lineWidth: max(1, scale))
             } else if control.kind != .textBox {
-                RoundedRectangle(cornerRadius: 10 * scale)
-                    .stroke(Color.black, lineWidth: 1)
+                PaperGIFButtonBackgroundPreview(
+                    background: control.buttonBackground ?? buttonBackground,
+                    texture: control.buttonTexture ?? buttonTexture,
+                    pixelWidth: max(1, Int((frame.width / scale).rounded())),
+                    pixelHeight: max(1, Int((frame.height / scale).rounded())),
+                    scale: scale
+                )
             }
 
             if control.kind == .textBox {
@@ -2065,7 +2106,7 @@ private struct PaperGIFRemoteTabsPreview: View {
                 }
             } else {
                 PaperGIFRemotePreviewLabel(control: control, scale: scale, compact: controllerCompact, maxButtonTextSize: maxButtonTextSize)
-                .foregroundStyle(.black)
+                .foregroundStyle((control.buttonBackground ?? buttonBackground) == .filled ? Color.white : Color.black)
             }
         }
         .frame(width: frame.width, height: frame.height)
@@ -2364,6 +2405,8 @@ private struct PaperGIFRemoteControlEditor: View {
     let temperatureUnit: PaperGIFTemperatureUnit
     let gridColumns: Int
     let gridRows: Int
+    var defaultButtonBackground: PaperGIFRemoteButtonBackground = .outline
+    var defaultButtonTexture = PaperGIFRemoteButtonTexture()
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     @StateObject private var applicationCatalog = PaperGIFMacApplicationCatalog()
     @StateObject private var homeManager = PaperGIFHomeManager()
@@ -2404,6 +2447,17 @@ private struct PaperGIFRemoteControlEditor: View {
                     TextField("Color hex", text: $control.tintHex)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
+                }
+                if control.kind == .button {
+                    NavigationLink {
+                        PaperGIFControlBackgroundEditor(
+                            control: $control,
+                            defaultBackground: defaultButtonBackground,
+                            defaultTexture: defaultButtonTexture
+                        )
+                    } label: {
+                        LabeledContent("Background", value: backgroundSummary)
+                    }
                 }
                 Picker("Control", selection: controlKindBinding) {
                     ForEach(PaperGIFRemoteControlKind.allCases) { kind in
@@ -3387,6 +3441,17 @@ private struct PaperGIFRemoteControlEditor: View {
 
     private var volumePercentage: Int {
         min(max(Int((Double(control.action.value) / 255 * 100).rounded()), 0), 100)
+    }
+
+    private var backgroundSummary: String {
+        guard control.buttonBackground != nil || control.buttonTexture != nil else { return "Default" }
+        let texture = control.buttonTexture ?? defaultButtonTexture
+        let style = (control.buttonBackground ?? defaultButtonBackground).title
+        switch texture.kind {
+        case .none: return style
+        case .pattern: return "\(style), \(texture.pattern.title)"
+        case .image: return "\(style), Image"
+        }
     }
 
     private var selectedIconTitle: String {

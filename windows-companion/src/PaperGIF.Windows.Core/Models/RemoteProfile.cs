@@ -18,6 +18,60 @@ public enum RemotePageLayout
     OpenBuildsController,
 }
 
+public enum RemoteButtonBackground
+{
+    Outline,
+    Filled,
+    Shaded,
+    Borderless,
+}
+
+public enum RemoteButtonTextureKind
+{
+    None,
+    Pattern,
+    Image,
+}
+
+public enum RemoteButtonPattern
+{
+    Hexagons,
+    Triangles,
+    Grid,
+    Dots,
+    Diagonal,
+    Checker,
+    Waves,
+    Rings,
+    Spiral,
+    Truchet,
+}
+
+public enum RemoteButtonImageMode
+{
+    Threshold,
+    Monochrome,
+    Halftone,
+    Combined,
+}
+
+// Pattern or converted image drawn behind idle buttons; images are stored on the device by ID.
+public sealed class RemoteButtonTexture
+{
+    public RemoteButtonTextureKind Kind { get; set; } = RemoteButtonTextureKind.None;
+    public RemoteButtonPattern Pattern { get; set; } = RemoteButtonPattern.Hexagons;
+    public int Scale { get; set; } = 16;
+    public int LineWidth { get; set; } = 1;
+    public Guid? ImageID { get; set; }
+    public RemoteButtonImageMode Mode { get; set; } = RemoteButtonImageMode.Monochrome;
+    public int Threshold { get; set; } = 128;
+    public int Levels { get; set; } = 16;
+    public int DotSpacing { get; set; } = 8;
+    public int Angle { get; set; } = 45;
+    public int DotGain { get; set; }
+    public int Fade { get; set; } = 50;
+}
+
 public enum RemoteJogMode
 {
     Incremental,
@@ -169,6 +223,10 @@ public sealed class RemoteControl
     public int? GridWidth { get; set; }
     public int? GridHeight { get; set; }
     public int? SliderOutlineInsetPixels { get; set; }
+    // Null inherits RemoteProfile.ButtonBackground.
+    public RemoteButtonBackground? ButtonBackground { get; set; }
+    // Null inherits RemoteProfile.ButtonTexture.
+    public RemoteButtonTexture? ButtonTexture { get; set; }
     public RemoteAction Action { get; set; } = new();
     public int? LayoutSlot { get; set; }
     public RemoteTextBox? TextBox { get; set; }
@@ -217,6 +275,8 @@ public sealed class RemoteProfile
     public int ScreensaverDelaySeconds { get; set; } = 30;
     public int ButtonQualityRefreshInterval { get; set; } = 10;
     public int ElementRefreshDelayMilliseconds { get; set; } = 20;
+    public RemoteButtonBackground ButtonBackground { get; set; } = RemoteButtonBackground.Outline;
+    public RemoteButtonTexture ButtonTexture { get; set; } = new();
     // Clamp in the setter so both device JSON and saved editor documents are normalized.
     public int MaxButtonTextSize
     {
@@ -226,6 +286,12 @@ public sealed class RemoteProfile
     public TemperatureUnit TemperatureUnit { get; set; } = TemperatureUnit.Celsius;
     public int TimeZoneOffsetMinutes { get; set; } = (int)TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.Now).TotalMinutes;
     public List<RemotePage> Pages { get; set; } = [];
+
+    public RemoteButtonBackground ButtonBackgroundFor(RemoteControl control) =>
+        control.ButtonBackground ?? ButtonBackground;
+
+    public RemoteButtonTexture ButtonTextureFor(RemoteControl control) =>
+        control.ButtonTexture ?? ButtonTexture;
 
     public void MarkUpdated(DateTimeOffset? now = null)
     {

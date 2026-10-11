@@ -139,6 +139,8 @@ internal sealed class UpdatesDialog : Form
         notes.Dock = DockStyle.Fill;
         notes.Multiline = true;
         notes.ReadOnly = true;
+        // Disabling "Check now" moves focus to the next tab stop, and a TextBox selects all text on keyboard focus.
+        notes.TabStop = false;
         notes.ScrollBars = ScrollBars.Vertical;
         notes.BorderStyle = BorderStyle.None;
         notes.BackColor = EditorTheme.Surface;

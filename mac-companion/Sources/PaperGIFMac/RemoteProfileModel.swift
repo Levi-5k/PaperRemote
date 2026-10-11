@@ -40,6 +40,76 @@ enum RemotePageLayout: String, Codable, Sendable {
     case openBuildsController
 }
 
+enum RemoteButtonBackground: String, Codable, CaseIterable, Identifiable, Sendable {
+    case outline
+    case filled
+    case shaded
+    case borderless
+
+    var id: Self { self }
+}
+
+enum RemoteButtonTextureKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case none
+    case pattern
+    case image
+
+    var id: Self { self }
+}
+
+enum RemoteButtonPattern: String, Codable, CaseIterable, Identifiable, Sendable {
+    case hexagons, triangles, grid, dots, diagonal, checker, waves, rings, spiral, truchet
+
+    var id: Self { self }
+}
+
+enum RemoteButtonImageMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case threshold, monochrome, halftone, combined
+
+    var id: Self { self }
+}
+
+/// A pattern or converted image drawn behind idle buttons; images are stored on the device by ID.
+struct RemoteButtonTexture: Codable, Equatable, Sendable {
+    var kind: RemoteButtonTextureKind = .none
+    var pattern: RemoteButtonPattern = .hexagons
+    var scale = 16
+    var lineWidth = 1
+    var imageID: UUID? = nil
+    var mode: RemoteButtonImageMode = .monochrome
+    var threshold = 128
+    var levels = 16
+    var dotSpacing = 8
+    var angle = 45
+    var dotGain = 0
+    var fade = 50
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, pattern, scale, lineWidth, imageID, mode, threshold, levels, dotSpacing, angle, dotGain, fade
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func integer(_ key: CodingKeys, _ fallback: Int, _ range: ClosedRange<Int>) -> Int {
+            min(max((try? container.decodeIfPresent(Int.self, forKey: key)) ?? fallback, range.lowerBound), range.upperBound)
+        }
+        kind = (try? container.decodeIfPresent(RemoteButtonTextureKind.self, forKey: .kind)) ?? .none
+        pattern = (try? container.decodeIfPresent(RemoteButtonPattern.self, forKey: .pattern)) ?? .hexagons
+        scale = integer(.scale, 16, 6...64)
+        lineWidth = integer(.lineWidth, 1, 1...8)
+        imageID = try? container.decodeIfPresent(UUID.self, forKey: .imageID)
+        mode = (try? container.decodeIfPresent(RemoteButtonImageMode.self, forKey: .mode)) ?? .monochrome
+        threshold = integer(.threshold, 128, 32...224)
+        levels = integer(.levels, 16, 0...16)
+        dotSpacing = integer(.dotSpacing, 8, 3...24)
+        angle = integer(.angle, 45, 0...90)
+        dotGain = integer(.dotGain, 0, -50...50)
+        fade = integer(.fade, 50, 0...90)
+    }
+}
+
 enum RemoteJogMode: String, Codable, Sendable {
     case incremental
     case continuous
@@ -386,6 +456,10 @@ struct RemoteControl: Codable, Equatable, Identifiable, Sendable {
     var gridWidth: Int? = nil
     var gridHeight: Int? = nil
     var sliderOutlineInsetPixels: Int? = nil
+    /// nil inherits `RemoteProfile.buttonBackground`.
+    var buttonBackground: RemoteButtonBackground? = nil
+    /// nil inherits `RemoteProfile.buttonTexture`.
+    var buttonTexture: RemoteButtonTexture? = nil
     var action: RemoteAction
     var layoutSlot: Int?
     var textBox: RemoteTextBox? = nil
@@ -524,7 +598,7 @@ enum RemoteGrid {
     }
 
     /// Final anchor slot for every control, or nil if the drop isn't possible.
-    /// Dropping onto exactly one other control swaps the two.
+    /// Controls under the drop move into the space it left, or else the nearest free spot.
     static func rearranged(
         _ controls: [RemoteControl],
         moving sourceIndex: Int,
@@ -542,30 +616,42 @@ enum RemoteGrid {
               requested.slot != source.slot else { return nil }
 
         let requestedCells = cells(for: requested, columns: columns)
+        guard reserved.isDisjoint(with: requestedCells) else { return nil }
         let occupants = current.indices.filter { index in
             index != sourceIndex && current[index].map {
                 !requestedCells.isDisjoint(with: cells(for: $0, columns: columns))
             } == true
         }
         var slots = current.map { $0?.slot }
-        switch occupants.count {
-        case 0:
-            slots[sourceIndex] = requested.slot
-        case 1:
-            slots[sourceIndex] = current[occupants[0]]?.slot
-            slots[occupants[0]] = source.slot
-        default:
-            return nil
+        slots[sourceIndex] = requested.slot
+        var occupied = reserved.union(requestedCells)
+        for index in current.indices where index != sourceIndex && !occupants.contains(index) {
+            if let pinned = current[index] { occupied.formUnion(cells(for: pinned, columns: columns)) }
         }
 
-        var occupied = reserved
-        for index in slots.indices {
-            guard let slot = slots[index] else { continue }
-            guard let moved = placement(for: controls[index], at: slot, columns: columns, rows: rows),
-                  moved.slot == slot else { return nil }
-            let movedCells = cells(for: moved, columns: columns)
-            guard occupied.isDisjoint(with: movedCells) else { return nil }
-            occupied.formUnion(movedCells)
+        let columnShift = source.slot % columns - requested.slot % columns
+        let rowShift = source.slot / columns - requested.slot / columns
+        for index in occupants {
+            guard let original = current[index] else { continue }
+            func distance(_ slot: Int) -> Int {
+                let dx = slot % columns - original.slot % columns
+                let dy = slot / columns - original.slot / columns
+                return dx * dx + dy * dy
+            }
+            let shifted = translatedSlot(
+                from: original.slot, columnOffset: columnShift, rowOffset: rowShift,
+                columns: columns, rows: rows
+            )
+            let nearest = (0..<(columns * rows)).sorted { (distance($0), $0) < (distance($1), $1) }
+            let fit = ([shifted].compactMap { $0 } + nearest).lazy.compactMap { candidate -> RemoteGridPlacement? in
+                guard let moved = placement(for: controls[index], at: candidate, columns: columns, rows: rows),
+                      moved.slot == candidate,
+                      occupied.isDisjoint(with: cells(for: moved, columns: columns)) else { return nil }
+                return moved
+            }.first
+            guard let fit else { return nil }
+            slots[index] = fit.slot
+            occupied.formUnion(cells(for: fit, columns: columns))
         }
         return slots
     }
@@ -845,6 +931,8 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         }
     }
     var elementRefreshDelayMilliseconds = 20
+    var buttonBackground: RemoteButtonBackground = .outline
+    var buttonTexture = RemoteButtonTexture()
     var temperatureUnit: RemoteTemperatureUnit = .celsius
     var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
     var pages: [RemotePage]
@@ -854,10 +942,19 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         self.pages = pages
     }
 
+    func buttonBackground(for control: RemoteControl) -> RemoteButtonBackground {
+        control.buttonBackground ?? buttonBackground
+    }
+
+    func buttonTexture(for control: RemoteControl) -> RemoteButtonTexture {
+        control.buttonTexture ?? buttonTexture
+    }
+
     private enum CodingKeys: String, CodingKey {
         case version, updatedAtMilliseconds, wifiSSID, wifiPassword, macHost, macPort, macToken
         case computers, screensaverDelaySeconds, buttonQualityRefreshInterval, maxButtonTextSize
-        case elementRefreshDelayMilliseconds, temperatureUnit, timeZoneOffsetMinutes, pages
+        case elementRefreshDelayMilliseconds, buttonBackground, buttonTexture, temperatureUnit
+        case timeZoneOffsetMinutes, pages
     }
 
     init(from decoder: Decoder) throws {
@@ -890,6 +987,12 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         elementRefreshDelayMilliseconds = try container.decodeIfPresent(
             Int.self, forKey: .elementRefreshDelayMilliseconds
         ) ?? 20
+        buttonBackground = try container.decodeIfPresent(
+            RemoteButtonBackground.self, forKey: .buttonBackground
+        ) ?? .outline
+        buttonTexture = try container.decodeIfPresent(
+            RemoteButtonTexture.self, forKey: .buttonTexture
+        ) ?? RemoteButtonTexture()
         temperatureUnit = try container.decodeIfPresent(RemoteTemperatureUnit.self, forKey: .temperatureUnit) ?? .celsius
         timeZoneOffsetMinutes = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutes)
             ?? TimeZone.current.secondsFromGMT() / 60

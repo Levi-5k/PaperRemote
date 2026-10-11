@@ -52,6 +52,28 @@ public sealed class RemoteEditorStoreTests
     }
 
     [Fact]
+    public void DroppedControlsPushOthersAsideAndAvoidTheSettingsRail()
+    {
+        RemotePage Page(params int[] slots) => new()
+        {
+            Name = "Motion Control",
+            GridColumns = 9,
+            GridRows = 14,
+            Layout = RemotePageLayout.OpenBuildsController,
+            Controls = [.. slots.Select(slot => new RemoteControl { GridWidth = 2, GridHeight = 2, LayoutSlot = slot })],
+        };
+
+        var swap = Page(27, 29, 31);
+        Assert.Equal(new int?[] { 29, 27, 31 }, RemoteEditorStore.ArrangementAfterMove(swap, swap.Controls[0].Id, 29));
+
+        var several = Page(27, 29, 31);
+        Assert.Equal(new int?[] { 30, 11, 28 }, RemoteEditorStore.ArrangementAfterMove(several, several.Controls[2].Id, 28));
+
+        var rail = Page(27, 29, 31);
+        Assert.Null(RemoteEditorStore.ArrangementAfterMove(rail, rail.Controls[0].Id, 33));
+    }
+
+    [Fact]
     public void LoopbackOpenBuildsControlsTargetTheChosenComputer()
     {
         const string local = "11111111-1111-1111-1111-111111111111";

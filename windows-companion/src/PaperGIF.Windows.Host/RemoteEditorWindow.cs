@@ -895,7 +895,7 @@ internal sealed class RemoteEditorWindow : Form
     private TabPage BuildConnectionsTab()
     {
         var tab = new TabPage("Connections") { BackColor = EditorTheme.Layer, Padding = new Padding(10) };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 11, ColumnCount = 1 };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Top, RowCount = 11, ColumnCount = 1 };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
@@ -1037,8 +1037,22 @@ internal sealed class RemoteEditorWindow : Form
         layout.Controls.Add(new FlowLayoutPanel { AutoSize = true, Controls = { wledButton, startupHint } }, 0, 8);
         layout.Controls.Add(new Label { AutoSize = true, Text = "NetHome Plus", Font = new Font("Segoe UI Semibold", 9F), Padding = new Padding(2, 8, 0, 2) }, 0, 9);
         layout.Controls.Add(netHomeControls, 0, 10);
-        tab.Controls.Add(layout);
+        // Percent rows collapse to nothing in a short window, so keep a usable height and scroll instead.
+        var scroller = new StableScrollPanel { Dock = DockStyle.Fill, AutoScroll = true };
+        scroller.Resize += (_, _) => layout.Height = Math.Max(
+            scroller.ClientSize.Height,
+            scroller.LogicalToDeviceUnits(MinimumConnectionsHeight));
+        scroller.Controls.Add(layout);
+        tab.Controls.Add(scroller);
         return tab;
+    }
+
+    private const int MinimumConnectionsHeight = 950;
+
+    // Focusing the tab's property grid or lists would otherwise jump the view away from the top.
+    private sealed class StableScrollPanel : Panel
+    {
+        protected override Point ScrollToControl(Control activeControl) => AutoScrollPosition;
     }
 
     private void RefreshAll()

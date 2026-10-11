@@ -2286,6 +2286,9 @@ private struct DevicePreview: View {
     let onSelect: (UUID) -> Void
     let onMove: (UUID, Int) -> Void
     let onMoveSettings: (Int) -> Void
+    @State private var draggedControlID: UUID?
+    @State private var draggingSettings = false
+    @State private var dragTranslation = CGSize.zero
 
     var body: some View {
         GeometryReader { geometry in
@@ -2293,7 +2296,8 @@ private struct DevicePreview: View {
             let width = 540 * scale
             let height = 960 * scale
             let origin = CGPoint(x: (geometry.size.width - width) / 2, y: (geometry.size.height - height) / 2)
-            let frames = RemoteLayout.frames(for: page)
+            let layout = dragLayout(scale: scale)
+            let frames = layout.frames
 
             ZStack(alignment: .topLeading) {
                 Rectangle().fill(Color(red: 0.97, green: 0.965, blue: 0.93))
@@ -2305,20 +2309,23 @@ private struct DevicePreview: View {
                 .padding(.horizontal, 24 * scale)
                 .padding(.top, 55 * scale)
 
+                if let target = layout.target {
+                    RoundedRectangle(cornerRadius: 10 * scale)
+                        .strokeBorder(Color.black.opacity(0.45), style: StrokeStyle(lineWidth: max(1, 2 * scale), dash: [6 * scale, 4 * scale]))
+                        .frame(width: target.width * scale, height: target.height * scale)
+                        .position(x: target.midX * scale, y: target.midY * scale)
+                }
+
                 if page.layout == .openBuildsController {
                     if let settings = RemoteGrid.openBuildsSettingsPlacement(for: page) {
                         let origin = RemoteLayout.origin(of: settings.slot, page: page)
                         OpenBuildsSettingsPreview(controller: page.openBuildsController, scale: scale)
-                            .position(x: (origin.x + 76) * scale, y: (origin.y + 215) * scale)
-                            .gesture(DragGesture(minimumDistance: 8).onEnded { drag in
-                                guard let slot = RemoteLayout.translatedSlot(
-                                    from: CGRect(origin: origin, size: .zero),
-                                    translation: drag.translation,
-                                    scale: scale,
-                                    page: page
-                                ) else { return }
-                                onMoveSettings(slot)
-                            })
+                            .position(
+                                x: (origin.x + 76) * scale + (draggingSettings ? dragTranslation.width : 0),
+                                y: (origin.y + 215) * scale + (draggingSettings ? dragTranslation.height : 0)
+                            )
+                            .zIndex(draggingSettings ? 1 : 0)
+                            .gesture(settingsDragGesture(origin: origin, scale: scale))
                             .help("Drag to move the jog settings")
                     }
                     ForEach(Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
@@ -2332,17 +2339,13 @@ private struct DevicePreview: View {
                             controllerCompact: control.kind == .button
                         )
                         .frame(width: frame.width * scale, height: frame.height * scale)
-                        .position(x: frame.midX * scale, y: frame.midY * scale)
+                        .modifier(PreviewDragPlacement(
+                            center: CGPoint(x: frame.midX * scale, y: frame.midY * scale),
+                            translation: draggedControlID == control.id ? dragTranslation : nil
+                        ))
+                        .animation(draggedControlID == control.id ? nil : .easeOut(duration: 0.15), value: frame)
                         .onTapGesture { onSelect(control.id) }
-                        .gesture(DragGesture(minimumDistance: 8).onEnded { drag in
-                            guard let slot = RemoteLayout.translatedSlot(
-                                from: frame,
-                                translation: drag.translation,
-                                scale: scale,
-                                page: page
-                            ) else { return }
-                            onMove(control.id, slot)
-                        })
+                        .gesture(controlDragGesture(control.id, frame: frame, scale: scale))
                     }
                 } else {
                     ForEach(Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage).enumerated()), id: \.element.id) { index, control in
@@ -2355,17 +2358,13 @@ private struct DevicePreview: View {
                             maxButtonTextSize: maxButtonTextSize
                         )
                             .frame(width: frame.width * scale, height: frame.height * scale)
-                            .position(x: frame.midX * scale, y: frame.midY * scale)
+                            .modifier(PreviewDragPlacement(
+                                center: CGPoint(x: frame.midX * scale, y: frame.midY * scale),
+                                translation: draggedControlID == control.id ? dragTranslation : nil
+                            ))
+                            .animation(draggedControlID == control.id ? nil : .easeOut(duration: 0.15), value: frame)
                             .onTapGesture { onSelect(control.id) }
-                            .gesture(DragGesture(minimumDistance: 8).onEnded { drag in
-                                guard let slot = RemoteLayout.translatedSlot(
-                                    from: frame,
-                                    translation: drag.translation,
-                                    scale: scale,
-                                    page: page
-                                ) else { return }
-                                onMove(control.id, slot)
-                            })
+                            .gesture(controlDragGesture(control.id, frame: frame, scale: scale))
                     }
                 }
 
@@ -2391,11 +2390,92 @@ private struct DevicePreview: View {
                 .position(x: 270 * scale, y: 884 * scale)
             }
             .frame(width: width, height: height)
+            .coordinateSpace(name: Self.dragSpace)
             .overlay(Rectangle().stroke(.black, lineWidth: 1))
             .position(x: origin.x + width / 2, y: origin.y + height / 2)
             .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
         }
         .aspectRatio(540 / 960, contentMode: .fit)
+    }
+
+    // The dragged view moves, so translations must come from a fixed coordinate space.
+    private static let dragSpace = "devicePreview"
+
+    /// Frames with the other controls already moved out of the way, plus where the dragged one would land.
+    /// The dragged control keeps its original frame; its translation is applied separately.
+    private func dragLayout(scale: CGFloat) -> (frames: [CGRect], target: CGRect?) {
+        let original = RemoteLayout.frames(for: page)
+        let controls = Array(page.controls.prefix(RemoteProfile.maximumControlsPerPage))
+        guard let controlID = draggedControlID,
+              let index = controls.firstIndex(where: { $0.id == controlID }),
+              let slot = RemoteLayout.translatedSlot(
+                  from: original[index], translation: dragTranslation, scale: scale, page: page
+              ),
+              let slots = RemoteGrid.rearranged(
+                  controls, moving: index, to: slot,
+                  columns: page.gridColumns, rows: page.gridRows,
+                  reserved: RemoteGrid.reservedCells(for: page)
+              ) else { return (original, nil) }
+        var arranged = page
+        for position in slots.indices {
+            arranged.controls[position].layoutSlot = slots[position]
+        }
+        var frames = RemoteLayout.frames(for: arranged)
+        let target = frames[index]
+        frames[index] = original[index]
+        return (frames, target)
+    }
+
+    private func controlDragGesture(_ controlID: UUID, frame: CGRect, scale: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .named(Self.dragSpace))
+            .onChanged { drag in
+                draggedControlID = controlID
+                dragTranslation = drag.translation
+            }
+            .onEnded { drag in
+                draggedControlID = nil
+                dragTranslation = .zero
+                if let slot = RemoteLayout.translatedSlot(
+                    from: frame, translation: drag.translation, scale: scale, page: page
+                ) {
+                    onMove(controlID, slot)
+                }
+            }
+    }
+
+    private func settingsDragGesture(origin: CGPoint, scale: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .named(Self.dragSpace))
+            .onChanged { drag in
+                draggingSettings = true
+                dragTranslation = drag.translation
+            }
+            .onEnded { drag in
+                draggingSettings = false
+                dragTranslation = .zero
+                if let slot = RemoteLayout.translatedSlot(
+                    from: CGRect(origin: origin, size: .zero),
+                    translation: drag.translation,
+                    scale: scale,
+                    page: page
+                ) {
+                    onMoveSettings(slot)
+                }
+            }
+    }
+}
+
+private struct PreviewDragPlacement: ViewModifier {
+    let center: CGPoint
+    let translation: CGSize?
+
+    func body(content: Content) -> some View {
+        content
+            .shadow(color: .black.opacity(translation == nil ? 0 : 0.25), radius: 8, y: 4)
+            .position(
+                x: center.x + (translation?.width ?? 0),
+                y: center.y + (translation?.height ?? 0)
+            )
+            .zIndex(translation == nil ? 0 : 1)
     }
 }
 

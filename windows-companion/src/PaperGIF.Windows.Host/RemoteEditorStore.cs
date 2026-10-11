@@ -386,21 +386,24 @@ internal sealed class RemoteEditorStore : IDisposable
     public void MoveControlToSlot(Guid controlId, int requestedSlot)
     {
         var page = SelectedPage;
-        if (page is null)
+        if (page is null || ArrangementAfterMove(page, controlId, requestedSlot) is not { } slots)
         {
             return;
         }
         var controls = page.Controls.Take(RemoteProfile.MaximumControlsPerPage).ToList();
-        var sourceIndex = controls.FindIndex(candidate => candidate.Id == controlId);
-        if (sourceIndex < 0 || Rearranged(controls, sourceIndex, requestedSlot, page) is not { } slots)
-        {
-            return;
-        }
         for (var index = 0; index < slots.Length; index++)
         {
             controls[index].LayoutSlot = slots[index];
         }
         Commit();
+    }
+
+    // Slot for each of the page's first controls after the move, or null if the drop isn't possible.
+    internal static int?[]? ArrangementAfterMove(RemotePage page, Guid controlId, int requestedSlot)
+    {
+        var controls = page.Controls.Take(RemoteProfile.MaximumControlsPerPage).ToList();
+        var sourceIndex = controls.FindIndex(candidate => candidate.Id == controlId);
+        return sourceIndex < 0 ? null : Rearranged(controls, sourceIndex, requestedSlot, page);
     }
 
     private static GridPlacement?[] Placements(IReadOnlyList<RemoteControl> controls, RemotePage page)
@@ -441,55 +444,76 @@ internal sealed class RemoteEditorStore : IDisposable
     }
 
     // Final anchor slot for every control, or null if the drop isn't possible.
-    // Dropping onto exactly one other control swaps the two.
+    // Controls under the drop move into the space it left, or else the nearest free spot.
     private static int?[]? Rearranged(
         IReadOnlyList<RemoteControl> controls, int sourceIndex, int requestedSlot, RemotePage page)
     {
         var columns = page.GridColumns;
+        var rows = page.GridRows;
         var current = Placements(controls, page);
         if (current[sourceIndex] is not { } source ||
-            requestedSlot < 0 || requestedSlot >= columns * page.GridRows ||
+            requestedSlot < 0 || requestedSlot >= columns * rows ||
             Placement(controls[sourceIndex], requestedSlot, page) is not { } requested ||
             requested.Slot == source.Slot)
         {
             return null;
         }
         var requestedCells = Cells(requested, columns);
+        var occupied = new HashSet<int>(ReservedCells(page));
+        if (occupied.Overlaps(requestedCells))
+        {
+            return null;
+        }
         var occupants = Enumerable.Range(0, controls.Count)
             .Where(index => index != sourceIndex && current[index] is { } placement &&
                 requestedCells.Overlaps(Cells(placement, columns)))
             .ToList();
         var slots = current.Select(placement => placement?.Slot).ToArray();
-        switch (occupants.Count)
+        slots[sourceIndex] = requested.Slot;
+        occupied.UnionWith(requestedCells);
+        for (var index = 0; index < controls.Count; index++)
         {
-            case 0:
-                slots[sourceIndex] = requested.Slot;
-                break;
-            case 1:
-                slots[sourceIndex] = current[occupants[0]]!.Value.Slot;
-                slots[occupants[0]] = source.Slot;
-                break;
-            default:
-                return null;
+            if (index != sourceIndex && !occupants.Contains(index) && current[index] is { } pinned)
+            {
+                occupied.UnionWith(Cells(pinned, columns));
+            }
         }
 
-        var occupied = new HashSet<int>(ReservedCells(page));
-        for (var index = 0; index < slots.Length; index++)
+        var columnShift = source.Slot % columns - requested.Slot % columns;
+        var rowShift = source.Slot / columns - requested.Slot / columns;
+        foreach (var index in occupants)
         {
-            if (slots[index] is not { } slot)
+            var original = current[index]!.Value;
+            int Distance(int slot)
             {
-                continue;
+                var dx = slot % columns - original.Slot % columns;
+                var dy = slot / columns - original.Slot / columns;
+                return dx * dx + dy * dy;
             }
-            if (Placement(controls[index], slot, page) is not { } moved || moved.Slot != slot)
+            var shiftedColumn = original.Slot % columns + columnShift;
+            var shiftedRow = original.Slot / columns + rowShift;
+            IEnumerable<int> candidates = Enumerable.Range(0, columns * rows)
+                .OrderBy(Distance).ThenBy(slot => slot);
+            if (shiftedColumn >= 0 && shiftedColumn < columns && shiftedRow >= 0 && shiftedRow < rows)
+            {
+                candidates = candidates.Prepend(shiftedRow * columns + shiftedColumn);
+            }
+            GridPlacement? fit = null;
+            foreach (var candidate in candidates)
+            {
+                if (Placement(controls[index], candidate, page) is { } moved && moved.Slot == candidate &&
+                    !occupied.Overlaps(Cells(moved, columns)))
+                {
+                    fit = moved;
+                    break;
+                }
+            }
+            if (fit is not { } placed)
             {
                 return null;
             }
-            var cells = Cells(moved, columns);
-            if (occupied.Overlaps(cells))
-            {
-                return null;
-            }
-            occupied.UnionWith(cells);
+            slots[index] = placed.Slot;
+            occupied.UnionWith(Cells(placed, columns));
         }
         return slots;
     }

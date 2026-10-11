@@ -547,6 +547,33 @@ enum PaperGIFEncoder {
             height: drawSize.height
         )
         context.draw(image, in: drawRect)
+        return quantizedLuminance(
+            luminance,
+            width: width,
+            monochromeMode: monochromeMode,
+            threshold: threshold,
+            monochromeLevels: monochromeLevels,
+            halftoneDotSpacing: halftoneDotSpacing,
+            halftoneAngle: halftoneAngle,
+            halftoneDotGain: halftoneDotGain
+        )
+    }
+
+    /// True when `quantizedLuminance` returns 4-bit gray (two pixels per byte) instead of 1-bit.
+    nonisolated static func quantizesToGrayscale(monochromeMode: PaperGIFMonochromeMode, monochromeLevels: Int) -> Bool {
+        monochromeMode.usesMonochromeLevels && monochromeLevels > 0
+    }
+
+    nonisolated static func quantizedLuminance(
+        _ luminance: [UInt8],
+        width: Int,
+        monochromeMode: PaperGIFMonochromeMode,
+        threshold: UInt8,
+        monochromeLevels: Int,
+        halftoneDotSpacing: Int,
+        halftoneAngle: Int,
+        halftoneDotGain: Int
+    ) -> Data {
         switch monochromeMode {
         case .threshold:
             return packLuminance(luminance, threshold: threshold, width: width)

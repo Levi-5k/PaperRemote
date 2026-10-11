@@ -17,6 +17,11 @@ internal sealed class RemotePreviewPanel : Control
     private Rectangle settingsFrame;
     private int settingsSlot = -1;
     private Point dragStart;
+    private Size dragOffset;
+    private bool dragActive;
+    private Rectangle draggedOriginalFrame;
+    private int? previewTarget;
+    private int?[]? previewSlots;
     private Rectangle gridFrame;
     private int maxButtonTextSize = RemoteProfile.MaximumButtonTextSize;
 
@@ -75,37 +80,88 @@ internal sealed class RemotePreviewPanel : Control
             draggedSourceSlot = settingsSlot;
         }
         dragStart = eventArgs.Location;
+        dragOffset = Size.Empty;
+        dragActive = false;
+        draggedOriginalFrame = match.Value;
+        previewTarget = null;
+        previewSlots = null;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs eventArgs)
+    {
+        base.OnMouseMove(eventArgs);
+        if ((draggedControlId is null && !draggingSettings) || (eventArgs.Button & MouseButtons.Left) == 0)
+        {
+            return;
+        }
+        dragOffset = new Size(eventArgs.X - dragStart.X, eventArgs.Y - dragStart.Y);
+        var threshold = SystemInformation.DragSize;
+        dragActive |= Math.Abs(dragOffset.Width) > threshold.Width / 2 ||
+            Math.Abs(dragOffset.Height) > threshold.Height / 2;
+        if (!dragActive)
+        {
+            return;
+        }
+        if (draggedControlId is { } controlId && page is not null)
+        {
+            var target = TargetSlot(eventArgs.Location);
+            if (target != previewTarget)
+            {
+                previewTarget = target;
+                previewSlots = target is { } slot
+                    ? RemoteEditorStore.ArrangementAfterMove(page, controlId, slot)
+                    : null;
+            }
+        }
+        Invalidate();
+    }
+
+    // Grid slot the dragged item's anchor would land on, or null when it leaves the grid.
+    private int? TargetSlot(Point location)
+    {
+        if (draggedSourceSlot is not { } sourceSlot)
+        {
+            return null;
+        }
+        var columns = Math.Clamp(page?.GridColumns ?? 2, 1, 12);
+        var rows = Math.Clamp(page?.GridRows ?? 8, 1, 16);
+        var columnOffset = (int)Math.Round(
+            (location.X - dragStart.X) * columns / (double)Math.Max(1, gridFrame.Width),
+            MidpointRounding.AwayFromZero);
+        var rowOffset = (int)Math.Round(
+            (location.Y - dragStart.Y) * rows / (double)Math.Max(1, gridFrame.Height),
+            MidpointRounding.AwayFromZero);
+        var column = sourceSlot % columns + columnOffset;
+        var row = sourceSlot / columns + rowOffset;
+        return column >= 0 && column < columns && row >= 0 && row < rows ? row * columns + column : null;
     }
 
     protected override void OnMouseUp(MouseEventArgs eventArgs)
     {
         base.OnMouseUp(eventArgs);
-        if ((draggedControlId is null && !draggingSettings) || draggedSourceSlot is not { } sourceSlot)
+        previewTarget = null;
+        previewSlots = null;
+        if (dragActive)
+        {
+            dragActive = false;
+            Invalidate();
+        }
+        if ((draggedControlId is null && !draggingSettings) || draggedSourceSlot is null)
         {
             draggedControlId = null;
             draggedSourceSlot = null;
             draggingSettings = false;
             return;
         }
-        var columns = Math.Clamp(page?.GridColumns ?? 2, 1, 12);
-        var rows = Math.Clamp(page?.GridRows ?? 8, 1, 16);
-        var columnOffset = (int)Math.Round(
-            (eventArgs.X - dragStart.X) * columns / (double)Math.Max(1, gridFrame.Width),
-            MidpointRounding.AwayFromZero);
-        var rowOffset = (int)Math.Round(
-            (eventArgs.Y - dragStart.Y) * rows / (double)Math.Max(1, gridFrame.Height),
-            MidpointRounding.AwayFromZero);
-        var column = sourceSlot % columns + columnOffset;
-        var row = sourceSlot / columns + rowOffset;
-        if (column >= 0 && column < columns && row >= 0 && row < rows)
+        if (TargetSlot(eventArgs.Location) is { } target)
         {
             if (draggingSettings)
             {
-                SettingsMoved?.Invoke(this, row * columns + column);
+                SettingsMoved?.Invoke(this, target);
             }
             else if (draggedControlId is { } controlId)
             {
-                ControlMoved?.Invoke(this, new ControlMoveEventArgs(controlId, row * columns + column));
+                ControlMoved?.Invoke(this, new ControlMoveEventArgs(controlId, target));
             }
         }
         draggedControlId = null;
@@ -237,7 +293,7 @@ internal sealed class RemotePreviewPanel : Control
         foreach (var control in controllerPage.Controls.Take(RemoteProfile.MaximumControlsPerPage))
         {
             var (width, height) = Span(control, columns, rows);
-            var slot = FindSlot(control.LayoutSlot, width, height, occupied, columns, rows);
+            var slot = FindSlot(PreferredSlot(controllerPage, control), width, height, occupied, columns, rows);
             if (slot < 0)
             {
                 continue;
@@ -253,10 +309,18 @@ internal sealed class RemotePreviewPanel : Control
             var frame = ScaleFrame(screen, canonical);
             controlFrames[control.Id] = frame;
             controlSlots[control.Id] = slot;
-            DrawControl(graphics, frame, control, screen.Width / 540f);
+            if (!IsDragging(control))
+            {
+                DrawControl(graphics, frame, control, screen.Width / 540f);
+            }
         }
 
         var settings = controllerPage.OpenBuildsController ?? new OpenBuildsControllerSettings();
+        var settingsState = graphics.Save();
+        if (draggingSettings && dragActive)
+        {
+            graphics.TranslateTransform(dragOffset.Width, dragOffset.Height);
+        }
         var rail = ScaleFrame(screen, At(364, 292, 152, 430));
         using var labelFont = new Font("Segoe UI Variable Text Semibold", Math.Max(6, screen.Width / 55f));
         using var detailFont = new Font("Segoe UI Variable Text", Math.Max(6, screen.Width / 58f));
@@ -311,6 +375,8 @@ internal sealed class RemotePreviewPanel : Control
                     settings.JogDistanceThousandths == distances[index].Item1, detailFont);
             }
         }
+        graphics.Restore(settingsState);
+        DrawDraggedControl(graphics, controllerPage, screen.Width / 540f);
     }
 
     private static Rectangle ScaleFrame(Rectangle screen, RectangleF frame) => Rectangle.Round(new RectangleF(
@@ -341,7 +407,7 @@ internal sealed class RemotePreviewPanel : Control
         foreach (var control in remotePage.Controls.Take(RemoteProfile.MaximumControlsPerPage))
         {
             var (width, height) = Span(control, columns, rows);
-            var slot = FindSlot(control.LayoutSlot, width, height, occupied, columns, rows);
+            var slot = FindSlot(PreferredSlot(remotePage, control), width, height, occupied, columns, rows);
             if (slot < 0)
             {
                 continue;
@@ -358,8 +424,43 @@ internal sealed class RemotePreviewPanel : Control
                 cellHeight * height - 8));
             controlFrames[control.Id] = frame;
             controlSlots[control.Id] = slot;
-            DrawControl(graphics, frame, control, screenScale);
+            if (!IsDragging(control))
+            {
+                DrawControl(graphics, frame, control, screenScale);
+            }
         }
+        DrawDraggedControl(graphics, remotePage, screenScale);
+    }
+
+    private bool IsDragging(RemoteControl control) => dragActive && control.Id == draggedControlId;
+
+    // While dragging, other controls are drawn where the drop would push them.
+    private int? PreferredSlot(RemotePage remotePage, RemoteControl control)
+    {
+        var index = remotePage.Controls.IndexOf(control);
+        return previewSlots is { } slots && index >= 0 && index < slots.Length ? slots[index] : control.LayoutSlot;
+    }
+
+    // Drawn last so the control floats above the others while following the mouse.
+    private void DrawDraggedControl(Graphics graphics, RemotePage remotePage, float screenScale)
+    {
+        if (!dragActive || draggedControlId is not { } controlId ||
+            remotePage.Controls.FirstOrDefault(control => control.Id == controlId) is not { } control)
+        {
+            return;
+        }
+        if (previewSlots is not null && controlFrames.TryGetValue(controlId, out var target))
+        {
+            using var outline = new Pen(Color.FromArgb(120, 0, 0, 0), 2) { DashStyle = DashStyle.Dash };
+            EditorTheme.DrawRoundedRectangle(graphics, outline, target, 5);
+        }
+        var frame = draggedOriginalFrame;
+        frame.Offset(dragOffset.Width, dragOffset.Height);
+        var shadowFrame = frame;
+        shadowFrame.Offset(0, 4);
+        using var shadow = new SolidBrush(Color.FromArgb(70, 0, 0, 0));
+        EditorTheme.FillRoundedRectangle(graphics, shadow, Rectangle.Inflate(shadowFrame, 2, 2), 7);
+        DrawControl(graphics, frame, control, screenScale);
     }
 
     private void DrawControl(Graphics graphics, Rectangle frame, RemoteControl control, float screenScale)
