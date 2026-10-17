@@ -728,6 +728,8 @@ void loop() {
 #if defined(PAPERGIF_SUPERMINI_S3)
         lastSuperminiInput = event;
         hasLastSuperminiInput = true;
+        Serial.printf("Input %s %s value=%.0f seq=%lu\n", event.inputID, event.event,
+                      event.value, static_cast<unsigned long>(event.sequence));
 #endif
         handleInput(event);
     }
