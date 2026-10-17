@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "deviceID": "fixture:controls:001",
+  "name": "Controllable panel",
+  "manufacturer": "PaperRemote fixture",
+  "boardID": "fixture.controls",
+  "hardwareRevision": "1",
+  "firmwareVersion": "fixture-1",
+  "display": {"width": 320, "height": 240, "touch": false, "pixelFormat": "rgb565", "rotation": 0},
+  "inputs": [
+    {"id": "button-1", "name": "Button", "kind": "button", "events": ["press"]}
+  ],
+  "controls": [
+    {"id": "slideshow", "name": "Slideshow", "kind": "toggle", "group": "Display"},
+    {"id": "sleepDelay", "name": "Sleep after", "kind": "range", "group": "Power", "minimum": 30, "maximum": 3600, "step": 30, "unit": "s"},
+    {"id": "screenSaver", "name": "Screen saver", "kind": "select", "group": "Display", "options": [{"value": "media", "name": "Media"}, {"value": "clock", "name": "Clock"}]},
+    {"id": "battery", "name": "Battery", "kind": "range", "group": "Status", "minimum": 0, "maximum": 100, "step": 1, "unit": "%", "readOnly": true},
+    {"id": "restart", "name": "Restart", "kind": "action", "group": "Power", "confirm": true}
+  ],
+  "capabilities": {"profileVersions": [7], "media": true, "firmwareUpdate": false, "maxProfileBytes": 65536, "maxControls": 24, "maxPages": 4, "transports": ["http", "ble"]}
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papergif.local/protocol/remote-profile-v7.schema.json",
+  "title": "PaperRemote Profile v7 hardware extension",
+  "description": "Adds physical input bindings without changing deployed screen-control and action property names.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "pages", "hardwareBindings"],
+  "properties": {
+    "version": {"const": 7},
+    "updatedAtMilliseconds": {"$ref": "remote-profile-v6.schema.json#/properties/updatedAtMilliseconds"},
+    "wifiSSID": {"$ref": "remote-profile-v6.schema.json#/properties/wifiSSID"},
+    "wifiPassword": {"$ref": "remote-profile-v6.schema.json#/properties/wifiPassword"},
+    "macHost": {"$ref": "remote-profile-v6.schema.json#/properties/macHost"},
+    "macPort": {"$ref": "remote-profile-v6.schema.json#/properties/macPort"},
+    "macToken": {"$ref": "remote-profile-v6.schema.json#/properties/macToken"},
+    "computers": {"$ref": "remote-profile-v6.schema.json#/properties/computers"},
+    "screensaverDelaySeconds": {"$ref": "remote-profile-v6.schema.json#/properties/screensaverDelaySeconds"},
+    "buttonQualityRefreshInterval": {"$ref": "remote-profile-v6.schema.json#/properties/buttonQualityRefreshInterval"},
+    "maxButtonTextSize": {"$ref": "remote-profile-v6.schema.json#/properties/maxButtonTextSize"},
+    "elementRefreshDelayMilliseconds": {"$ref": "remote-profile-v6.schema.json#/properties/elementRefreshDelayMilliseconds"},
+    "buttonBackground": {"$ref": "remote-profile-v6.schema.json#/properties/buttonBackground"},
+    "buttonTexture": {"$ref": "remote-profile-v6.schema.json#/properties/buttonTexture"},
+    "temperatureUnit": {"$ref": "remote-profile-v6.schema.json#/properties/temperatureUnit"},
+    "timeZoneOffsetMinutes": {"$ref": "remote-profile-v6.schema.json#/properties/timeZoneOffsetMinutes"},
+    "deviceClock": {"$ref": "remote-profile-v6.schema.json#/properties/deviceClock"},
+    "pages": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "remote-profile-v6.schema.json#/$defs/page"}},
+    "hardwareBindings": {
+      "type": "array", "maxItems": 256,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["inputID", "event", "mode", "action", "minimum", "maximum", "step"],
+        "allOf": [
+          {"if": {"required": ["direction"], "properties": {"direction": {"type": "string"}}}, "then": {"properties": {"event": {"const": "rotate"}, "mode": {"const": "action"}}}},
+          {"if": {"properties": {"mode": {"const": "relative"}}}, "then": {"properties": {"event": {"const": "rotate"}, "direction": {"type": "null"}}}},
+          {"if": {"properties": {"mode": {"const": "absolute"}}}, "then": {"properties": {"event": {"const": "change"}, "direction": {"type": "null"}}}}
+        ],
+        "properties": {
+          "inputID": {"type": "string", "minLength": 1, "maxLength": 64},
+          "event": {"enum": ["press", "hold", "release", "rotate", "change"]},
+          "mode": {"enum": ["action", "relative", "absolute"]},
+          "direction": {"enum": ["negative", "positive", null]},
+          "action": {"$ref": "remote-profile-v6.schema.json#/$defs/action"},
+          "minimum": {"type": "number"},
+          "maximum": {"type": "number"},
+          "step": {"type": "number", "exclusiveMinimum": 0}
+        }
+      }
+    }
+  }
+}

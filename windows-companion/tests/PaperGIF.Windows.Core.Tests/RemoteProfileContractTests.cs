@@ -176,9 +176,9 @@ public sealed class RemoteProfileContractTests
     public void NewerProfileVersionIsRejected()
     {
         var error = Assert.Throws<JsonException>(() =>
-            RemoteProfileJson.Deserialize("{\"version\":7,\"pages\":[]}"));
+            RemoteProfileJson.Deserialize("{\"version\":8,\"pages\":[]}"));
 
-        Assert.Contains("Unsupported remote profile version 7", error.Message);
+        Assert.Contains("Unsupported remote profile version 8", error.Message);
     }
 
     private static RemoteProfile LoadFixture(string name)

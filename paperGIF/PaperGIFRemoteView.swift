@@ -1123,6 +1123,13 @@ struct PaperGIFRemoteView: View {
 
     private func scheduleLiveSync(_ profileSnapshot: PaperGIFRemoteProfile) {
         liveSyncTask?.cancel()
+        if bluetoothManager.connectionState == .connected,
+           bluetoothManager.canSendAsControlUpdate(profileSnapshot) {
+            guard save(profileSnapshot) else { return }
+            liveSyncStatus = "Syncing changes…"
+            bluetoothManager.syncRemoteProfile(profileSnapshot)
+            return
+        }
         liveSyncStatus = "Saving changes…"
         liveSyncTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(180))

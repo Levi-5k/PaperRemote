@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "deviceID": "fixture:custom:001",
+  "name": "Custom button board",
+  "manufacturer": "Custom",
+  "boardID": "custom.button-board",
+  "hardwareRevision": "1",
+  "firmwareVersion": "1.0.0",
+  "display": null,
+  "inputs": [{"id": "button-1", "name": "Button", "kind": "button", "events": ["press", "release"]}],
+  "capabilities": {"profileVersions": [7], "media": false, "firmwareUpdate": false, "maxProfileBytes": 16384, "maxControls": 0, "maxPages": 1}
+}

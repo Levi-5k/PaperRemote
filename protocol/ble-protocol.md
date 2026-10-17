@@ -10,6 +10,38 @@ synchronization will extend it without changing these messages.
 | Service | `7A230001-7D2A-4C7B-9C42-504749460001` |
 | Control write/notify | `7A230002-7D2A-4C7B-9C42-504749460001` |
 | Data write | `7A230003-7D2A-4C7B-9C42-504749460001` |
+| Device descriptor read/write | `7A230004-7D2A-4C7B-9C42-504749460001` |
+
+## Device Descriptor Extension
+
+New firmware exposes the descriptor characteristic in addition to the existing
+service/control/data characteristics. Its absence on known legacy M5Paper
+firmware leaves the existing v6 path unchanged; a malformed descriptor is not
+permission to fall back to legacy mode.
+
+Write an unsigned four-byte little-endian byte offset **with response**, then
+read the same characteristic after write completion. The response is up to
+512 raw JSON bytes with no header, opcode, checksum, NUL, or length prefix.
+Append bytes and advance the offset by 512 while slices are full. After a short
+nonempty slice, write the **total assembled byte count** and read again to obtain
+an empty EOF response. Exact multiples also require a final empty read. Complete
+the operation only after that empty read, so the reader lease is released.
+
+For example, offset 512 is written as `00 02 00 00`. Decode UTF-8 only after
+concatenating all slices, because a slice may divide a multibyte character.
+Reject payloads above 64 KiB, invalid JSON, and unsupported descriptor versions.
+Use a bounded request timeout and invalidate partial results on disconnect.
+Offset-zero writes claim a single reader lease; competing, malformed, and
+unclaimed reads/writes cause disconnection rather than changing another reader's
+slice. Short nonempty slices retain ownership for ATT Read Blob continuations.
+EOF/disconnect releases the lease. A 30-second idle lease disconnects the owner
+before another reader can take over. Serialize descriptor requests; they are
+independent of profile-upload ownership. Physical concurrent-radio behavior
+still requires hardware validation.
+
+The complete descriptor is also available as `GET /device` over HTTP. See the
+[device contract](device-protocol.md) for identity, capabilities, and catalog
+resolution.
 
 Multibyte integer fields are unsigned little-endian. CRC fields use CRC-32 over
 the complete payload. Upload data is sent to the data characteristic in chunks;

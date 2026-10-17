@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papergif.local/protocol/device-controls-v1.schema.json",
+  "title": "PaperRemote device control messages v1",
+  "oneOf": [
+    {"$ref": "#/$defs/snapshot"},
+    {"$ref": "#/$defs/setRequest"},
+    {"$ref": "#/$defs/setResponse"},
+    {"$ref": "#/$defs/relayAction"}
+  ],
+  "$defs": {
+    "value": {"type": ["boolean", "number", "string"]},
+    "values": {
+      "type": "object", "maxProperties": 64,
+      "propertyNames": {"pattern": "^[A-Za-z0-9._-]{1,64}$"},
+      "additionalProperties": {"$ref": "#/$defs/value"}
+    },
+    "snapshot": {
+      "type": "object", "additionalProperties": false, "required": ["values"],
+      "properties": {"values": {"$ref": "#/$defs/values"}}
+    },
+    "setRequest": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$"},
+        "value": {"$ref": "#/$defs/value"}
+      }
+    },
+    "setResponse": {
+      "type": "object", "additionalProperties": false, "required": ["ok"],
+      "properties": {
+        "ok": {"type": "boolean"},
+        "error": {"enum": ["unauthorized", "unknown_control", "invalid_value", "read_only", "busy"]},
+        "values": {"$ref": "#/$defs/values"}
+      },
+      "if": {"properties": {"ok": {"const": true}}},
+      "then": {"required": ["values"], "not": {"required": ["error"]}},
+      "else": {"required": ["error"]}
+    },
+    "relayAction": {
+      "type": "object", "additionalProperties": false, "required": ["computerId", "body"],
+      "properties": {
+        "computerId": {"type": "string", "maxLength": 64},
+        "body": {"type": "object"}
+      }
+    }
+  }
+}

@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import Foundation
 
 enum PaperGIFMonochromeMode: String, CaseIterable, Identifiable, Sendable {
@@ -67,29 +68,36 @@ enum PaperGIFStorage {
     nonisolated private static let remoteProfileFilename = "remote-profile.json"
     nonisolated private static let storageRootName = "paperGIF-v2"
 
-    nonisolated static func loadRemoteProfile() -> PaperGIFRemoteProfile {
-        guard let url = try? remoteProfileURL(),
+    nonisolated static func loadRemoteProfile(deviceID: String? = nil) -> PaperGIFRemoteProfile {
+        guard let url = try? remoteProfileURL(deviceID: deviceID),
               let data = try? Data(contentsOf: url),
               let profile = try? JSONDecoder().decode(PaperGIFRemoteProfile.self, from: data),
-              profile.version == PaperGIFRemoteProfile.currentVersion else {
+              (6...7).contains(profile.version) else {
             return .starter
         }
         return profile
     }
 
-    nonisolated static func saveRemoteProfile(_ profile: PaperGIFRemoteProfile) throws {
+    nonisolated static func saveRemoteProfile(_ profile: PaperGIFRemoteProfile, deviceID: String? = nil) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        try encoder.encode(profile).write(to: try remoteProfileURL(), options: .atomic)
+        try encoder.encode(profile).write(
+            to: try remoteProfileURL(deviceID: deviceID),
+            options: [.atomic, .completeFileProtectionUnlessOpen]
+        )
     }
 
-    nonisolated private static func remoteProfileURL() throws -> URL {
+    nonisolated private static func remoteProfileURL(deviceID: String? = nil) throws -> URL {
         let directory = try applicationSupportDirectory()
             .appendingPathComponent(storageRootName, isDirectory: true)
             .appendingPathComponent("Remote", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent(remoteProfileFilename)
-        if !FileManager.default.fileExists(atPath: url.path),
+        // Fixed-size hashes handle bounded-but-long IDs without exposing IDs as filesystem paths.
+        let filename = deviceID.map {
+            "device-" + SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined() + ".json"
+        } ?? remoteProfileFilename
+        let url = directory.appendingPathComponent(filename)
+        if deviceID == nil, !FileManager.default.fileExists(atPath: url.path),
            let legacyURL = try? legacyStorageDirectory().appendingPathComponent(remoteProfileFilename),
            FileManager.default.fileExists(atPath: legacyURL.path) {
             try? FileManager.default.copyItem(at: legacyURL, to: url)

@@ -1207,4 +1207,48 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
             options: [.sortedKeys, .withoutEscapingSlashes]
         )
     }
+
+    struct ControlLocation: Equatable, Sendable {
+        let page: Int
+        let control: Int
+    }
+
+    /// Existing controls whose settings differ, or nil when anything else changed
+    /// (pages, control order or membership, profile settings), which needs a full upload.
+    static func changedControls(from old: Self, to new: Self) -> [ControlLocation]? {
+        guard old.pages.count == new.pages.count else { return nil }
+        var oldShape = old
+        var newShape = new
+        oldShape.updatedAtMilliseconds = 0
+        newShape.updatedAtMilliseconds = 0
+        var changes: [ControlLocation] = []
+        for pageIndex in new.pages.indices {
+            let oldControls = old.pages[pageIndex].controls
+            let newControls = new.pages[pageIndex].controls
+            guard oldControls.map(\.id) == newControls.map(\.id) else { return nil }
+            for controlIndex in newControls.indices where oldControls[controlIndex] != newControls[controlIndex] {
+                changes.append(ControlLocation(page: pageIndex, control: controlIndex))
+            }
+            oldShape.pages[pageIndex].controls = []
+            newShape.pages[pageIndex].controls = []
+        }
+        return oldShape == newShape ? changes : nil
+    }
+
+    /// Body for the M5Paper's control update, encoded exactly like the full profile upload.
+    func controlUpdatePayload(for changes: [ControlLocation]) -> Data? {
+        guard let payload = devicePayload,
+              let object = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let pages = object["pages"] as? [[String: Any]] else { return nil }
+        var controls: [[String: Any]] = []
+        for change in changes {
+            guard pages.indices.contains(change.page),
+                  let pageControls = pages[change.page]["controls"] as? [[String: Any]],
+                  pageControls.indices.contains(change.control) else { return nil }
+            controls.append(["pageID": pages[change.page]["id"] ?? "", "control": pageControls[change.control]])
+        }
+        var body: [String: Any] = ["updatedAtMilliseconds": updatedAtMilliseconds, "controls": controls]
+        body["buttonBackground"] = object["buttonBackground"]
+        return try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
 }

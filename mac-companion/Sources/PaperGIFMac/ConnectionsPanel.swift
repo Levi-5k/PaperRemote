@@ -36,7 +36,7 @@ struct ConnectionsPanel: View {
                         } label: {
                             Label(store.isScanningWiFi ? "Scanning..." : "Scan for Networks", systemImage: "wifi")
                         }
-                        .disabled(store.isScanningWiFi)
+                        .disabled(store.isScanningWiFi || !store.canScanDeviceWiFi)
                         if store.isScanningWiFi { ProgressView().controlSize(.small) }
                     }
 
@@ -84,7 +84,12 @@ struct ConnectionsPanel: View {
                         }
                         .disabled(store.profile.wifiSSID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    Text("The M5Paper, computers, and WLED devices must use the same home network.")
+                    if !store.canScanDeviceWiFi {
+                        Text("This controller does not expose network scanning. Enter Wi-Fi details manually if its protocol supports profile-based Wi-Fi setup.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("The controller, computers, and WLED devices must use the same home network.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

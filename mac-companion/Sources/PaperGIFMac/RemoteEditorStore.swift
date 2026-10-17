@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import PaperDeviceKit
 
 struct DeviceWiFiNetwork: Decodable, Identifiable, Sendable {
     let ssid: String
@@ -24,6 +25,8 @@ final class RemoteEditorStore: ObservableObject {
         let url: URL
         let token: String
         let payload: Data
+        let snapshot: RemoteProfile
+        let isControlUpdate: Bool
     }
 
     private enum ProfileSyncResult {
@@ -47,6 +50,7 @@ final class RemoteEditorStore: ObservableObject {
     }
     @Published var selectedPageID: UUID?
     @Published var selectedControlID: UUID?
+    @Published var selectedHardwareInputID: String?
     @Published private(set) var sendState = SendState.idle
     @Published private(set) var wifiNetworks: [DeviceWiFiNetwork] = []
     @Published private(set) var isScanningWiFi = false
@@ -55,14 +59,24 @@ final class RemoteEditorStore: ObservableObject {
     @Published private(set) var isLoadingNetHomeUnits = false
     @Published private(set) var netHomeError: String?
     let localComputer: RemoteComputer
+    let bluetoothRelay: DeviceBluetoothRelay
+    let devices = DeviceSession(storageURL: FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("paperGIF Mac/devices.json"))
 
     private var saveTask: Task<Void, Never>?
     private var liveSyncTask: Task<Void, Never>?
     private var profileSyncTask: Task<Void, Never>?
     private var profileSyncRetryTask: Task<Void, Never>?
     private var pendingProfileSync: ProfileSyncRequest?
+    /// What the M5Paper is known to have installed; edits are diffed against it.
+    private var deviceProfile: RemoteProfile?
     private var profileSyncGeneration: UInt64 = 0
+    private var profileSyncWorkerID = UUID()
+    private var deviceSwitchID = UUID()
+    private var wifiScanID = UUID()
     private var isApplyingDeviceProfile = false
+    private var isSwitchingDevice = false
     private var isStampingProfile = false
     private let netHomeService: NetHomeService?
     private var knownNetHomeUnits: [NetHomeUnit] = []
@@ -73,9 +87,11 @@ final class RemoteEditorStore: ObservableObject {
         host: String,
         port: Int,
         token: String,
-        netHomeService: NetHomeService? = nil
+        netHomeService: NetHomeService? = nil,
+        bluetoothRelay: DeviceBluetoothRelay? = nil
     ) {
         self.netHomeService = netHomeService
+        self.bluetoothRelay = bluetoothRelay ?? DeviceBluetoothRelay(actionHandler: { _ in false })
         let document = Self.loadDocument()
         let loadedProfile = document?.profile ?? .starter
         profile = loadedProfile
@@ -147,6 +163,10 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     var validationMessage: String? {
+        if let descriptor = devices.descriptor {
+            do { _ = try profile.devicePayload(for: descriptor) }
+            catch { return error.localizedDescription }
+        }
         if profile.pages.isEmpty { return "Add at least one page." }
         if profile.pages.count > 8 { return "A remote can contain at most 8 pages." }
         if profile.pages.contains(where: { $0.controls.count > RemoteProfile.maximumControlsPerPage }) {
@@ -486,6 +506,11 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     private func enqueueProfileSync(validateEditorFields: Bool = true) {
+        guard !isSwitchingDevice, let descriptor = devices.descriptor, devices.isVerified,
+              devices.address == deviceAddress else {
+            sendState = .failed("Connect to a supported device before sending a profile.")
+            return
+        }
         let validationMessage = validateEditorFields
             ? validationMessage
             : Self.validationMessage(for: profile)
@@ -496,13 +521,29 @@ final class RemoteEditorStore: ObservableObject {
         do {
             profileSyncRetryTask?.cancel()
             profileSyncRetryTask = nil
-            let url = try Self.remoteURL(from: deviceAddress)
+            let snapshot = profile
+            let changes = descriptor.isM5Paper && !descriptor.capabilities.profileVersions.contains(7)
+                ? deviceProfile.flatMap { RemoteProfile.changedControls(from: $0, to: snapshot) }
+                : nil
+            if changes?.isEmpty == true, pendingProfileSync == nil, profileSyncTask == nil {
+                sendState = .succeeded("Device is up to date")
+                return
+            }
+            let isControlUpdate = changes?.isEmpty == false
+            let url = try isControlUpdate
+                ? DeviceHTTP.endpoint(deviceAddress, path: "/remote/controls")
+                : DeviceHTTP.endpoint(deviceAddress, path: "/remote")
+            let payload = try isControlUpdate
+                ? snapshot.controlUpdatePayload(for: changes ?? [])
+                : snapshot.devicePayload(for: descriptor)
             profileSyncGeneration &+= 1
             pendingProfileSync = ProfileSyncRequest(
                 generation: profileSyncGeneration,
                 url: url,
                 token: localComputer.token,
-                payload: try profile.devicePayload
+                payload: payload,
+                snapshot: snapshot,
+                isControlUpdate: isControlUpdate
             )
             sendState = .sending
             startProfileSyncIfNeeded()
@@ -513,15 +554,24 @@ final class RemoteEditorStore: ObservableObject {
 
     private func startProfileSyncIfNeeded() {
         guard profileSyncTask == nil, pendingProfileSync != nil else { return }
+        let workerID = UUID()
+        profileSyncWorkerID = workerID
         profileSyncTask = Task { [weak self] in
-            await self?.drainProfileSyncQueue()
+            await self?.drainProfileSyncQueue(workerID: workerID)
         }
     }
 
-    private func drainProfileSyncQueue() async {
-        while let sync = pendingProfileSync {
+    private func drainProfileSyncQueue(workerID: UUID) async {
+        while profileSyncWorkerID == workerID, !Task.isCancelled, let sync = pendingProfileSync {
             pendingProfileSync = nil
             let result = await Self.performProfileSync(sync)
+            guard sync.generation == profileSyncGeneration else { continue }
+            if case .succeeded = result {
+                deviceProfile = sync.snapshot
+            } else if sync.isControlUpdate {
+                // Older firmware or a profile changed elsewhere: the next upload sends everything.
+                deviceProfile = nil
+            }
             guard sync.generation == profileSyncGeneration,
                   pendingProfileSync == nil else { continue }
             switch result {
@@ -530,12 +580,14 @@ final class RemoteEditorStore: ObservableObject {
                 profileSyncRetryTask = nil
                 sendState = .succeeded("Remote installed on \(host)")
                 saveImmediately()
+            case .failed where sync.isControlUpdate:
+                enqueueProfileSync(validateEditorFields: false)
             case .failed(let message):
                 sendState = .failed(message)
                 scheduleProfileSyncRetry(sync)
             }
         }
-        profileSyncTask = nil
+        if profileSyncWorkerID == workerID { profileSyncTask = nil }
     }
 
     private func scheduleProfileSyncRetry(_ sync: ProfileSyncRequest) {
@@ -561,12 +613,12 @@ final class RemoteEditorStore: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("Bearer \(sync.token)", forHTTPHeaderField: "Authorization")
             request.httpBody = sync.payload
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let response = response as? HTTPURLResponse,
-                  response.statusCode == 200 || response.statusCode == 201 else {
+            let (data, status) = try await DeviceHTTP.request(request, maximumBytes: 65_536)
+            guard status == 200 || status == 201 else {
                 let detail = String(data: data, encoding: .utf8) ?? "No response body"
                 throw SendError.rejected(detail)
             }
+            try DeviceHTTP.validateProfileAcknowledgement(data, status: status)
             return .succeeded(sync.url.host ?? sync.url.absoluteString)
         } catch {
             return .failed(error.localizedDescription)
@@ -574,8 +626,61 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     func loadFromDevice() async {
+        if devices.descriptor == nil || devices.address != deviceAddress {
+            let switchID = UUID()
+            deviceSwitchID = switchID
+            isSwitchingDevice = true
+            defer {
+                if deviceSwitchID == switchID { isSwitchingDevice = false }
+            }
+            saveTask?.cancel()
+            sendState = .loading
+            let previousID = devices.selectedID
+            let hadSavedDevices = !devices.records.isEmpty
+            if previousID != nil {
+                do { try devices.saveProfile(JSONEncoder().encode(profile)) }
+                catch {
+                    sendState = .failed("Could not save the previous device: \(error.localizedDescription)")
+                    return
+                }
+            }
+            profileSyncGeneration &+= 1
+            profileSyncWorkerID = UUID()
+            wifiScanID = UUID()
+            wifiNetworks = []
+            wifiScanError = nil
+            isScanningWiFi = false
+            profileSyncTask?.cancel()
+            profileSyncTask = nil
+            pendingProfileSync = nil
+            profileSyncRetryTask?.cancel()
+            profileSyncRetryTask = nil
+            liveSyncTask?.cancel()
+            deviceProfile = nil
+            let requestedAddress = deviceAddress
+            do {
+                try await devices.connect(address: requestedAddress)
+                guard deviceAddress == requestedAddress else { return }
+                isApplyingDeviceProfile = true
+                defer { isApplyingDeviceProfile = false }
+                if let saved = devices.profileData {
+                    profile = try JSONDecoder().decode(RemoteProfile.self, from: saved)
+                } else if hadSavedDevices || devices.descriptor?.isM5Paper != true {
+                    profile = RemoteProfile(pages: [RemotePage(name: "Main", controls: [])])
+                    profile.computers = [localComputer]
+                    synchronizeDefaultComputer()
+                }
+                selectedPageID = profile.pages.first?.id
+                selectedControlID = nil
+                try devices.saveProfile(JSONEncoder().encode(profile))
+                saveImmediately()
+            } catch {
+                sendState = .failed(error.localizedDescription)
+                return
+            }
+        }
         guard pendingProfileSync == nil, profileSyncTask == nil, profileSyncRetryTask == nil else {
-            sendState = .failed("Waiting to install local changes on M5Paper")
+            sendState = .failed("Waiting to install local changes on the device")
             return
         }
         profileSyncGeneration &+= 1
@@ -584,24 +689,22 @@ final class RemoteEditorStore: ObservableObject {
         liveSyncTask = nil
         sendState = .loading
         do {
-            let url = try Self.remoteURL(from: deviceAddress)
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 10
-            request.setValue("Bearer \(localComputer.token)", forHTTPHeaderField: "Authorization")
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let response = response as? HTTPURLResponse,
-                  response.statusCode == 200 else {
-                let detail = String(data: data, encoding: .utf8) ?? "No response body"
-                throw SendError.loadRejected(detail)
-            }
+            let generation = profileSyncGeneration
+            let requestedAddress = deviceAddress
+            let url = try DeviceHTTP.endpoint(requestedAddress, path: "/remote")
+            let data = try await devices.loadProfile(token: localComputer.token)
             let loadedProfile = try JSONDecoder().decode(RemoteProfile.self, from: data)
+            guard generation == profileSyncGeneration, requestedAddress == deviceAddress else { return }
+            guard let descriptor = devices.descriptor else { throw CancellationError() }
+            _ = try loadedProfile.devicePayload(for: descriptor)
             if profile.updatedAtMilliseconds > loadedProfile.updatedAtMilliseconds {
-                sendState = .succeeded("Local settings are newer; sending to M5Paper")
+                sendState = .succeeded("Local settings are newer; sending to the device")
                 enqueueProfileSync()
                 return
             }
             if profile.updatedAtMilliseconds == loadedProfile.updatedAtMilliseconds,
                profile.updatedAtMilliseconds > 0 {
+                deviceProfile = loadedProfile
                 sendState = .succeeded("Settings are already current")
                 return
             }
@@ -618,25 +721,38 @@ final class RemoteEditorStore: ObservableObject {
             isApplyingDeviceProfile = true
             profile = reconciledProfile
             isApplyingDeviceProfile = false
+            deviceProfile = loadedProfile
             selectedPageID = reconciledProfile.pages.first?.id
             selectedControlID = nil
             sendState = .succeeded("Loaded settings from \(url.host ?? deviceAddress)")
             saveImmediately()
         } catch {
-            sendState = .failed("Could not load from M5Paper: \(error.localizedDescription)")
+            sendState = .failed("Could not load from device: \(error.localizedDescription)")
         }
     }
 
+    var canScanDeviceWiFi: Bool {
+        devices.isVerified && devices.descriptor?.isM5Paper == true && devices.address == deviceAddress
+    }
+
     func scanWiFiNetworks() async {
+        guard canScanDeviceWiFi else {
+            wifiScanError = "This device does not expose the M5Paper Wi-Fi scan protocol. Enter network details manually."
+            return
+        }
+        let scanID = UUID()
+        wifiScanID = scanID
+        let address = deviceAddress
         isScanningWiFi = true
         wifiScanError = nil
-        defer { isScanningWiFi = false }
+        defer { if wifiScanID == scanID { isScanningWiFi = false } }
         do {
-            let url = try Self.deviceURL(from: deviceAddress, path: "/wifi/networks")
+            let url = try Self.deviceURL(from: address, path: "/wifi/networks")
             var request = URLRequest(url: url)
             request.timeoutInterval = 15
             request.setValue("Bearer \(localComputer.token)", forHTTPHeaderField: "Authorization")
             let (data, response) = try await URLSession.shared.data(for: request)
+            guard wifiScanID == scanID, address == deviceAddress else { return }
             guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
                 throw SendError.wifiScanRejected
             }
@@ -645,7 +761,8 @@ final class RemoteEditorStore: ObservableObject {
                 .compactMapValues { $0.max(by: { $0.rssi < $1.rssi }) }
             wifiNetworks = strongestByName.values.sorted { $0.rssi > $1.rssi }
         } catch {
-            wifiScanError = "Could not scan through M5Paper: \(error.localizedDescription)"
+            guard wifiScanID == scanID, address == deviceAddress else { return }
+            wifiScanError = "Could not scan through device: \(error.localizedDescription)"
         }
     }
 
@@ -658,6 +775,9 @@ final class RemoteEditorStore: ObservableObject {
             netHomeNameAliases: netHomeNameAliases
         )
         do {
+            if !isSwitchingDevice, devices.selectedID != nil, devices.address == deviceAddress {
+                try devices.saveProfile(JSONEncoder().encode(profile))
+            }
             let directory = Self.documentURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
@@ -678,8 +798,16 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     private func scheduleLiveSync() {
-        guard !isApplyingDeviceProfile else { return }
+        guard !isApplyingDeviceProfile, !isSwitchingDevice, devices.descriptor != nil, devices.isVerified,
+              devices.address == deviceAddress else { return }
         liveSyncTask?.cancel()
+        liveSyncTask = nil
+        // Edits to existing controls go to the M5Paper at once; other changes wait for typing to settle.
+        if validationMessage == nil, let deviceProfile,
+           RemoteProfile.changedControls(from: deviceProfile, to: profile) != nil {
+            enqueueProfileSync()
+            return
+        }
         liveSyncTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled, let self, self.validationMessage == nil else { return }
@@ -719,7 +847,7 @@ final class RemoteEditorStore: ObservableObject {
     }
 
     private static func validationMessage(for profile: RemoteProfile) -> String? {
-        if profile.version != RemoteProfile.currentVersion { return "The profile version is unsupported." }
+        if ![6, 7].contains(profile.version) { return "The profile version is unsupported." }
         if profile.pages.isEmpty || profile.pages.count > 8 { return "The profile has an invalid page count." }
         if profile.pages.contains(where: { $0.controls.count > RemoteProfile.maximumControlsPerPage }) {
             return "The profile has too many controls on a page."
@@ -858,15 +986,15 @@ private enum SendError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidAddress:
-            "Enter the M5Paper address, such as 192.168.4.1 or papergif.local."
+            "Enter the device address, such as 192.168.4.1 or papergif.local."
         case .invalidProfile:
             "The device returned an invalid remote profile."
         case .loadRejected(let detail):
-            "The M5Paper did not return a remote profile: \(detail)"
+            "The device did not return a remote profile: \(detail)"
         case .rejected(let detail):
-            "The M5Paper rejected the remote profile: \(detail)"
+            "The device rejected the remote profile: \(detail)"
         case .wifiScanRejected:
-            "The M5Paper did not return nearby networks."
+            "The device did not return nearby networks."
         }
     }
 }

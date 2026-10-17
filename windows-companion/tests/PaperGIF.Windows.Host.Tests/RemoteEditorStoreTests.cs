@@ -7,6 +7,23 @@ namespace PaperGIF.Windows.Host.Tests;
 public sealed class RemoteEditorStoreTests
 {
     [Fact]
+    public void DescriptorCapacitiesReplaceLegacyEditorPageAndControlLimits()
+    {
+        var descriptor = DeviceDescriptor.Legacy("device") with
+        {
+            Capabilities = new([7], false, false, 65_536, 1, 12),
+        };
+        var profile = new RemoteProfile
+        {
+            Pages = Enumerable.Range(0, 10).Select(index => new RemotePage { Name = $"Page {index}" }).ToList(),
+        };
+        Assert.Null(RemoteEditorStore.ValidateProfile(profile, descriptor));
+        Assert.NotNull(RemoteEditorStore.ValidateProfile(profile));
+        profile.Pages[0].Controls = [new(), new()];
+        Assert.Equal("A page has more controls than fit on the display.", RemoteEditorStore.ValidateProfile(profile, descriptor));
+    }
+
+    [Fact]
     public void PreferredIpv4AddressUsesAdapterWithDefaultGateway()
     {
         var address = RemoteEditorStore.PreferredIpv4Address([
@@ -71,6 +88,36 @@ public sealed class RemoteEditorStoreTests
 
         var rail = Page(27, 29, 31);
         Assert.Null(RemoteEditorStore.ArrangementAfterMove(rail, rail.Controls[0].Id, 33));
+    }
+
+    [Fact]
+    public void ControlEditsAreSentAsControlUpdatesAndStructuralChangesAreNot()
+    {
+        var profile = new RemoteProfile
+        {
+            Pages = [new RemotePage { Name = "Main", Controls = [new RemoteControl { Title = "A" }, new RemoteControl { Title = "B" }] }],
+        };
+        System.Text.Json.Nodes.JsonObject Json() =>
+            (System.Text.Json.Nodes.JsonObject)System.Text.Json.Nodes.JsonNode.Parse(
+                PaperGIF.Windows.Core.Serialization.RemoteProfileJson.Serialize(profile))!;
+        var installed = Json();
+
+        profile.MarkUpdated();
+        profile.Pages[0].Controls[1].Title = "Bee";
+        var changes = Assert.IsType<List<(string PageId, System.Text.Json.Nodes.JsonNode Control)>>(
+            RemoteEditorStore.ChangedControls(installed, Json()));
+        var change = Assert.Single(changes);
+        Assert.Equal(profile.Pages[0].Id.ToString(), change.PageId, ignoreCase: true);
+        Assert.Equal("Bee", change.Control["title"]?.ToString());
+        var body = System.Text.Json.Nodes.JsonNode.Parse(RemoteEditorStore.ControlUpdatePayload(Json(), changes))!;
+        Assert.Equal("Bee", body["controls"]![0]!["control"]!["title"]!.ToString());
+        Assert.Equal(profile.UpdatedAtMilliseconds, body["updatedAtMilliseconds"]!.GetValue<long>());
+
+        profile.Pages[0].Name = "Media";
+        Assert.Null(RemoteEditorStore.ChangedControls(installed, Json()));
+        profile.Pages[0].Name = "Main";
+        profile.Pages[0].Controls.Reverse();
+        Assert.Null(RemoteEditorStore.ChangedControls(installed, Json()));
     }
 
     [Fact]

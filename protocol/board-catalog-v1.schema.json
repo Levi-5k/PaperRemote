@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papergif.local/protocol/board-catalog-v1.schema.json",
+  "title": "PaperRemote Board Catalog v1",
+  "oneOf": [{"$ref": "#/$defs/index"}, {"$ref": "#/$defs/board"}],
+  "$defs": {
+    "revisions": {"type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+    "index": {
+      "type": "object", "additionalProperties": false, "required": ["schemaVersion", "boards"],
+      "properties": {
+        "schemaVersion": {"const": 1},
+        "boards": {
+          "type": "array", "maxItems": 4096,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["boardID", "hardwareRevisions", "version", "path", "sha256"],
+            "properties": {
+              "boardID": {"type": "string", "minLength": 1, "maxLength": 128},
+              "hardwareRevisions": {"$ref": "#/$defs/revisions"},
+              "version": {"type": "integer", "minimum": 1},
+              "path": {"type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+\\.json$"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      }
+    },
+    "board": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "boardID", "hardwareRevisions", "version", "name", "layout"],
+      "properties": {
+        "schemaVersion": {"const": 1},
+        "boardID": {"type": "string", "minLength": 1, "maxLength": 128},
+        "hardwareRevisions": {"$ref": "#/$defs/revisions"},
+        "version": {"type": "integer", "minimum": 1},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "layout": {"$ref": "device-descriptor-v1.schema.json#/$defs/layout"}
+      }
+    }
+  }
+}

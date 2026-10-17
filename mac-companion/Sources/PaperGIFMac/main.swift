@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ApplicationServices
 import CoreAudio
 import CoreGraphics
@@ -6,6 +7,7 @@ import Darwin
 import Foundation
 import IOKit.hidsystem
 import Network
+import PaperDeviceKit
 import SystemConfiguration
 
 private func routedIPv4Address() -> String? {
@@ -635,6 +637,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let moduleRuntimeHost = ModuleRuntimeHost()
     private var configuration = CompanionConfiguration.initial
     private var editorStore: RemoteEditorStore?
+    private var bluetoothRelay: DeviceBluetoothRelay?
+    private var bluetoothRelayObservation: AnyCancellable?
     private var moduleCatalog: ModuleCatalog?
     private var matterDevices: MatterDeviceManager?
     private var editorWindowController: RemoteEditorWindowController?
@@ -895,14 +899,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         if let editorStore {
             return editorStore
         }
+        let relay = DeviceBluetoothRelay(actionHandler: { [weak self] body in
+            await self?.performRelayedAction(body) ?? false
+        })
         let store = RemoteEditorStore(
             computerName: Host.current().localizedName ?? "This Mac",
             host: routedIPv4Address() ?? ProcessInfo.processInfo.hostName,
             port: Int(port),
             token: token,
-            netHomeService: netHomeService
+            netHomeService: netHomeService,
+            bluetoothRelay: relay
         )
         editorStore = store
+        bluetoothRelay = relay
+        let devices = store.devices
+        let relayToken = token
+        bluetoothRelayObservation = devices.$descriptor
+            .combineLatest(devices.$address)
+            .receive(on: RunLoop.main)
+            .sink { [weak relay] descriptor, address in
+                // Legacy M5Paper descriptors predate `transports` but always have BLE.
+                let hasBluetooth = descriptor.map {
+                    $0.capabilities.transports == nil ? $0.isM5Paper : $0.capabilities.supports(transport: "ble")
+                } ?? false
+                relay?.watch(hasBluetooth && !address.isEmpty
+                    ? DeviceBluetoothRelay.Target(address: address, token: relayToken) : nil)
+            }
         return store
     }
 
@@ -1054,6 +1076,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         stack.alignment = .leading
         stack.spacing = 3
         return stack
+    }
+
+    /// Runs an action the device delivered over the Bluetooth relay instead of HTTP.
+    @MainActor private func performRelayedAction(_ body: Data) async -> Bool {
+        guard let request = try? JSONDecoder().decode(RemoteRequest.self, from: body) else { return false }
+        DiagnosticLog.info("Bluetooth relay action: \(request.type)")
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                continuation.resume(returning: self?.perform(request).succeeded ?? false)
+            }
+        }
     }
 
     private func perform(_ request: RemoteRequest) -> RemoteActionResult {

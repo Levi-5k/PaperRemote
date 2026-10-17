@@ -1,14 +1,58 @@
 import SwiftUI
+import PaperDeviceKit
 
 struct PaperGIFDeviceView: View {
     @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
     let animation: PaperGIFAnimation?
     let sourceName: String
+    @ObservedObject var session: DeviceSession
+    @Binding var profile: PaperGIFRemoteProfile
     @StateObject private var firmware = PaperGIFFirmwareUpdater()
+    @State private var firmwareTask: Task<Void, Never>?
+
+    private var firmwareEndpoint: PaperGIFDeviceEndpoint? {
+        if session.isVerified, let descriptor = session.descriptor,
+           descriptor.isM5Paper, !session.address.isEmpty,
+           let url = try? DeviceHTTP.endpoint(session.address, path: "/") {
+            let token = PaperGIFDeviceCredentials.token(for: descriptor.deviceID)
+            return PaperGIFDeviceEndpoint(url: url, authorization: token.isEmpty ? nil : "Bearer \(token)")
+        }
+        return bluetoothManager.deviceHTTPEndpoint
+    }
+
+    /// The active device's descriptor when it declares device controls.
+    private var controlsDescriptor: DeviceDescriptor? {
+        let descriptor = session.descriptor ?? bluetoothManager.bluetoothDescriptor
+        guard let descriptor, !descriptor.controls.isEmpty else { return nil }
+        return descriptor
+    }
+
+    private var firmwareTargetID: String {
+        "\(session.selectedID ?? "")|\(firmwareEndpoint?.url.absoluteString ?? "")|\(session.isVerified)"
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    NavigationLink {
+                        PaperGIFDeviceSetupView(session: session, bluetooth: bluetoothManager, profile: $profile)
+                    } label: {
+                        Label("Device Setup & Saved Controllers", systemImage: "rectangle.connected.to.line.below")
+                    }
+                    if let descriptor = session.descriptor {
+                        LabeledContent("Selected", value: descriptor.name)
+                    }
+                }
+                if let descriptor = controlsDescriptor {
+                    PaperGIFDeviceControlsView(
+                        descriptor: descriptor,
+                        bluetoothManager: bluetoothManager,
+                        session: session
+                    )
+                    .id(descriptor.deviceID)
+                }
+                if session.descriptor?.isM5Paper != false {
                 Section("M5Paper") {
                     LabeledContent {
                         Text(bluetoothManager.connectionState.description)
@@ -26,7 +70,7 @@ struct PaperGIFDeviceView: View {
                     .disabled(
                         bluetoothManager.wifiConnectionState == .checking ||
                         bluetoothManager.wifiConnectionState == .connecting ||
-                        bluetoothManager.isTransferring
+                        bluetoothManager.isTransferring || !bluetoothManager.legacyBLEPermitted
                     )
 
                     LabeledContent("Wi-Fi status", value: bluetoothManager.wifiConnectionState.description)
@@ -47,9 +91,18 @@ struct PaperGIFDeviceView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                }
 
-                firmwareSection
+                if session.descriptor?.isM5Paper == true,
+                   session.descriptor?.capabilities.firmwareUpdate == true {
+                    firmwareSection
+                } else {
+                    Section("Firmware") {
+                        Text("No compatible firmware update is available for this board. M5Paper firmware is never offered to unknown or custom boards.")
+                    }
+                }
 
+                if session.descriptor?.canUseLegacyMedia != false {
                 Section("Media") {
                     if let animation {
                         LabeledContent("Name", value: sourceName)
@@ -65,7 +118,6 @@ struct PaperGIFDeviceView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
-
                         Button {
                             bluetoothManager.send(animation.encoded, name: sourceName)
                         } label: {
@@ -83,11 +135,21 @@ struct PaperGIFDeviceView: View {
                         )
                     }
                 }
+                } else {
+                    Section("Media") {
+                        Text("Media and button images are unavailable: this device has no supported M5Paper-compatible display encoder.")
+                    }
+                }
             }
             .navigationTitle("Device")
-            .task(id: bluetoothManager.deviceHTTPEndpoint) {
-                await firmware.refresh(endpoint: bluetoothManager.deviceHTTPEndpoint)
+            .task(id: firmwareTargetID) {
+                await firmware.refresh(endpoint: firmwareEndpoint, descriptor: session.descriptor)
             }
+            .onChange(of: session.selectedID) {
+                firmwareTask?.cancel()
+                firmware.resetForDevice()
+            }
+            .onDisappear { firmwareTask?.cancel() }
         }
     }
 
@@ -103,17 +165,17 @@ struct PaperGIFDeviceView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-            } else if let endpoint = bluetoothManager.deviceHTTPEndpoint,
+            } else if let endpoint = firmwareEndpoint,
                       firmware.updateAvailable, !firmware.needsUSB {
                 Button {
-                    Task { await firmware.install(endpoint: endpoint) }
+                    firmwareTask = Task { await firmware.install(endpoint: endpoint, descriptor: session.descriptor) }
                 } label: {
                     Label("Update M5Paper to \(firmware.release?.version ?? "")", systemImage: "arrow.down.circle.fill")
                 }
-                .disabled(bluetoothManager.isTransferring)
+                .disabled(bluetoothManager.isTransferring || !session.isVerified)
             } else {
                 Button {
-                    Task { await firmware.refresh(endpoint: bluetoothManager.deviceHTTPEndpoint) }
+                    Task { await firmware.refresh(endpoint: firmwareEndpoint, descriptor: session.descriptor) }
                 } label: {
                     Label("Check for Updates", systemImage: "arrow.clockwise")
                 }
@@ -133,7 +195,7 @@ struct PaperGIFDeviceView: View {
         } footer: {
             if firmware.needsUSB {
                 Text("This M5Paper's firmware is too old for Wi-Fi updates. Flash it over USB once; later updates install from here.")
-            } else if bluetoothManager.deviceHTTPEndpoint == nil {
+            } else if firmwareEndpoint == nil {
                 Text("Firmware updates install over Wi-Fi. Connect the M5Paper to Wi-Fi to check its version.")
             } else if firmware.deviceFirmware != nil, !firmware.updateAvailable, firmware.release != nil {
                 Text("The M5Paper is up to date.")

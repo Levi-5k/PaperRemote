@@ -1,6 +1,7 @@
 import Combine
 import CryptoKit
 import Foundation
+import PaperDeviceKit
 
 struct PaperGIFDeviceEndpoint: Equatable {
     let url: URL
@@ -43,31 +44,54 @@ final class PaperGIFFirmwareUpdater: ObservableObject {
 
     var needsUSB: Bool { updateAvailable && deviceFirmware == Self.usbOnlyVersion }
 
-    func refresh(endpoint: PaperGIFDeviceEndpoint?) async {
+    static func supportsFirmware(for descriptor: DeviceDescriptor?) -> Bool {
+        guard let descriptor, (try? descriptor.validate()) != nil else { return false }
+        return descriptor.isM5Paper && descriptor.capabilities.firmwareUpdate
+    }
+
+    func refresh(endpoint: PaperGIFDeviceEndpoint?, descriptor: DeviceDescriptor?) async {
+        guard Self.supportsFirmware(for: descriptor) else {
+            release = nil
+            deviceFirmware = nil
+            problem = "Firmware updates are not supported for this board."
+            return
+        }
         guard activity == nil else { return }
         activity = "Checking for updates…"
         defer { activity = nil }
         do {
-            release = try await Self.latestRelease()
+            let candidate = try await Self.latestRelease()
+            guard !Task.isCancelled else { return }
+            release = candidate
             problem = nil
         } catch {
+            guard !Task.isCancelled else { return }
             if release == nil { problem = "Could not check for updates: \(error.localizedDescription)" }
         }
         if let endpoint {
-            deviceFirmware = await Self.installedVersion(at: endpoint)
+            let version = await Self.installedVersion(at: endpoint)
+            guard !Task.isCancelled else { return }
+            deviceFirmware = version
         } else {
             deviceFirmware = nil
         }
     }
 
-    func install(endpoint: PaperGIFDeviceEndpoint) async {
+    func install(endpoint: PaperGIFDeviceEndpoint, descriptor: DeviceDescriptor?) async {
+        guard Self.supportsFirmware(for: descriptor), let descriptor else {
+            problem = "The firmware does not match the selected board and hardware revision."
+            return
+        }
         guard activity == nil, updateAvailable, !needsUSB, let release else { return }
         problem = nil
         notice = nil
         defer { activity = nil }
         do {
+            try await Self.verifyTarget(endpoint: endpoint, descriptor: descriptor)
             activity = "Downloading firmware \(release.version)…"
             let firmware = try await Self.download(release)
+            try Task.checkCancellation()
+            try await Self.verifyTarget(endpoint: endpoint, descriptor: descriptor)
             activity = "Installing firmware \(release.version)… the M5Paper shows progress and restarts when done."
             try await Self.upload(firmware, to: endpoint)
             try await Self.waitForRestart(endpoint: endpoint, version: release.version)
@@ -76,11 +100,36 @@ final class PaperGIFFirmwareUpdater: ObservableObject {
         } catch {
             problem = error.localizedDescription
         }
+
+    }
+
+    private static func verifyTarget(endpoint: PaperGIFDeviceEndpoint, descriptor: DeviceDescriptor) async throws {
+        var request = endpoint.request(path: "device")
+        request.timeoutInterval = 5
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode
+        if status == 404, descriptor.firmwareVersion == "legacy" {
+            guard await installedVersion(at: endpoint) != nil else {
+                throw UpdateError.unavailable("Legacy M5Paper identity could not be verified.")
+            }
+            return
+        }
+        guard status == 200 else { throw UpdateError.unavailable("Could not verify the firmware target.") }
+        let current = try DeviceDescriptor.decode(data)
+        guard current.isM5Paper, current.deviceID == descriptor.deviceID,
+              current.capabilities.firmwareUpdate else {
+            throw UpdateError.unavailable("Wrong device or board revision; firmware installation was blocked.")
+        }
     }
 
     func dismissMessages() {
         problem = nil
         notice = nil
+    }
+
+    func resetForDevice() {
+        deviceFirmware = nil
+        dismissMessages()
     }
 
     static func isNewer(_ candidate: String, than current: String) -> Bool {

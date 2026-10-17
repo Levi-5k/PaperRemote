@@ -2,11 +2,22 @@
 
 PaperRemote turns an M5Stack M5Paper into a configurable remote. An iPhone or Mac editor builds the control layout, the ESP32 firmware renders and runs it, and a macOS menu-bar companion handles Mac actions and dynamic text sources.
 
+Controller discovery also supports versioned device descriptors and custom
+board layouts across iPhone/iPad, Mac, and Windows. Compatible controllers can
+describe different screen sizes, physical buttons/knobs/sliders, or no screen.
+Apps automatically match board metadata from this repository's
+[board catalog](boards/index.json) and retain offline layouts. See
+[custom-device setup and compatibility](docs/custom-devices.md) before adding a
+board; layout metadata alone does not add a third-party protocol or display driver.
+
 ## Components
 
-- `paperGIF/`: SwiftUI iPhone editor and media uploader
+- `paperGIF/`: SwiftUI iPhone/iPad editor and media uploader
 - `mac-companion/`: AppKit/SwiftUI menu-bar companion and remote editor
+- `windows-companion/`: Windows companion, device discovery, and remote editor
 - `firmware/`: PlatformIO firmware for M5Paper v1
+- `device-kit/`: shared Swift device descriptors, catalog, sessions, and board preview
+- `boards/`: curated, data-only controller layout catalog (not firmware drivers)
 - `paperGIFTests/` and `paperGIFUITests/`: iOS tests
 
 ## iPhone App

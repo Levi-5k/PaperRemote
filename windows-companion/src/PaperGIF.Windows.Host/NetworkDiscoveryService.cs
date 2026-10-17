@@ -4,6 +4,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.Json;
 using Makaretu.Dns;
+using PaperGIF.Windows.Core;
 
 namespace PaperGIF.Windows.Host;
 
@@ -18,13 +19,14 @@ internal sealed record DiscoveredEndpoint(
     string Name,
     string Host,
     int Port,
-    DiscoveredServiceKind Kind)
+    DiscoveredServiceKind Kind,
+    string Scheme = "http")
 {
     public string DisplayName => $"{Name}  -  {KindLabel}  ({Host}:{Port})";
 
     private string KindLabel => Kind switch
     {
-        DiscoveredServiceKind.M5Paper => "M5Paper",
+        DiscoveredServiceKind.M5Paper => "Controller",
         DiscoveredServiceKind.Companion => "Computer",
         DiscoveredServiceKind.Wled => "WLED",
         _ => "Device",
@@ -46,7 +48,7 @@ internal sealed class NetworkDiscoveryService : IDisposable
         UseProxy = false,
     })
     {
-        MaxResponseContentBufferSize = 4_096,
+        MaxResponseContentBufferSize = 65_536,
         Timeout = Timeout.InfiniteTimeSpan,
     };
     private readonly object gate = new();
@@ -205,9 +207,7 @@ internal sealed class NetworkDiscoveryService : IDisposable
             await limiter.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                return await ProbeAsync(candidate, cancellationToken).ConfigureAwait(false)
-                    ? new DiscoveredEndpoint($"M5Paper {candidate}", candidate.ToString(), 80, DiscoveredServiceKind.M5Paper)
-                    : null;
+                return await ProbeAsync(candidate, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -270,24 +270,23 @@ internal sealed class NetworkDiscoveryService : IDisposable
             .ToArray();
     }
 
-    private static async Task<bool> ProbeAsync(IPAddress address, CancellationToken cancellationToken)
+    private static async Task<DiscoveredEndpoint?> ProbeAsync(IPAddress address, CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(ProbeTimeout);
         try
         {
-            var uri = new UriBuilder(Uri.UriSchemeHttp, address.ToString(), 80, "/status").Uri;
-            using var response = await ProbeClient.GetAsync(uri, timeout.Token).ConfigureAwait(false);
-            return response.IsSuccessStatusCode &&
-                IsPaperGifStatus(await response.Content.ReadAsStringAsync(timeout.Token).ConfigureAwait(false));
+            var uri = new UriBuilder(Uri.UriSchemeHttp, address.ToString(), 80).Uri;
+            var adapter = await DeviceAdapters.IdentifyAsync(ProbeClient, uri, "", timeout.Token).ConfigureAwait(false);
+            return new DiscoveredEndpoint(adapter.Descriptor.Name, address.ToString(), 80, DiscoveredServiceKind.M5Paper);
         }
-        catch (HttpRequestException)
+        catch (Exception exception) when (exception is HttpRequestException or JsonException or InvalidOperationException)
         {
-            return false;
+            return null;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return false;
+            return null;
         }
     }
 

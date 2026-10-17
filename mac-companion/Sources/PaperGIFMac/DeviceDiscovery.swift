@@ -1,6 +1,7 @@
 import Combine
 import Darwin
 @preconcurrency import Foundation
+import PaperDeviceKit
 
 private struct SendableDeviceService: @unchecked Sendable {
     let value: NetService
@@ -81,7 +82,7 @@ final class DeviceDiscovery: NSObject, ObservableObject {
         scanTask = nil
         isScanning = false
         scanMessage = devices.isEmpty
-            ? "No M5Paper found. Wake it and make sure it is on this Mac's network."
+            ? "No compatible device found. Wake it and make sure it is on this Mac's network."
             : nil
     }
 
@@ -176,6 +177,12 @@ final class DeviceDiscovery: NSObject, ObservableObject {
 
     nonisolated private static func probe(_ host: String, session: URLSession) async -> Device? {
         guard let ipv4 = await resolvedIPv4(host) else { return nil }
+        if let descriptorURL = URL(string: "http://\(ipv4)/device"),
+           let (data, response) = try? await session.data(from: descriptorURL),
+           (response as? HTTPURLResponse)?.statusCode == 200,
+           let descriptor = try? DeviceDescriptor.decode(data) {
+            return Device(name: descriptor.name, host: ipv4, port: 80)
+        }
         var components = URLComponents()
         components.scheme = "http"
         components.host = ipv4

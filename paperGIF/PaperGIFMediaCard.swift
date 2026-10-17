@@ -8,11 +8,11 @@ struct PaperGIFMediaCard: View {
     let onChangeCrop: () -> Void
     let onEditConversion: () -> Void
     let onExport: () -> Void
+    @Binding var isConfirmingDeletion: Bool
     let onDelete: () -> Void
 
     @State private var animation: PaperGIFAnimation?
     @State private var previewImage: CGImage?
-    @State private var confirmsDeletion = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -97,9 +97,11 @@ struct PaperGIFMediaCard: View {
             .tint(.indigo)
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button("Delete", systemImage: "trash", role: .destructive) {
-                confirmsDeletion = true
+            // A destructive role removes the row before the confirmation can present.
+            Button("Delete", systemImage: "trash") {
+                isConfirmingDeletion = true
             }
+            .tint(.red)
 
             Button(action: onEditConversion) {
                 Label("Values", systemImage: "slider.horizontal.3")
@@ -115,7 +117,7 @@ struct PaperGIFMediaCard: View {
         }
         .confirmationDialog(
             "Delete \(savedMedia.name)?",
-            isPresented: $confirmsDeletion,
+            isPresented: $isConfirmingDeletion,
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive, action: onDelete)

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "deviceID": "fixture:landscape:001",
+  "name": "Landscape simulator",
+  "manufacturer": "PaperRemote reference",
+  "boardID": "paperremote.simulated-display",
+  "hardwareRevision": "1",
+  "firmwareVersion": "simulator-1",
+  "display": {"width": 320, "height": 240, "touch": true, "pixelFormat": "rgb565", "rotation": 0},
+  "inputs": [
+    {"id": "encoder-1", "name": "Turn-only knob", "kind": "encoder", "events": ["rotate"]},
+    {"id": "dial-1", "name": "Absolute dial", "kind": "dial", "events": ["change"], "minimum": 0, "maximum": 1023}
+  ],
+  "layout": {
+    "width": 400, "height": 400,
+    "screen": {"x": 40, "y": 20, "width": 320, "height": 240},
+    "inputs": [
+      {"id": "encoder-1", "x": 60, "y": 300, "width": 60, "height": 60},
+      {"id": "dial-1", "x": 280, "y": 300, "width": 60, "height": 60}
+    ]
+  },
+  "capabilities": {"profileVersions": [7], "media": false, "firmwareUpdate": false, "maxProfileBytes": 65536, "maxControls": 24, "maxPages": 8}
+}

@@ -19,6 +19,7 @@ internal sealed class RemoteEditorWindow : Form
     private readonly Label pageCount = new();
     private readonly RemotePreviewPanel preview = new();
     private readonly ModernTabControl inspectorTabs = new();
+    private readonly DeviceControlsPanel deviceControls;
     private readonly CatalogListBox catalogList = new();
     private readonly TextBox catalogSearch = new();
     private readonly FlowLayoutPanel modulesPanel = new();
@@ -74,6 +75,12 @@ internal sealed class RemoteEditorWindow : Form
     private readonly ListBox discoveredList = new();
     private readonly ComboBox wifiNetworks = new();
     private readonly ComboBox devicePicker = new();
+    private readonly ComboBox physicalInputs = new();
+    private readonly ComboBox physicalEvents = new();
+    private readonly ComboBox physicalDirection = new();
+    private readonly PropertyGrid hardwareProperties = new();
+    private readonly Label deviceInfo = new();
+    private readonly TextBox manualEndpoint = new();
     private readonly Button scanDevicesButton = new();
     private readonly Label syncStatus = new();
     private readonly Button sendButton = new();
@@ -105,6 +112,7 @@ internal sealed class RemoteEditorWindow : Form
         Icon icon)
     {
         this.store = store;
+        deviceControls = new DeviceControlsPanel(store);
         this.activity = activity;
         this.discovery = discovery;
         this.netHomeService = netHomeService;
@@ -290,7 +298,7 @@ internal sealed class RemoteEditorWindow : Form
             AutoSize = true,
             ForeColor = Muted,
             Location = new Point(52, 27),
-            Text = "M5Paper control workspace",
+            Text = "Device control workspace",
         };
         brand.Controls.AddRange([logo, title, subtitle]);
         syncStatus.AutoEllipsis = true;
@@ -305,12 +313,12 @@ internal sealed class RemoteEditorWindow : Form
         devicePicker.SelectedIndexChanged += async (_, _) =>
         {
             if (refreshing || devicePicker.SelectedItem is not DeviceChoice { Endpoint: { } endpoint } ||
-                endpoint.Host.Equals(store.DeviceAddress, StringComparison.OrdinalIgnoreCase))
+                EndpointAddress(endpoint).Equals(store.DeviceAddress, StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
             automaticallyLoadedDevice = endpoint.Host;
-            store.DeviceAddress = endpoint.Host;
+            store.DeviceAddress = EndpointAddress(endpoint);
             await RunDeviceOperation(store.LoadFromDeviceAsync);
         };
         var loadButton = Button("Reload", async (_, _) => await RunDeviceOperation(store.LoadFromDeviceAsync));
@@ -319,7 +327,7 @@ internal sealed class RemoteEditorWindow : Form
         EditorTheme.StyleButton(scanDevicesButton);
         CenterInBar(scanDevicesButton, new Padding(0, 0, 8, 0));
         scanDevicesButton.Click += (_, _) => _ = discovery.ScanDevicesAsync(store.DeviceAddress);
-        new ToolTip().SetToolTip(scanDevicesButton, "Scan the network for M5Paper devices");
+        new ToolTip().SetToolTip(scanDevicesButton, "Scan the network for compatible controllers");
         sendButton.Text = "Send";
         EditorTheme.StyleButton(sendButton, prominent: true);
         CenterInBar(sendButton, Padding.Empty);
@@ -455,6 +463,12 @@ internal sealed class RemoteEditorWindow : Form
         };
         preview.ControlMoved += (_, move) => store.MoveControlToSlot(move.ControlId, move.Slot);
         preview.SettingsMoved += (_, slot) => store.MoveOpenBuildsSettings(slot);
+        preview.InputSelected += (_, id) =>
+        {
+            store.SelectedInputID = id;
+            physicalInputs.SelectedItem = store.Descriptor?.Inputs.FirstOrDefault(input => input.Id == id);
+            inspectorTabs.SelectedTab = inspectorTabs.TabPages.Cast<TabPage>().First(tab => tab.Text == "Hardware");
+        };
         panel.Controls.Add(preview);
         panel.Controls.Add(header);
         return panel;
@@ -468,6 +482,8 @@ internal sealed class RemoteEditorWindow : Form
         inspectorTabs.TabPages.Add(BuildControlTab());
         inspectorTabs.TabPages.Add(BuildModulesTab());
         inspectorTabs.TabPages.Add(BuildConnectionsTab());
+        inspectorTabs.TabPages.Add(BuildHardwareTab());
+        inspectorTabs.TabPages.Add(BuildDeviceControlsTab());
         inspectorTabs.SelectedIndexChanged += (_, _) =>
         {
             if (inspectorTabs.SelectedIndex == 0)
@@ -892,6 +908,151 @@ internal sealed class RemoteEditorWindow : Form
         return tab;
     }
 
+    private TabPage BuildDeviceControlsTab()
+    {
+        var tab = new TabPage("Device") { BackColor = EditorTheme.Layer, Padding = new Padding(10) };
+        tab.Controls.Add(deviceControls);
+        return tab;
+    }
+
+    private TabPage BuildHardwareTab()
+    {
+        var tab = new TabPage("Hardware") { BackColor = EditorTheme.Layer, Padding = new Padding(10) };
+        var header = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true,
+            FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        deviceInfo.AutoSize = true;
+        deviceInfo.MaximumSize = new Size(310, 0);
+        manualEndpoint.Width = 280;
+        manualEndpoint.Text = store.DeviceAddress;
+        manualEndpoint.PlaceholderText = "http://device-address:port";
+        physicalInputs.Width = 280;
+        physicalInputs.DropDownStyle = ComboBoxStyle.DropDownList;
+        physicalInputs.DisplayMember = nameof(DeviceInput.Name);
+        physicalInputs.SelectedIndexChanged += (_, _) =>
+        {
+            if (refreshing) return;
+            store.SelectedInputID = (physicalInputs.SelectedItem as DeviceInput)?.Id;
+            RefreshPhysicalEvents();
+            preview.SelectedInputID = store.SelectedInputID;
+            preview.Invalidate();
+        };
+        physicalEvents.Width = 280;
+        physicalEvents.DropDownStyle = ComboBoxStyle.DropDownList;
+        physicalEvents.SelectedIndexChanged += (_, _) => RefreshHardwareBinding();
+        physicalDirection.Width = 280;
+        physicalDirection.DropDownStyle = ComboBoxStyle.DropDownList;
+        physicalDirection.Items.AddRange(["Both directions / signed relative", "Left / negative action", "Right / positive action"]);
+        physicalDirection.SelectedIndex = 0;
+        physicalDirection.SelectedIndexChanged += (_, _) => RefreshHardwareBinding();
+        hardwareProperties.Dock = DockStyle.Fill;
+        hardwareProperties.ToolbarVisible = false;
+        hardwareProperties.PropertyValueChanged += (_, _) => store.Commit();
+        header.Controls.AddRange([deviceInfo, manualEndpoint,
+            Button("Connect / refresh descriptor and catalog", async (_, _) =>
+            {
+                store.DeviceAddress = manualEndpoint.Text.Trim();
+                await RunDeviceOperation(store.LoadFromDeviceAsync);
+            }),
+            Button("Retry curated board catalog", async (_, _) => await store.RefreshBoardCatalogAsync()),
+            physicalInputs, physicalEvents, physicalDirection,
+            Button("Assign selected input/event", (_, _) =>
+            {
+                if (physicalInputs.SelectedItem is DeviceInput input && physicalEvents.SelectedItem is string eventName)
+                {
+                    store.BindingFor(input.Id, eventName, SelectedDirection);
+                    RefreshHardwareBinding();
+                }
+            }),
+            Button("Remove binding", (_, _) =>
+            {
+                if (physicalInputs.SelectedItem is DeviceInput input && physicalEvents.SelectedItem is string eventName)
+                {
+                    store.Profile.HardwareBindings?.RemoveAll(binding => binding.InputID == input.Id && binding.Event == eventName && binding.Direction == SelectedDirection);
+                    store.Commit();
+                    RefreshHardwareBinding();
+                }
+            }),
+            Button("Import layout JSON...", (_, _) => ImportDeviceLayout()),
+            Button("Edit layout geometry...", (_, _) => EditDeviceLayout()),
+            Button("Use automatic layout", (_, _) => store.UseAutomaticLayout()),
+            Button("Clear screen controls", (_, _) =>
+            {
+                if (MessageBox.Show(this, "Remove touchscreen controls from this device profile?", "Hardware",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                foreach (var page in store.Profile.Pages) page.Controls.Clear();
+                store.SelectedControlId = null;
+                store.Commit();
+            })]);
+        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal,
+            Size = new Size(320, 600), SplitterDistance = 290, Panel1MinSize = 120, Panel2MinSize = 120 };
+        split.Panel1.AutoScroll = true;
+        split.Panel1.Controls.Add(header);
+        split.Panel2.Controls.Add(hardwareProperties);
+        tab.Controls.Add(split);
+        return tab;
+    }
+
+    private void RefreshPhysicalEvents()
+    {
+        var selected = physicalEvents.SelectedItem as string;
+        physicalEvents.DataSource = (physicalInputs.SelectedItem as DeviceInput)?.Events.ToList() ?? [];
+        if (selected is not null && physicalEvents.Items.Contains(selected)) physicalEvents.SelectedItem = selected;
+        RefreshHardwareBinding();
+    }
+
+    private void RefreshHardwareBinding()
+    {
+        physicalDirection.Enabled = physicalEvents.SelectedItem as string == "rotate";
+        var binding = store.Profile.HardwareBindings?.FirstOrDefault(binding =>
+            binding.InputID == (physicalInputs.SelectedItem as DeviceInput)?.Id &&
+            binding.Event == physicalEvents.SelectedItem as string && binding.Direction == SelectedDirection);
+        hardwareProperties.SelectedObject = binding is null ? null : new HardwareBindingProperties(binding);
+    }
+
+    private string? SelectedDirection => physicalEvents.SelectedItem as string != "rotate" ? null :
+        physicalDirection.SelectedIndex switch { 1 => "negative", 2 => "positive", _ => null };
+
+    private void ImportDeviceLayout()
+    {
+        using var dialog = new OpenFileDialog { Filter = "Device layout JSON|*.json" };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            if (new FileInfo(dialog.FileName).Length > 65_536) throw new JsonException("Layout exceeds 64 KiB.");
+            store.ImportLayout(File.ReadAllText(dialog.FileName));
+        }
+        catch (Exception exception) when (exception is IOException or JsonException or InvalidOperationException)
+        {
+            MessageBox.Show(this, exception.Message, "Layout not imported", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void EditDeviceLayout()
+    {
+        if (store.Layout is null) return;
+        using var dialog = new Form { Text = "Edit data-only physical layout", Width = 620, Height = 560,
+            StartPosition = FormStartPosition.CenterParent };
+        var editor = new TextBox { Multiline = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both,
+            AcceptsTab = true, Text = JsonSerializer.Serialize(store.Layout,
+                new JsonSerializerOptions(DeviceDescriptor.JsonOptions) { WriteIndented = true }) };
+        var apply = new System.Windows.Forms.Button { Text = "Validate and save", Dock = DockStyle.Bottom, Height = 36 };
+        apply.Click += (_, _) =>
+        {
+            try { store.ImportLayout(editor.Text); dialog.DialogResult = DialogResult.OK; }
+            catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+            {
+                MessageBox.Show(dialog, exception.Message, "Invalid geometry", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        };
+        dialog.Controls.Add(editor);
+        dialog.Controls.Add(apply);
+        dialog.ShowDialog(this);
+    }
+
+    private static string EndpointAddress(DiscoveredEndpoint endpoint) =>
+        endpoint.Scheme == "https" ? new UriBuilder("https", endpoint.Host, endpoint.Port).Uri.AbsoluteUri.TrimEnd('/') :
+        endpoint.Port == 80 ? endpoint.Host : $"{endpoint.Host}:{endpoint.Port}";
+
     private TabPage BuildConnectionsTab()
     {
         var tab = new TabPage("Connections") { BackColor = EditorTheme.Layer, Padding = new Padding(10) };
@@ -1071,6 +1232,25 @@ internal sealed class RemoteEditorWindow : Form
         pageName.Text = store.SelectedPage?.Name ?? string.Empty;
         pageCount.Text = store.SelectedPage is { } page ? $"{page.Controls.Count} / 16" : string.Empty;
         preview.Page = store.SelectedPage;
+        preview.Descriptor = store.Descriptor;
+        preview.BoardLayout = store.Layout;
+        deviceControls.Bind();
+        preview.SelectedInputID = store.SelectedInputID;
+        catalogList.Enabled = store.CanEditTouchscreen;
+        modulesPanel.Enabled = store.CanEditTouchscreen;
+        var selectedInput = store.SelectedInputID;
+        physicalInputs.DataSource = store.Descriptor?.Inputs.ToList() ?? [];
+        physicalInputs.SelectedItem = store.Descriptor?.Inputs.FirstOrDefault(input => input.Id == selectedInput);
+        if (physicalInputs.SelectedItem is null && physicalInputs.Items.Count > 0) physicalInputs.SelectedIndex = 0;
+        RefreshPhysicalEvents();
+        deviceInfo.Text = store.Descriptor is { } descriptor
+            ? $"{descriptor.Name}\n{descriptor.Manufacturer} · {descriptor.BoardID} / {descriptor.HardwareRevision}\n" +
+              $"{(descriptor.Display is { } display ? $"{display.Width}×{display.Height} {display.PixelFormat}" : "Screenless — physical inputs only")}\n" +
+              $"{store.CatalogStatus}\n" +
+              $"{(store.CanInstallM5Firmware ? "M5Paper firmware updates available when released." : "Firmware updates unavailable for this board/transport.")}\n" +
+              $"{(store.CanUploadMedia ? "Legacy-size media supported." : "Media encoding/upload unavailable for this display.")}"
+            : "Connect a native PaperRemote device or verified legacy M5Paper.\n" +
+              "Other third-party protocols need a specific adapter; universal support is not provided.";
         preview.PageIndex = Math.Max(0, store.Profile.Pages.FindIndex(page => page.Id == store.SelectedPageId));
         preview.PageNames = store.Profile.Pages.Select(page => page.Name).ToArray();
         preview.SelectedControlId = store.SelectedControlId;
@@ -1097,6 +1277,7 @@ internal sealed class RemoteEditorWindow : Form
         RefreshControlOptions();
         profileProperties.SelectedObject = new ProfileProperties(store);
         maxButtonTextSize.Value = store.Profile.MaxButtonTextSize;
+        maxButtonTextSize.Enabled = store.CanEditTouchscreen;
         maxButtonTextSizeValue.Text = $"{store.Profile.MaxButtonTextSize} pt";
         var selectedComputer = computersList.SelectedItem as RemoteComputer;
         computersList.DataSource = null;
@@ -1120,29 +1301,36 @@ internal sealed class RemoteEditorWindow : Form
         wifiNetworks.DisplayMember = nameof(DeviceWifiNetwork.DisplayName);
         wifiNetworks.SelectedItem = store.WifiNetworks.FirstOrDefault(network =>
             network.Ssid == (selectedNetwork?.Ssid ?? store.Profile.WifiSSID));
-        var selectedDeviceHost = (devicePicker.SelectedItem as DeviceChoice)?.Endpoint?.Host
-            ?? store.DeviceAddress;
+        var selectedDeviceHost = store.DeviceAddress;
         var deviceChoices = discovery.Endpoints
             .Where(endpoint => endpoint.Kind == DiscoveredServiceKind.M5Paper)
             .Select(endpoint => new DeviceChoice(endpoint.Name, endpoint))
             .ToList();
+        foreach (var saved in store.SavedDevices)
+        {
+            var address = saved.Address.Contains("://", StringComparison.Ordinal) ? saved.Address : $"http://{saved.Address}";
+            if (Uri.TryCreate(address, UriKind.Absolute, out var uri) &&
+                !deviceChoices.Any(choice => choice.Endpoint is { } endpoint &&
+                    EndpointAddress(endpoint) == saved.Address))
+                deviceChoices.Add(new DeviceChoice(saved.Descriptor?.Name ?? saved.DeviceID,
+                    new(saved.Descriptor?.Name ?? saved.DeviceID, uri.Host, uri.Port, DiscoveredServiceKind.M5Paper, uri.Scheme)));
+        }
         if (deviceChoices.Count == 0)
         {
             deviceChoices.Add(new DeviceChoice(
-                discovery.IsScanning ? "Scanning for M5Paper..." : "No M5Paper found",
+                discovery.IsScanning ? "Scanning for controllers..." : "No controller found (manual address in Connections)",
                 null));
         }
         devicePicker.DataSource = deviceChoices;
         devicePicker.SelectedItem = deviceChoices.FirstOrDefault(choice =>
-            choice.Endpoint?.Host.Equals(selectedDeviceHost, StringComparison.OrdinalIgnoreCase) == true)
+            choice.Endpoint is { } endpoint && EndpointAddress(endpoint).Equals(selectedDeviceHost, StringComparison.OrdinalIgnoreCase))
             ?? deviceChoices[0];
         devicePicker.Enabled = !store.IsBusy && deviceChoices.Any(choice => choice.Endpoint is not null);
         scanDevicesButton.Enabled = !discovery.IsScanning;
         scanDevicesButton.Text = discovery.IsScanning ? "..." : "Scan";
         syncStatus.Text = store.ValidationMessage ?? store.Status;
         netHomeStatus.Text = netHomeService.IsSignedIn ? $"Connected: {netHomeService.Account}" : "Not connected";
-        sendButton.Enabled = !store.IsBusy && store.ValidationMessage is null &&
-            deviceChoices.Any(choice => choice.Endpoint is not null);
+        sendButton.Enabled = !store.IsBusy && store.ValidationMessage is null && store.Descriptor is not null;
         refreshing = false;
         preview.Invalidate();
     }
@@ -1498,11 +1686,11 @@ internal sealed class RemoteEditorWindow : Form
             return;
         }
         RefreshAll();
-        var device = discovery.Endpoints.FirstOrDefault(endpoint => endpoint.Kind == DiscoveredServiceKind.M5Paper);
-        if (device is not null && !store.HasLoadedDeviceProfile && automaticallyLoadedDevice != device.Host)
+        var device = discovery.Endpoints.FirstOrDefault(endpoint =>
+            endpoint.Kind == DiscoveredServiceKind.M5Paper && EndpointAddress(endpoint) == store.DeviceAddress);
+        if (device is not null && !store.HasLoadedDeviceProfile && automaticallyLoadedDevice != EndpointAddress(device))
         {
-            automaticallyLoadedDevice = device.Host;
-            store.DeviceAddress = device.Host;
+            automaticallyLoadedDevice = EndpointAddress(device);
             _ = store.LoadFromDeviceAsync();
         }
     }
@@ -1518,7 +1706,7 @@ internal sealed class RemoteEditorWindow : Form
             switch (endpoint.Kind)
             {
                 case DiscoveredServiceKind.M5Paper:
-                    store.DeviceAddress = endpoint.Host;
+                    store.DeviceAddress = EndpointAddress(endpoint);
                     await store.LoadFromDeviceAsync();
                     break;
                 case DiscoveredServiceKind.Companion:

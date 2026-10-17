@@ -11,6 +11,10 @@ the iPhone app, the Mac companion, and the planned Windows companion.
 - `companion-api.md` separates the desktop companion API from the M5Paper API.
 - `ble-protocol.md` records the currently deployed BLE protocol before adding
   revision-aware synchronization.
+- `device-protocol.md` defines native device descriptions, curated board lookup,
+  and negotiated v7 hardware bindings while preserving v6 compatibility.
+- `device-descriptor-v1.schema.json`, `board-catalog-v1.schema.json`, and
+  `remote-profile-v7.schema.json` define the custom-controller contracts.
 
 The fixture contains only fake hosts, tokens, and credentials. Never place real
 credentials in protocol fixtures.

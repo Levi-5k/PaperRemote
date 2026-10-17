@@ -1,0 +1,565 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://papergif.local/protocol/device-descriptor-v1.schema.json",
+  "title": "PaperRemote Device Descriptor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "protocolVersion",
+    "deviceID",
+    "name",
+    "manufacturer",
+    "boardID",
+    "hardwareRevision",
+    "firmwareVersion",
+    "display",
+    "inputs",
+    "capabilities"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "protocolVersion": {
+      "const": 1
+    },
+    "deviceID": {
+      "$ref": "#/$defs/identity"
+    },
+    "name": {
+      "$ref": "#/$defs/identity"
+    },
+    "manufacturer": {
+      "$ref": "#/$defs/identity"
+    },
+    "boardID": {
+      "$ref": "#/$defs/identity"
+    },
+    "hardwareRevision": {
+      "$ref": "#/$defs/identity"
+    },
+    "firmwareVersion": {
+      "$ref": "#/$defs/identity"
+    },
+    "display": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "width",
+            "height",
+            "touch",
+            "pixelFormat",
+            "rotation"
+          ],
+          "properties": {
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8192
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8192
+            },
+            "touch": {
+              "type": "boolean"
+            },
+            "pixelFormat": {
+              "enum": [
+                "mono1",
+                "gray4",
+                "rgb565"
+              ]
+            },
+            "rotation": {
+              "enum": [
+                0,
+                90,
+                180,
+                270
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "inputs": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/input"
+      }
+    },
+    "layout": {
+      "$ref": "#/$defs/layout"
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileVersions",
+        "media",
+        "firmwareUpdate",
+        "maxProfileBytes",
+        "maxControls",
+        "maxPages"
+      ],
+      "properties": {
+        "profileVersions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "contains": {
+            "enum": [
+              6,
+              7
+            ]
+          }
+        },
+        "media": {
+          "type": "boolean"
+        },
+        "firmwareUpdate": {
+          "type": "boolean"
+        },
+        "maxProfileBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "maxControls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "maxPages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "transports": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "http",
+              "ble"
+            ]
+          }
+        }
+      }
+    },
+    "controls": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/control"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "display": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "properties": {
+              "media": {
+                "const": false
+              }
+            }
+          },
+          "layout": {
+            "not": {
+              "required": [
+                "screen"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": 0
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100000
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100000
+        }
+      }
+    },
+    "placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "x": {
+          "type": "number",
+          "minimum": 0
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100000
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100000
+        }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height",
+        "inputs"
+      ],
+      "properties": {
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100000
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100000
+        },
+        "screen": {
+          "$ref": "#/$defs/rect"
+        },
+        "inputs": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/placement"
+          }
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "events"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "name": {
+          "$ref": "#/$defs/identity"
+        },
+        "kind": {
+          "enum": [
+            "button",
+            "encoder",
+            "dial",
+            "slider"
+          ]
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "press",
+              "hold",
+              "release",
+              "rotate",
+              "change"
+            ]
+          }
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "button"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "events": {
+                "items": {
+                  "enum": [
+                    "press",
+                    "hold",
+                    "release"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "encoder"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "events": {
+                "items": {
+                  "enum": [
+                    "rotate",
+                    "press",
+                    "hold",
+                    "release"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "dial",
+                  "slider"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "minimum",
+              "maximum"
+            ],
+            "properties": {
+              "events": {
+                "items": {
+                  "const": "change"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "name": {
+          "$ref": "#/$defs/identity"
+        },
+        "kind": {
+          "enum": [
+            "toggle",
+            "range",
+            "select",
+            "action"
+          ]
+        },
+        "group": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "step": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "value",
+              "name"
+            ],
+            "properties": {
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "name": {
+                "$ref": "#/$defs/identity"
+              }
+            }
+          }
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "confirm": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "range"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "minimum",
+              "maximum",
+              "step"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "select"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "options"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "action"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "readOnly"
+                  ]
+                },
+                {
+                  "required": [
+                    "options"
+                  ]
+                },
+                {
+                  "required": [
+                    "minimum"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

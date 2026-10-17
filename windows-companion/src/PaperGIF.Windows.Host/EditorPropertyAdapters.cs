@@ -4,6 +4,26 @@ using PaperGIF.Windows.Core.Models;
 
 namespace PaperGIF.Windows.Host;
 
+internal sealed class HardwareBindingProperties(HardwareBinding binding)
+{
+    [Category("Binding"), ReadOnly(true)]
+    public string InputID => binding.InputID;
+    [Category("Binding"), ReadOnly(true)]
+    public string Event => binding.Event;
+    [Category("Binding"), Description("action, relative (rotate), or absolute (change).")]
+    public string Mode { get => binding.Mode; set => binding.Mode = value; }
+    [Category("Binding"), Description("Rotate action: negative (left), positive (right), or empty (both). Leave empty for relative mode.")]
+    public string Direction { get => binding.Direction ?? ""; set => binding.Direction = string.IsNullOrWhiteSpace(value) ? null : value; }
+    [Category("Adjustment")]
+    public double Minimum { get => binding.Minimum; set => binding.Minimum = value; }
+    [Category("Adjustment")]
+    public double Maximum { get => binding.Maximum; set => binding.Maximum = value; }
+    [Category("Adjustment")]
+    public double Step { get => binding.Step; set => binding.Step = value; }
+    [Category("Action"), TypeConverter(typeof(ExpandableObjectConverter))]
+    public RemoteAction Action { get => binding.Action; set => binding.Action = value; }
+}
+
 internal sealed class ControlProperties(RemoteControl control, RemotePage page, RemoteEditorStore store) : ICustomTypeDescriptor
 {
     [Category("Appearance")]
@@ -287,12 +307,12 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
     object? ICustomTypeDescriptor.GetPropertyOwner(PropertyDescriptor? property) => this;
 }
 
-internal sealed class ProfileProperties(RemoteEditorStore store)
+internal sealed class ProfileProperties(RemoteEditorStore store) : ICustomTypeDescriptor
 {
-    [Category("M5Paper Wi-Fi"), DisplayName("Network name")]
+    [Category("Device Wi-Fi"), DisplayName("Network name")]
     public string WifiSSID { get => store.Profile.WifiSSID; set { store.Profile.WifiSSID = value; store.Commit(); } }
 
-    [Category("M5Paper Wi-Fi"), DisplayName("Password"), PasswordPropertyText(true)]
+    [Category("Device Wi-Fi"), DisplayName("Password"), PasswordPropertyText(true)]
     public string WifiPassword { get => store.Profile.WifiPassword; set { store.Profile.WifiPassword = value; store.Commit(); } }
 
     [Category("Display"), DisplayName("Screensaver delay (seconds)")]
@@ -337,6 +357,27 @@ internal sealed class ProfileProperties(RemoteEditorStore store)
         get => store.Profile.TimeZoneOffsetMinutes;
         set { store.Profile.TimeZoneOffsetMinutes = Math.Clamp(value, -720, 840); store.Commit(); }
     }
+
+    AttributeCollection ICustomTypeDescriptor.GetAttributes() => TypeDescriptor.GetAttributes(this, true);
+    string? ICustomTypeDescriptor.GetClassName() => TypeDescriptor.GetClassName(this, true);
+    string? ICustomTypeDescriptor.GetComponentName() => TypeDescriptor.GetComponentName(this, true);
+    TypeConverter ICustomTypeDescriptor.GetConverter() => TypeDescriptor.GetConverter(this, true);
+    EventDescriptor? ICustomTypeDescriptor.GetDefaultEvent() => TypeDescriptor.GetDefaultEvent(this, true);
+    PropertyDescriptor? ICustomTypeDescriptor.GetDefaultProperty() => TypeDescriptor.GetDefaultProperty(this, true);
+    object? ICustomTypeDescriptor.GetEditor(Type editorBaseType) => TypeDescriptor.GetEditor(this, editorBaseType, true);
+    EventDescriptorCollection ICustomTypeDescriptor.GetEvents() => TypeDescriptor.GetEvents(this, true);
+    EventDescriptorCollection ICustomTypeDescriptor.GetEvents(Attribute[]? attributes) => TypeDescriptor.GetEvents(this, attributes, true);
+    PropertyDescriptorCollection ICustomTypeDescriptor.GetProperties() => ((ICustomTypeDescriptor)this).GetProperties(null);
+    PropertyDescriptorCollection ICustomTypeDescriptor.GetProperties(Attribute[]? attributes) =>
+        new(TypeDescriptor.GetProperties(this, attributes, true).Cast<PropertyDescriptor>().Where(property =>
+            property.Name switch
+            {
+                nameof(ScreensaverDelaySeconds) => store.Descriptor is { Display: not null, Capabilities.Media: true },
+                nameof(ButtonQualityRefreshInterval) or nameof(ElementRefreshDelayMilliseconds) or nameof(MaxButtonTextSize) =>
+                    store.Descriptor?.Display is not null,
+                _ => true,
+            }).ToArray());
+    object? ICustomTypeDescriptor.GetPropertyOwner(PropertyDescriptor? property) => this;
 }
 
 // Lists the icons the M5Paper can draw while still accepting any typed name.
@@ -374,10 +415,19 @@ internal class DisplayNameEnumConverter<T>(IReadOnlyDictionary<T, string> names)
 
 internal sealed class RemoteActionTypeNameConverter() : DisplayNameEnumConverter<RemoteActionType>(Names)
 {
+    // Apple Home power relays through the iPhone; Matter devices run on the Mac's Matter module instead.
+    public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context)
+    {
+        var current = context?.Instance is { } instance ? context.PropertyDescriptor?.GetValue(instance) : null;
+        return new(Enum.GetValues<RemoteActionType>()
+            .Where(type => type != RemoteActionType.IPhoneHomePower || Equals(current, type))
+            .ToArray());
+    }
+
     internal static readonly Dictionary<RemoteActionType, string> Names = new()
     {
         [RemoteActionType.IPhoneMedia] = "iPhone media",
-        [RemoteActionType.IPhoneHomePower] = "Apple Home power",
+        [RemoteActionType.IPhoneHomePower] = "Apple Home power (through iPhone)",
         [RemoteActionType.ComputerMedia] = "Media",
         [RemoteActionType.ComputerKey] = "Keyboard shortcut",
         [RemoteActionType.ComputerOpen] = "Open app or URL",

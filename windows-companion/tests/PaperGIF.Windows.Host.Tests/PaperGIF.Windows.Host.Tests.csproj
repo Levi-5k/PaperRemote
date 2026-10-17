@@ -32,5 +32,8 @@
     <Content Include="../../../modules/wled-scenes.json" Link="wled-scenes.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="../../../protocol/fixtures/device-descriptor-v1-controls.json" Link="Fixtures/device-descriptor-v1-controls.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

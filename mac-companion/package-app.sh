@@ -29,6 +29,7 @@ install -m 644 "$root"/MatterPAA/*.der "$resources/MatterPAA/"
 rm -rf "$app/PaperGIFMac_PaperGIFMac.bundle"
 rm -rf "$resources/PaperGIFMac_PaperGIFMac.bundle"
 ditto "$bin_path/PaperGIFMac_PaperGIFMac.bundle" "$resources/PaperGIFMac_PaperGIFMac.bundle"
+ditto "$bin_path/PaperDeviceKit_PaperDeviceKit.bundle" "$resources/PaperDeviceKit_PaperDeviceKit.bundle"
 
 identity="${CODE_SIGN_IDENTITY:-}"
 if [[ -z "$identity" ]]; then

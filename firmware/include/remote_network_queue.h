@@ -55,6 +55,7 @@ public:
     }
 
     void finish() { active_ = false; }
+    void clearPending() { head_ = 0; count_ = 0; }
     bool hasWork() const { return active_ || count_ > 0; }
 
 private:

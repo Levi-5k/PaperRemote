@@ -3,24 +3,50 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using PaperGIF.Windows.Core.Models;
 using PaperGIF.Windows.Core.Serialization;
+using PaperGIF.Windows.Core;
+using PaperGIF.Windows.Core.Ble;
 
 namespace PaperGIF.Windows.Host;
 
 internal sealed class RemoteEditorStore : IDisposable
 {
     private readonly CompanionConfiguration configuration;
-    private readonly HttpClient httpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
+    private readonly HttpClient httpClient = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(15) };
+    private readonly HttpClient catalogClient = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(10) };
+    // DeviceControlClient applies its own per-request timeout.
+    private readonly HttpClient controlsClient = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
+    private readonly BleSessionPool? blePool;
+    private readonly Dictionary<string, SavedDevice> devices = new(StringComparer.Ordinal);
+    private CancellationTokenSource sessionCancellation = new();
+    private int sessionGeneration;
+    private string deviceAddress = "192.168.4.1";
+    private string? activeDeviceId;
+    private IDeviceAdapter? adapter;
+    private DeviceLayout? manualLayout;
     private CancellationTokenSource? liveSyncCancellation;
+    // What the M5Paper is known to have installed; edits are diffed against it.
+    private JsonObject? deviceProfileJson;
     private bool isApplyingDeviceProfile;
 
-    public RemoteEditorStore(CompanionConfiguration configuration)
+    public RemoteEditorStore(CompanionConfiguration configuration, BleSessionPool? blePool = null)
     {
         this.configuration = configuration;
+        this.blePool = blePool;
         var document = LoadDocument();
         Profile = document?.Profile ?? CreateStarterProfile();
-        DeviceAddress = document?.DeviceAddress ?? "192.168.4.1";
+        deviceAddress = document?.DeviceAddress ?? "192.168.4.1";
+        foreach (var device in document?.Devices ?? [])
+            devices[device.DeviceID] = device;
+        activeDeviceId = document?.ActiveDeviceID;
+        if (activeDeviceId is { } id && devices.TryGetValue(id, out var saved))
+        {
+            Profile = saved.Profile;
+            manualLayout = saved.LayoutOverride;
+            RestoreOfflineDescriptor(saved);
+        }
         EnsureLocalComputer();
         SelectedPageId = Profile.Pages.FirstOrDefault()?.Id;
     }
@@ -29,7 +55,64 @@ internal sealed class RemoteEditorStore : IDisposable
     public event EventHandler? StatusChanged;
 
     public RemoteProfile Profile { get; private set; }
-    public string DeviceAddress { get; set; }
+    public string DeviceAddress
+    {
+        get => deviceAddress;
+        set
+        {
+            if (deviceAddress == value) return;
+            Save();
+            sessionCancellation.Cancel();
+            sessionCancellation.Dispose();
+            sessionCancellation = new();
+            sessionGeneration++;
+            liveSyncCancellation?.Cancel();
+            deviceAddress = value;
+            adapter = null;
+            Descriptor = null;
+            Layout = null;
+            manualLayout = null;
+            deviceProfileJson = null;
+            HasLoadedDeviceProfile = false;
+            IsBusy = false;
+            var saved = devices.Values.Where(device => device.Address == value)
+                .OrderBy(device => device.Descriptor is null ? 1 : 0).FirstOrDefault();
+            activeDeviceId = saved?.DeviceID;
+            Profile = saved?.Profile ?? CreateEmptyProfile();
+            manualLayout = saved?.LayoutOverride;
+            if (saved is not null) RestoreOfflineDescriptor(saved);
+            SelectedPageId = Profile.Pages.FirstOrDefault()?.Id;
+            SelectedControlId = null;
+            SelectedInputID = null;
+            EnsureLocalComputer();
+            Save();
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
+    }
+    public DeviceDescriptor? Descriptor { get; private set; }
+    public DeviceLayout? Layout { get; private set; }
+    public string CatalogStatus { get; private set; } = "Connect to identify device";
+    public bool CanEditTouchscreen => Descriptor?.Display?.Touch == true;
+    public bool CanUploadMedia => Descriptor is { Display: { Width: 540, Height: 960, PixelFormat: "gray4" }, Capabilities.Media: true };
+    public bool CanInstallM5Firmware => adapter is not null && FirmwareCompatibility.SupportsM5PaperUpdate(Descriptor);
+    public string? SelectedInputID { get; set; }
+    public IReadOnlyList<SavedDevice> SavedDevices => devices.Values.ToArray();
+    public CancellationToken DeviceSessionCancellation => sessionCancellation.Token;
+
+    private void RestoreOfflineDescriptor(SavedDevice saved)
+    {
+        try
+        {
+            saved.Descriptor?.Validate();
+            Descriptor = saved.Descriptor;
+            if (Descriptor is not null)
+            {
+                ApplyLayout(Descriptor.Layout);
+                CatalogStatus = "Saved device layout (offline; reconnect to verify capabilities)";
+            }
+        }
+        catch (JsonException) { Descriptor = null; Layout = null; }
+    }
     public Guid? SelectedPageId { get; set; }
     public Guid? SelectedControlId { get; set; }
     public string Status { get; private set; } = "Ready";
@@ -65,16 +148,140 @@ internal sealed class RemoteEditorStore : IDisposable
         Commit();
     }
 
-    public string? ValidationMessage => ValidateProfile(Profile);
-
-    internal static string? ValidateProfile(RemoteProfile profile)
+    public string? ValidationMessage
     {
-        if (profile.Pages.Count is < 1 or > 8)
+        get
         {
-            return "A remote needs between 1 and 8 pages.";
+            if (ValidateProfile(Profile, Descriptor) is { } error) return error;
+            if (Descriptor is { } descriptor)
+            {
+                try { _ = RemoteProfileJson.SerializeForDevice(Profile, descriptor); }
+                catch (InvalidOperationException exception) { return exception.Message; }
+            }
+            return null;
+        }
+    }
+
+    public async Task IdentifyDeviceAsync()
+    {
+        var generation = sessionGeneration;
+        var cancellationToken = sessionCancellation.Token;
+        var identified = await DeviceAdapters.IdentifyAsync(httpClient, DeviceRemoteUri(), configuration.Token, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (generation != sessionGeneration) return;
+        if (activeDeviceId != identified.Descriptor.DeviceID)
+        {
+            // Only the verified legacy adapter inherits the old single-device document.
+            if (devices.TryGetValue(identified.Descriptor.DeviceID, out var saved))
+            {
+                Profile = saved.Profile;
+                manualLayout = saved.LayoutOverride;
+            }
+            else if (!identified.IsLegacy)
+            {
+                Profile = CreateEmptyProfile();
+                manualLayout = null;
+            }
+            activeDeviceId = identified.Descriptor.DeviceID;
+            EnsureLocalComputer();
+            SelectedPageId = Profile.Pages.FirstOrDefault()?.Id;
+            SelectedControlId = null;
+        }
+        var unchanged = adapter is not null && Descriptor is not null &&
+            JsonSerializer.Serialize(Descriptor, DeviceDescriptor.JsonOptions) ==
+            JsonSerializer.Serialize(identified.Descriptor, DeviceDescriptor.JsonOptions);
+        adapter = identified;
+        if (unchanged)
+        {
+            Save();
+            return;
+        }
+        Descriptor = identified.Descriptor;
+        var catalog = new BoardCatalog(catalogClient, Path.Combine(Path.GetDirectoryName(DocumentPath)!, "boards"));
+        var cached = catalog.Cached(Descriptor);
+        ApplyLayout(cached.Layout);
+        CatalogStatus = cached.Status;
+        Save();
+        Changed?.Invoke(this, EventArgs.Empty);
+        _ = RefreshBoardAsync(catalog, Descriptor, generation, cancellationToken);
+    }
+
+    private async Task RefreshBoardAsync(BoardCatalog catalog, DeviceDescriptor descriptor, int generation, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var resolved = await catalog.ResolveAsync(descriptor, cancellationToken);
+            if (generation != sessionGeneration || cancellationToken.IsCancellationRequested ||
+                !ReferenceEquals(Descriptor, descriptor)) return;
+            ApplyLayout(resolved.Layout);
+            CatalogStatus = resolved.Status;
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    public async Task RefreshBoardCatalogAsync()
+    {
+        if (Descriptor is not { } descriptor) return;
+        var catalog = new BoardCatalog(catalogClient, Path.Combine(Path.GetDirectoryName(DocumentPath)!, "boards"));
+        await RefreshBoardAsync(catalog, descriptor, sessionGeneration, sessionCancellation.Token);
+    }
+
+    private void ApplyLayout(DeviceLayout layout)
+    {
+        if (manualLayout is not null)
+        {
+            try { Descriptor!.ValidateLayout(manualLayout); layout = manualLayout; }
+            catch (JsonException) { manualLayout = null; }
+        }
+        Layout = layout;
+    }
+
+    public void ImportLayout(string json)
+    {
+        if (Descriptor is null) throw new InvalidOperationException("Identify a device before importing a layout.");
+        if (Encoding.UTF8.GetByteCount(json) > 65_536) throw new JsonException("Layout exceeds 64 KiB.");
+        var layout = JsonSerializer.Deserialize<DeviceLayout>(json, DeviceDescriptor.JsonOptions)
+            ?? throw new JsonException("Empty layout.");
+        Descriptor.ValidateLayout(layout);
+        manualLayout = layout;
+        Layout = layout;
+        Commit();
+    }
+
+    public void UseAutomaticLayout()
+    {
+        manualLayout = null;
+        if (Descriptor is { } descriptor) Layout = descriptor.Layout;
+        Commit();
+        _ = RefreshBoardCatalogAsync();
+    }
+
+    public HardwareBinding BindingFor(string inputID, string eventName, string? direction = null)
+    {
+        if (Descriptor is null || !Descriptor.Inputs.Any(input => input.Id == inputID && input.Events.Contains(eventName)))
+            throw new InvalidOperationException("Unknown physical input/event.");
+        Profile.HardwareBindings ??= [];
+        var binding = Profile.HardwareBindings.FirstOrDefault(binding => binding.InputID == inputID && binding.Event == eventName && binding.Direction == direction);
+        if (binding is not null) return binding;
+        binding = new() { InputID = inputID, Event = eventName, Direction = direction,
+            Mode = direction is not null ? "action" : eventName == "rotate" ? "relative" : eventName == "change" ? "absolute" : "action",
+            Action = new() { Type = direction is null && eventName is "rotate" or "change" ? RemoteActionType.WledBrightness : RemoteActionType.ComputerKey,
+                Text = direction is null && eventName is "rotate" or "change" ? "" : "space", ComputerID = LocalComputerId } };
+        Profile.HardwareBindings.Add(binding);
+        Profile.Version = 7;
+        Commit();
+        return binding;
+    }
+
+    internal static string? ValidateProfile(RemoteProfile profile, DeviceDescriptor? descriptor = null)
+    {
+        if (profile.Pages.Count < 1 || profile.Pages.Count > (descriptor?.Capabilities.MaxPages ?? 8))
+        {
+            return $"A remote needs between 1 and {descriptor?.Capabilities.MaxPages ?? 8} pages.";
         }
         if (profile.Pages.Any(page =>
-            page.Controls.Count > RemoteProfile.MaximumControlsPerPage ||
+            page.Controls.Count > (descriptor?.Capabilities.MaxControls ?? RemoteProfile.MaximumControlsPerPage) ||
             LayoutUnits(page) > page.GridColumns * page.GridRows))
         {
             return "A page has more controls than fit on the display.";
@@ -88,7 +295,7 @@ internal sealed class RemoteEditorStore : IDisposable
 
     public void AddPage()
     {
-        if (Profile.Pages.Count >= 8)
+        if (Profile.Pages.Count >= (Descriptor?.Capabilities.MaxPages ?? 8))
         {
             return;
         }
@@ -101,7 +308,7 @@ internal sealed class RemoteEditorStore : IDisposable
 
     public void AddPage(RemotePage page)
     {
-        if (Profile.Pages.Count >= 8)
+        if (Profile.Pages.Count >= (Descriptor?.Capabilities.MaxPages ?? 8))
         {
             return;
         }
@@ -534,28 +741,23 @@ internal sealed class RemoteEditorStore : IDisposable
 
     public async Task LoadFromDeviceAsync()
     {
-        await RunDeviceOperationAsync("Loading from M5Paper...", async requestUri =>
+        await RunDeviceOperationAsync("Identifying and loading device...", async requestUri =>
         {
-            using var request = AuthorizedRequest(HttpMethod.Get, requestUri);
-            using var response = await httpClient.SendAsync(request);
-            var json = await response.Content.ReadAsStringAsync();
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new InvalidOperationException(DeviceFailureMessage(response.StatusCode));
-            }
+            var currentAdapter = adapter ?? throw new InvalidOperationException("Unsupported device adapter.");
+            var cancellationToken = sessionCancellation.Token;
+            var json = await currentAdapter.ReadProfileAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             var loadedProfile = RemoteProfileJson.Deserialize(json);
+            _ = RemoteProfileJson.SerializeForDevice(loadedProfile, currentAdapter.Descriptor);
             if (Profile.UpdatedAtMilliseconds > loadedProfile.UpdatedAtMilliseconds)
             {
-                using var newerRequest = AuthorizedRequest(HttpMethod.Post, requestUri);
-                newerRequest.Content = new StringContent(
-                    RemoteProfileJson.Serialize(Profile),
-                    Encoding.UTF8,
-                    "application/json");
-                using var newerResponse = await httpClient.SendAsync(newerRequest);
-                newerResponse.EnsureSuccessStatusCode();
+                await currentAdapter.WriteProfileAsync(Profile, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                deviceProfileJson = JsonNode.Parse(RemoteProfileJson.SerializeForDevice(Profile, currentAdapter.Descriptor)) as JsonObject;
                 HasLoadedDeviceProfile = true;
-                return "Local settings were newer and were installed on M5Paper";
+                return "Local settings were newer and were installed on device";
             }
+            deviceProfileJson = JsonNode.Parse(json) as JsonObject;
             if (Profile.UpdatedAtMilliseconds == loadedProfile.UpdatedAtMilliseconds &&
                 Profile.UpdatedAtMilliseconds > 0)
             {
@@ -576,7 +778,7 @@ internal sealed class RemoteEditorStore : IDisposable
             {
                 isApplyingDeviceProfile = false;
             }
-            return "Loaded from M5Paper";
+            return "Loaded from device";
         });
     }
 
@@ -592,21 +794,104 @@ internal sealed class RemoteEditorStore : IDisposable
             SetStatus(validation);
             return false;
         }
-        return await RunDeviceOperationAsync("Sending to M5Paper...", async requestUri =>
+        return await RunDeviceOperationAsync("Sending to device...", async requestUri =>
         {
-            using var request = AuthorizedRequest(HttpMethod.Post, requestUri);
-            request.Content = new StringContent(
-                RemoteProfileJson.Serialize(Profile),
-                Encoding.UTF8,
-                "application/json");
-            using var response = await httpClient.SendAsync(request);
-            if (!response.IsSuccessStatusCode)
+            var currentAdapter = adapter ?? throw new InvalidOperationException("Unsupported device adapter.");
+            var cancellationToken = sessionCancellation.Token;
+            var profileJson = RemoteProfileJson.SerializeForDevice(Profile, currentAdapter.Descriptor);
+            var current = JsonNode.Parse(profileJson) as JsonObject;
+            if (currentAdapter.IsLegacy && deviceProfileJson is { } installed && current is not null &&
+                ChangedControls(installed, current) is { } changes)
             {
-                throw new InvalidOperationException(DeviceFailureMessage(response.StatusCode));
+                if (changes.Count == 0)
+                {
+                    return "M5Paper is up to date";
+                }
+                var controlsUri = new UriBuilder(requestUri) { Path = "/remote/controls" }.Uri;
+                using var controlsRequest = AuthorizedRequest(HttpMethod.Post, controlsUri);
+                controlsRequest.Content = new StringContent(
+                    ControlUpdatePayload(current, changes), Encoding.UTF8, "application/json");
+                using var controlsResponse = await httpClient.SendAsync(controlsRequest, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (controlsResponse.IsSuccessStatusCode)
+                {
+                    await DeviceAdapters.RequireAcknowledgementAsync(controlsResponse, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    deviceProfileJson = current;
+                    Save();
+                    return "Remote updated on M5Paper";
+                }
+                // Older firmware or a profile changed elsewhere: send everything instead.
+                deviceProfileJson = null;
             }
+            await currentAdapter.WriteProfileAsync(Profile, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            deviceProfileJson = current;
             Save();
-            return "Remote installed on M5Paper";
+            return "Remote installed on device";
         });
+    }
+
+    // Controls whose settings differ, or null when anything else changed and the whole profile must be sent.
+    internal static List<(string PageId, JsonNode Control)>? ChangedControls(JsonObject installed, JsonObject current)
+    {
+        var before = (JsonObject)installed.DeepClone();
+        var after = (JsonObject)current.DeepClone();
+        before.Remove("updatedAtMilliseconds");
+        after.Remove("updatedAtMilliseconds");
+        if (before["pages"] is not JsonArray beforePages || after["pages"] is not JsonArray afterPages ||
+            beforePages.Count != afterPages.Count)
+        {
+            return null;
+        }
+        var changes = new List<(string PageId, JsonNode Control)>();
+        for (var pageIndex = 0; pageIndex < afterPages.Count; pageIndex++)
+        {
+            if (beforePages[pageIndex] is not JsonObject beforePage || afterPages[pageIndex] is not JsonObject afterPage ||
+                beforePage["controls"] is not JsonArray beforeControls ||
+                afterPage["controls"] is not JsonArray afterControls ||
+                beforeControls.Count != afterControls.Count)
+            {
+                return null;
+            }
+            for (var controlIndex = 0; controlIndex < afterControls.Count; controlIndex++)
+            {
+                var beforeControl = beforeControls[controlIndex];
+                var afterControl = afterControls[controlIndex];
+                if (beforeControl?["id"]?.ToString() != afterControl?["id"]?.ToString())
+                {
+                    return null;
+                }
+                if (!JsonNode.DeepEquals(beforeControl, afterControl))
+                {
+                    changes.Add((afterPage["id"]?.ToString() ?? string.Empty, afterControl!.DeepClone()));
+                }
+            }
+            beforePage.Remove("controls");
+            afterPage.Remove("controls");
+        }
+        return JsonNode.DeepEquals(before, after) ? changes : null;
+    }
+
+    // Body for the M5Paper's POST /remote/controls.
+    internal static string ControlUpdatePayload(JsonObject profile, IEnumerable<(string PageId, JsonNode Control)> changes)
+    {
+        var body = new JsonObject
+        {
+            ["updatedAtMilliseconds"] = profile["updatedAtMilliseconds"]?.DeepClone(),
+            ["controls"] = new JsonArray(changes
+                .Select(change => (JsonNode)new JsonObject
+                {
+                    ["pageID"] = change.PageId,
+                    ["control"] = change.Control.DeepClone(),
+                })
+                .ToArray()),
+        };
+        if (profile["buttonBackground"] is { } background)
+        {
+            body["buttonBackground"] = background.DeepClone();
+        }
+        return body.ToJsonString();
     }
 
     internal static string DeviceFailureMessage(HttpStatusCode status) => status == HttpStatusCode.Unauthorized
@@ -687,7 +972,7 @@ internal sealed class RemoteEditorStore : IDisposable
             SetStatus($"Found {WifiNetworks.Count} Wi-Fi networks");
         }
         catch (Exception exception) when (
-            exception is HttpRequestException or TaskCanceledException or InvalidOperationException or JsonException)
+            exception is HttpRequestException or OperationCanceledException or InvalidOperationException or JsonException or DecoderFallbackException)
         {
             SetStatus($"Wi-Fi scan failed: {exception.Message}");
         }
@@ -715,6 +1000,10 @@ internal sealed class RemoteEditorStore : IDisposable
 
     public void Dispose()
     {
+        sessionCancellation.Cancel();
+        sessionCancellation.Dispose();
+        catalogClient.Dispose();
+        controlsClient.Dispose();
         liveSyncCancellation?.Cancel();
         liveSyncCancellation?.Dispose();
         httpClient.Dispose();
@@ -726,14 +1015,25 @@ internal sealed class RemoteEditorStore : IDisposable
         liveSyncCancellation?.Dispose();
         liveSyncCancellation = new CancellationTokenSource();
         var cancellationToken = liveSyncCancellation.Token;
-        _ = Task.Run(async () =>
+        var generation = sessionGeneration;
+        // Edits to existing controls go to the M5Paper at once; other changes wait for typing to settle.
+        var immediate = deviceProfileJson is { } installed &&
+            JsonNode.Parse(RemoteProfileJson.Serialize(Profile)) is JsonObject current &&
+            ChangedControls(installed, current) is not null;
+        _ = SyncAsync();
+        async Task SyncAsync()
         {
             try
             {
-                await Task.Delay(650, cancellationToken);
-                if (cancellationToken.IsCancellationRequested || ValidationMessage is not null)
+                await Task.Delay(immediate ? 0 : 650, cancellationToken);
+                if (generation != sessionGeneration || cancellationToken.IsCancellationRequested || ValidationMessage is not null)
                 {
                     return;
+                }
+                // Let an in-flight update finish instead of falling back to the slower retry delays.
+                for (var waited = 0; IsBusy && waited < 5000; waited += 25)
+                {
+                    await Task.Delay(25, cancellationToken);
                 }
                 foreach (var retryDelay in new[] { TimeSpan.Zero, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3) })
                 {
@@ -741,6 +1041,8 @@ internal sealed class RemoteEditorStore : IDisposable
                     {
                         await Task.Delay(retryDelay, cancellationToken);
                     }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (generation != sessionGeneration) return;
                     if (await SendToDeviceAttemptAsync())
                     {
                         return;
@@ -750,7 +1052,7 @@ internal sealed class RemoteEditorStore : IDisposable
             catch (OperationCanceledException)
             {
             }
-        }, cancellationToken);
+        }
     }
 
     private async Task<bool> RunDeviceOperationAsync(
@@ -762,23 +1064,57 @@ internal sealed class RemoteEditorStore : IDisposable
             return false;
         }
         IsBusy = true;
+        var generation = sessionGeneration;
+        var cancellationToken = sessionCancellation.Token;
         SetStatus(pendingStatus);
         try
         {
+            await IdentifyDeviceAsync();
+            cancellationToken.ThrowIfCancellationRequested();
             SetStatus(await operation(DeviceRemoteUri()));
             return true;
         }
         catch (Exception exception) when (
-            exception is HttpRequestException or TaskCanceledException or InvalidOperationException or JsonException)
+            exception is HttpRequestException or OperationCanceledException or InvalidOperationException or JsonException or DecoderFallbackException)
         {
-            SetStatus($"Could not reach M5Paper: {exception.Message}");
+            if (generation == sessionGeneration)
+                SetStatus(exception is HttpRequestException { StatusCode: HttpStatusCode.Unauthorized }
+                    ? DeviceFailureMessage(HttpStatusCode.Unauthorized)
+                    : $"Device unavailable or unsupported: {exception.Message}");
             return false;
         }
         finally
         {
-            IsBusy = false;
-            StatusChanged?.Invoke(this, EventArgs.Empty);
+            if (generation == sessionGeneration)
+            {
+                IsBusy = false;
+                StatusChanged?.Invoke(this, EventArgs.Empty);
+            }
         }
+    }
+
+    /// <summary>The selected device's HTTP base address, or null when the address is invalid.</summary>
+    public Uri? DeviceBaseUri()
+    {
+        try { return new UriBuilder(DeviceRemoteUri()) { Path = "/" }.Uri; }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    /// <summary>
+    /// Controls for the identified device: HTTP first, then BLE when the descriptor lists <c>ble</c> and HTTP fails
+    /// with a transport error. Null when no descriptor declares controls.
+    /// </summary>
+    public DeviceControlSession? CreateDeviceControlSession()
+    {
+        if (Descriptor is not { DeviceControls.Count: > 0 } descriptor) return null;
+        var http = DeviceBaseUri() is { } baseUri && descriptor.SupportsTransport("http")
+            ? new DeviceControlClient(controlsClient, baseUri, configuration.Token)
+            : null;
+        var ble = blePool is not null && descriptor.SupportsTransport("ble")
+            ? new BleDeviceControlTransport(blePool, descriptor.DeviceID, descriptor.Name)
+            : null;
+        if (http is null && ble is null) return null;
+        return new DeviceControlSession(descriptor, http, ble);
     }
 
     private HttpRequestMessage AuthorizedRequest(HttpMethod method, Uri uri)
@@ -795,7 +1131,8 @@ internal sealed class RemoteEditorStore : IDisposable
         {
             address = $"http://{address}";
         }
-        if (!Uri.TryCreate(address, UriKind.Absolute, out var baseUri) || baseUri.Scheme != "http")
+        if (!Uri.TryCreate(address, UriKind.Absolute, out var baseUri) || baseUri.Scheme is not ("http" or "https") ||
+            !string.IsNullOrEmpty(baseUri.UserInfo))
         {
             throw new InvalidOperationException("The M5Paper address is invalid.");
         }
@@ -842,7 +1179,9 @@ internal sealed class RemoteEditorStore : IDisposable
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(DocumentPath)!);
-            var document = new RemoteEditorDocument(Profile, DeviceAddress);
+            var id = activeDeviceId ?? $"unidentified:{DeviceAddress}";
+            devices[id] = new SavedDevice(id, DeviceAddress, Profile, Descriptor, manualLayout);
+            var document = new RemoteEditorDocument(Profile, DeviceAddress, devices.Values.ToList(), activeDeviceId);
             var json = JsonSerializer.Serialize(document, RemoteProfileJson.Options);
             var temporaryPath = DocumentPath + ".tmp";
             File.WriteAllText(temporaryPath, json);
@@ -1023,7 +1362,11 @@ internal sealed class RemoteEditorStore : IDisposable
         "paperGIF",
         "remote-editor.json");
 
-    private sealed record RemoteEditorDocument(RemoteProfile Profile, string DeviceAddress);
+    private static RemoteProfile CreateEmptyProfile() => new() { Pages = [new() { Name = "Main" }] };
+    internal sealed record SavedDevice(string DeviceID, string Address, RemoteProfile Profile,
+        DeviceDescriptor? Descriptor = null, DeviceLayout? LayoutOverride = null);
+    private sealed record RemoteEditorDocument(RemoteProfile Profile, string DeviceAddress,
+        List<SavedDevice>? Devices = null, string? ActiveDeviceID = null);
     private sealed record PairingRequest(string DeviceName);
     private sealed record PairingResponse(string Token);
     private sealed record DeviceWifiScanResponse(List<DeviceWifiNetwork> Networks);

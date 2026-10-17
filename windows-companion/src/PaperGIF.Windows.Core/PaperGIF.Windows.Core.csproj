@@ -2,4 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net11.0</TargetFramework>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../../boards/*.json" LogicalName="Boards/%(Filename)%(Extension)" />
+  </ItemGroup>
 </Project>

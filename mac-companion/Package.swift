@@ -16,12 +16,14 @@ let package = Package(
         .executable(name: "PaperGIFModule-matter", targets: ["PaperGIFMatterModule"]),
     ],
     dependencies: [
+        .package(path: "../device-kit"),
         .package(url: "https://github.com/socketio/socket.io-client-swift.git", from: "16.1.1"),
     ],
     targets: [
         .executableTarget(
             name: "PaperGIFMac",
             dependencies: [
+                .product(name: "PaperDeviceKit", package: "device-kit"),
                 .product(name: "SocketIO", package: "socket.io-client-swift"),
             ],
             exclude: ["Info.plist"],

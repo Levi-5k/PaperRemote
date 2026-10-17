@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "boards": [
+    {
+      "boardID": "m5stack.m5paper",
+      "hardwareRevisions": ["1.0"],
+      "version": 1,
+      "path": "m5paper-v1.json",
+      "sha256": "effcec3c0b8ff93d85aabcf9a3640470930aa1764882e803e061dd9278122ac3"
+    },
+    {
+      "boardID": "paperremote.esp32-screenless-reference",
+      "hardwareRevisions": ["1"],
+      "version": 1,
+      "path": "esp32-screenless-reference.json",
+      "sha256": "7425c1d80e15219a14e1ffdf7dfdc13ab4caabe781d4595d566aaa3416ac0039"
+    }
+  ]
+}

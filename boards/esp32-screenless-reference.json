@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "boardID": "paperremote.esp32-screenless-reference",
+  "hardwareRevisions": ["1"],
+  "version": 1,
+  "name": "ESP32 screenless reference (not a commercial board)",
+  "layout": {
+    "width": 320,
+    "height": 160,
+    "inputs": [
+      {"id": "button-1", "x": 16, "y": 24, "width": 64, "height": 64},
+      {"id": "encoder-1", "x": 112, "y": 24, "width": 64, "height": 64},
+      {"id": "slider-1", "x": 208, "y": 24, "width": 64, "height": 112}
+    ]
+  }
+}

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import PaperDeviceKit
 
 @MainActor
 final class RemoteEditorWindowController: NSWindowController {
@@ -13,7 +14,7 @@ final class RemoteEditorWindowController: NSWindowController {
     ) {
         self.store = store
         let content = RemoteEditorView(
-            store: store, moduleCatalog: moduleCatalog, matterDevices: matterDevices, updates: updates
+            store: store, devices: store.devices, moduleCatalog: moduleCatalog, matterDevices: matterDevices, updates: updates
         )
         let window = NSWindow(contentViewController: NSHostingController(rootView: content))
         window.title = "paperGIF Controls"
@@ -35,6 +36,7 @@ final class RemoteEditorWindowController: NSWindowController {
 
 private struct RemoteEditorView: View {
     @ObservedObject var store: RemoteEditorStore
+    @ObservedObject var devices: DeviceSession
     @ObservedObject var moduleCatalog: ModuleCatalog
     @ObservedObject var matterDevices: MatterDeviceManager
     @ObservedObject var updates: UpdateService
@@ -49,6 +51,7 @@ private struct RemoteEditorView: View {
         case control = "Control"
         case modules = "Modules"
         case connections = "Connections"
+        case device = "Device"
 
         var id: Self { self }
     }
@@ -82,6 +85,10 @@ private struct RemoteEditorView: View {
             store.saveImmediately()
         }
         .onChange(of: deviceDiscovery.devices) { devices in
+            if self.devices.descriptor != nil &&
+                !devices.contains(where: { $0.address == store.deviceAddress }) {
+                return
+            }
             guard let device = devices.first(where: { $0.address == store.deviceAddress })
                 ?? devices.first,
                   automaticallyLoadedDeviceAddress != device.address else { return }
@@ -107,15 +114,15 @@ private struct RemoteEditorView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("paperGIF Controls")
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
-                Text("Design and install your M5Paper remote")
+                Text(devices.descriptor?.name ?? "Connect a compatible remote")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
             sendStatus
-            if deviceDiscovery.devices.isEmpty {
+            if deviceDiscovery.devices.isEmpty && devices.descriptor == nil {
                 Label(
-                    deviceDiscovery.isScanning ? "Scanning for M5Paper" : "No M5Paper found",
+                    deviceDiscovery.isScanning ? "Scanning for devices" : "No device found",
                     systemImage: deviceDiscovery.isScanning ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle"
                 )
                     .foregroundStyle(.secondary)
@@ -123,14 +130,19 @@ private struct RemoteEditorView: View {
                     .frame(width: 180)
                     .help(deviceDiscovery.scanMessage ?? "Searching Bonjour and the local network")
             } else {
-                Picker("M5Paper", selection: deviceSelection) {
+                Picker("Device", selection: deviceSelection) {
                     ForEach(deviceDiscovery.devices) { device in
                         Text(device.name).tag(device.address)
+                    }
+                    if let descriptor = devices.descriptor,
+                       devices.address == store.deviceAddress,
+                       !deviceDiscovery.devices.contains(where: { $0.address == store.deviceAddress }) {
+                        Text(descriptor.name).tag(store.deviceAddress)
                     }
                 }
                 .labelsHidden()
                 .frame(width: 180)
-                .help("Discovered M5Paper device")
+                .help("Discovered controller device")
             }
             Button {
                 deviceDiscovery.scan(preferredAddress: store.deviceAddress)
@@ -142,22 +154,22 @@ private struct RemoteEditorView: View {
                 }
             }
             .frame(width: 28)
-            .help("Scan the network for M5Paper devices")
+            .help("Scan the network for controller devices")
             .disabled(deviceDiscovery.isScanning)
             Button {
                 Task { await store.loadFromDevice() }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
-            .help("Reload layouts and settings from M5Paper")
-            .disabled(selectedDevice == nil || store.sendState == .loading || store.sendState == .sending)
+            .help("Reload layouts and settings from the device")
+            .disabled(store.deviceAddress.isEmpty || store.sendState == .loading || store.sendState == .sending)
             Button {
                 Task { await store.send() }
             } label: {
-                Label("Send to M5Paper", systemImage: "paperplane.fill")
+                Label("Send to Device", systemImage: "paperplane.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(selectedDevice == nil || store.validationMessage != nil || store.sendState == .sending || store.sendState == .loading)
+            .disabled(devices.descriptor == nil || store.validationMessage != nil || store.sendState == .sending || store.sendState == .loading)
             Divider().frame(height: 22)
             UpdatesToolbarButton(updates: updates)
         }
@@ -172,7 +184,10 @@ private struct RemoteEditorView: View {
 
     private var deviceSelection: Binding<String> {
         Binding(
-            get: { selectedDevice?.address ?? deviceDiscovery.devices.first?.address ?? "" },
+            get: {
+                selectedDevice?.address ?? (devices.descriptor != nil && devices.address == store.deviceAddress
+                    ? store.deviceAddress : deviceDiscovery.devices.first?.address ?? "")
+            },
             set: { address in
                 guard store.deviceAddress != address else { return }
                 automaticallyLoadedDeviceAddress = address
@@ -192,7 +207,7 @@ private struct RemoteEditorView: View {
             }
         case .loading:
             ProgressView().controlSize(.small)
-            Text("Loading from M5Paper...").font(.caption)
+            Text("Loading from device...").font(.caption)
         case .sending:
             ProgressView().controlSize(.small)
             Text("Installing...").font(.caption)
@@ -258,6 +273,7 @@ private struct RemoteEditorView: View {
             .buttonStyle(.borderless)
             .padding(10)
             Divider()
+            if devices.descriptor == nil || devices.descriptor?.display != nil {
             VStack(alignment: .leading, spacing: 7) {
                 Text("DISPLAY")
                     .font(.caption.weight(.semibold))
@@ -290,6 +306,7 @@ private struct RemoteEditorView: View {
             }
             .font(.caption)
             .padding(12)
+            }
         }
         .background(Color(nsColor: .controlBackgroundColor))
     }
@@ -323,7 +340,16 @@ private struct RemoteEditorView: View {
             .padding(.horizontal, 18)
             .padding(.top, 12)
 
-            if let page = selectedPage {
+            if let descriptor = devices.descriptor, !descriptor.isM5Paper {
+                GenericDeviceEditorPreview(
+                    descriptor: descriptor, layout: devices.layout ?? descriptor.layout,
+                    page: selectedPage, selectedControlID: store.selectedControlID,
+                    onMove: store.moveControl,
+                    onSelectControl: { store.selectedControlID = $0; inspectorTab = .control },
+                    onSelectInput: { store.selectedHardwareInputID = $0; inspectorTab = .device }
+                )
+                .padding(18)
+            } else if let page = selectedPage {
                 DevicePreview(
                     page: page,
                     pageIndex: store.selectedPageIndex ?? 0,
@@ -350,6 +376,297 @@ private struct RemoteEditorView: View {
         .background(Color(nsColor: .underPageBackgroundColor))
     }
 
+    private struct GenericDeviceEditorPreview: View {
+        let descriptor: DeviceDescriptor
+        let layout: DeviceLayout
+        let page: RemotePage?
+        let selectedControlID: UUID?
+        let onMove: (UUID, Int) -> Void
+        let onSelectControl: (UUID) -> Void
+        let onSelectInput: (String) -> Void
+
+        var body: some View {
+            VStack {
+                Text(descriptor.name).font(.headline)
+                if let display = descriptor.display, let page {
+                    GeometryReader { geometry in
+                        let scale = min(
+                            geometry.size.width / Double(display.width),
+                            geometry.size.height / Double(display.height))
+                        let width = Double(display.width) * scale
+                        let height = Double(display.height) * scale
+                        let placements = RemoteGrid.placements(
+                            for: page.controls,
+                            columns: page.gridColumns, rows: page.gridRows, reserved: [])
+                        ZStack(alignment: .topLeading) {
+                            Rectangle().fill(Color.white)
+                            ForEach(Array(page.controls.enumerated()), id: \.element.id) { offset, control in
+                                if placements.indices.contains(offset), let placement = placements[offset] {
+                                    Button {
+                                        onSelectControl(control.id)
+                                    } label: {
+                                        VStack {
+                                            Image(systemName: control.symbol)
+                                            Text(control.title).lineLimit(3).minimumScaleFactor(0.3)
+                                        }
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(.black)
+                                    .background(
+                                        selectedControlID == control.id
+                                            ? Color.accentColor.opacity(0.3) : Color.black.opacity(0.08)
+                                    )
+                                    .frame(
+                                        width: max(
+                                            1,
+                                            width * 0.92 * Double(placement.span.width) / Double(page.gridColumns) - 2),
+                                        height: max(
+                                            1, height * 0.92 * Double(placement.span.height) / Double(page.gridRows) - 2
+                                        )
+                                    )
+                                    .offset(
+                                        x: width * 0.04 + Double(placement.slot % page.gridColumns) * width * 0.92
+                                            / Double(page.gridColumns),
+                                        y: height * 0.04 + Double(placement.slot / page.gridColumns) * height * 0.92
+                                            / Double(page.gridRows)
+                                    )
+                                    .simultaneousGesture(
+                                        DragGesture(minimumDistance: 8).onEnded { drag in
+                                            guard width > 0, height > 0,
+                                                let slot = RemoteGrid.translatedSlot(
+                                                    from: placement.slot,
+                                                    columnOffset: Int(
+                                                        (drag.translation.width * Double(page.gridColumns)
+                                                            / (width * 0.92)).rounded()),
+                                                    rowOffset: Int(
+                                                        (drag.translation.height * Double(page.gridRows)
+                                                            / (height * 0.92)).rounded()),
+                                                    columns: page.gridColumns, rows: page.gridRows)
+                                            else { return }
+                                            onMove(control.id, slot)
+                                        })
+                                }
+                            }
+                        }
+                        .frame(width: width, height: height)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .aspectRatio(Double(display.width) / Double(display.height), contentMode: .fit)
+                    Text("\(display.width) x \(display.height) • \(display.touch ? "Touch" : "Display only")")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if !descriptor.inputs.isEmpty || descriptor.display == nil {
+                    DeviceBoardPreview(
+                        layout: layout, inputs: descriptor.inputs,
+                        selectedInputID: nil, onSelect: onSelectInput)
+                    Text("Select a physical control to assign its events.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private struct DeviceHardwarePanel: View {
+        @ObservedObject var store: RemoteEditorStore
+        @ObservedObject var devices: DeviceSession
+        @ObservedObject var catalog: ModuleCatalog
+        @ObservedObject var matterDevices: MatterDeviceManager
+        @ObservedObject var discovery: WLEDDiscovery
+        @State private var event = "press"
+        @State private var direction = ""
+        @State private var layoutJSON = ""
+        @State private var problem: String?
+
+        private var input: DeviceInput? {
+            devices.descriptor?.inputs.first { $0.id == store.selectedHardwareInputID }
+        }
+        private var bindingIndex: Int? {
+            store.profile.hardwareBindings?.firstIndex {
+                $0.inputID == input?.id && $0.event == event && ($0.direction ?? "") == direction
+            }
+        }
+
+        var body: some View {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Controller device").font(.headline)
+                    if !devices.records.isEmpty {
+                        Picker(
+                            "Saved device",
+                            selection: Binding(
+                                get: { devices.selectedID ?? "" },
+                                set: { id in
+                                    guard let record = devices.records.first(where: { $0.id == id }) else { return }
+                                    store.deviceAddress = record.address
+                                    Task { await store.loadFromDevice() }
+                                }
+                            )
+                        ) {
+                            Text("Choose device").tag("")
+                            ForEach(devices.records) { record in Text(record.descriptor.name).tag(record.id) }
+                        }
+                    }
+                    TextField("Hostname or IP:port", text: $store.deviceAddress)
+                    Button("Connect / read device info") { Task { await store.loadFromDevice() } }
+                        .disabled(devices.isLoading)
+                    if devices.isLoading { ProgressView().controlSize(.small) }
+                    if let message = devices.message { Text(message).font(.caption).textSelection(.enabled) }
+                    if let descriptor = devices.descriptor {
+                        Text(
+                            "\(descriptor.manufacturer) • \(descriptor.boardID) • revision \(descriptor.hardwareRevision)"
+                        )
+                        .font(.caption).textSelection(.enabled)
+                        Text("Firmware: \(descriptor.firmwareVersion)").font(.caption)
+                        if descriptor.display == nil {
+                            Text("Screenless: only physical input bindings are installed.").font(.caption)
+                        }
+                        BluetoothRelayStatus(relay: store.bluetoothRelay)
+                        if !descriptor.controls.isEmpty {
+                            Divider()
+                            DeviceControlsSection(
+                                descriptor: descriptor, address: devices.address,
+                                token: store.localComputer.token, relay: store.bluetoothRelay)
+                        }
+                        if !descriptor.inputs.isEmpty {
+                            Picker(
+                                "Physical input",
+                                selection: Binding(
+                                    get: { store.selectedHardwareInputID ?? descriptor.inputs[0].id },
+                                    set: {
+                                        store.selectedHardwareInputID = $0; event = "press"; direction = ""
+                                    }
+                                )
+                            ) {
+                                ForEach(descriptor.inputs) { input in Text(input.name).tag(input.id) }
+                            }
+                            if let input {
+                                Picker("Event", selection: $event) {
+                                    ForEach(input.events, id: \.self) { Text($0).tag($0) }
+                                }
+                                if event == "rotate" {
+                                    Picker("Direction", selection: $direction) {
+                                        Text("Both / value adjustment").tag("")
+                                        Text("Counterclockwise").tag("negative")
+                                        Text("Clockwise").tag("positive")
+                                    }
+                                }
+                                if let index = bindingIndex {
+                                    bindingFields(index: index, descriptor: descriptor)
+                                } else {
+                                    Button("Assign action") {
+                                        var bindings = store.profile.hardwareBindings ?? []
+                                        bindings.append(
+                                            DeviceHardwareBinding(
+                                                inputID: input.id, event: event,
+                                                action: RemoteAction(type: .computerMedia, text: "playPause"),
+                                                direction: direction.isEmpty ? nil : direction))
+                                        store.profile.version = 7
+                                        store.profile.hardwareBindings = bindings
+                                    }
+                                    .disabled(
+                                        !descriptor.capabilities.profileVersions.contains(7)
+                                            || !input.events.contains(event))
+                                }
+                            }
+                        } else {
+                            Text("This device exposes no assignable physical inputs.").font(.caption)
+                        }
+                        Divider()
+                        Text("Manual layout override (JSON)").font(.headline)
+                        Text("Geometry only; device capabilities remain authoritative.").font(.caption)
+                        TextEditor(text: $layoutJSON).font(.system(.caption, design: .monospaced)).frame(height: 120)
+                        HStack {
+                            Button("Read layout") {
+                                do {
+                                    let encoder = JSONEncoder()
+                                    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                                    layoutJSON = String(
+                                        decoding: try encoder.encode(devices.layout ?? descriptor.layout), as: UTF8.self
+                                    )
+                                } catch { problem = error.localizedDescription }
+                            }
+                            Button("Apply layout") {
+                                do {
+                                    try devices.setLayoutOverride(
+                                        JSONDecoder().decode(DeviceLayout.self, from: Data(layoutJSON.utf8)))
+                                    problem = nil
+                                } catch { problem = error.localizedDescription }
+                            }
+                        }
+                    }
+                    if let problem { Text(problem).font(.caption).foregroundStyle(.red) }
+                }
+                .padding(14)
+            }
+            .onAppear { selectFirstInput() }
+            .onChange(of: store.selectedHardwareInputID) { _ in selectFirstEvent() }
+            .onChange(of: devices.selectedID) { _ in selectFirstInput() }
+        }
+
+        private func selectFirstInput() {
+            if input == nil { store.selectedHardwareInputID = devices.descriptor?.inputs.first?.id }
+            selectFirstEvent()
+        }
+
+        private func selectFirstEvent() {
+            if let input, !input.events.contains(event) { event = input.events.first ?? "press" }
+            direction = ""
+        }
+
+        private func bindingFields(index: Int, descriptor: DeviceDescriptor) -> some View {
+            let key = store.profile.hardwareBindings![index]
+            let binding = Binding<DeviceHardwareBinding<RemoteAction>>(
+                get: {
+                    store.profile.hardwareBindings?.first {
+                        $0.inputID == key.inputID && $0.event == key.event && $0.direction == key.direction
+                    } ?? key
+                },
+                set: { updated in
+                    guard
+                        let current = store.profile.hardwareBindings?.firstIndex(where: {
+                            $0.inputID == key.inputID && $0.event == key.event && $0.direction == key.direction
+                        })
+                    else { return }
+                    store.profile.hardwareBindings?[current] = updated
+                })
+            let actionControl = Binding<RemoteControl>(
+                get: {
+                    RemoteControl(
+                        title: input?.name ?? "Input", symbol: "dial.medium", kind: .button,
+                        action: binding.wrappedValue.action)
+                },
+                set: { binding.wrappedValue.action = $0.action })
+            return VStack(alignment: .leading, spacing: 10) {
+                Picker("Behavior", selection: binding.mode) {
+                    Text("Run action").tag("action")
+                    if event == "rotate" && direction.isEmpty { Text("Adjust value").tag("relative") }
+                    if event == "change" { Text("Set value").tag("absolute") }
+                }
+                if binding.wrappedValue.mode != "action" {
+                    TextField("Minimum", value: binding.minimum, format: .number)
+                    TextField("Maximum", value: binding.maximum, format: .number)
+                    TextField("Step", value: binding.step, format: .number)
+                    Text("Use a value action such as volume, brightness or target temperature.").font(.caption)
+                }
+                ControlInspector(
+                    control: actionControl, pages: store.profile.pages, computers: store.profile.computers,
+                    localComputerToken: store.localComputer.token, modules: catalog.installedModules,
+                    matterDevices: matterDevices, temperatureUnit: store.profile.temperatureUnit,
+                    discovery: discovery, canUseButtonLayout: false, canUseTextBoxLayout: false,
+                    gridColumns: 2, gridRows: 8, canMoveEarlier: false, canMoveLater: false,
+                    onMoveEarlier: {}, onMoveLater: {}, onDuplicate: {}, onDelete: {}, hardwareOnly: true
+                )
+                .frame(minHeight: 260)
+                Button("Remove binding", role: .destructive) {
+                    store.profile.hardwareBindings?.removeAll {
+                        $0.inputID == key.inputID && $0.event == key.event && $0.direction == key.direction
+                    }
+                }
+            }
+        }
+    }
+
     private var inspector: some View {
         VStack(spacing: 0) {
             Picker("", selection: $inspectorTab) {
@@ -359,7 +676,10 @@ private struct RemoteEditorView: View {
             .labelsHidden()
             .padding(12)
             Divider()
-            if inspectorTab == .connections {
+            if inspectorTab == .device {
+                DeviceHardwarePanel(store: store, devices: devices, catalog: moduleCatalog,
+                                    matterDevices: matterDevices, discovery: discovery)
+            } else if inspectorTab == .connections {
                 ConnectionsPanel(
                     store: store,
                     computers: computerDiscovery,
@@ -393,6 +713,9 @@ private struct RemoteEditorView: View {
                     onDuplicate: store.duplicateSelectedControl,
                     onDelete: store.deleteSelectedControl
                 )
+            } else if devices.descriptor != nil && devices.descriptor?.display == nil {
+                Text("This device has no screen. Use Device to assign physical controls.")
+                    .font(.caption).foregroundStyle(.secondary).padding()
             } else {
                 ControlCatalogPanel(
                     store: store,
@@ -724,6 +1047,7 @@ private struct ControlInspector: View {
     let onMoveLater: () -> Void
     let onDuplicate: () -> Void
     let onDelete: () -> Void
+    var hardwareOnly = false
 
     private let mediaCommands = [
         ("playPause", "Play / Pause"), ("previous", "Previous"), ("next", "Next"), ("seek", "Seek"),
@@ -738,6 +1062,7 @@ private struct ControlInspector: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if !hardwareOnly {
                 section("APPEARANCE") {
                     LabeledContent("Label") { TextField("Control", text: $control.title) }
                     if control.kind != .textBox {
@@ -791,7 +1116,8 @@ private struct ControlInspector: View {
                     }
                 }
 
-                if control.kind == .textBox {
+                }
+                if control.kind == .textBox && !hardwareOnly {
                     textBoxSections
                 }
 
@@ -809,6 +1135,7 @@ private struct ControlInspector: View {
                     }
                 }
 
+                if !hardwareOnly {
                 HStack {
                     Button(action: onMoveEarlier) { Image(systemName: "arrow.up") }
                         .help("Move control earlier")
@@ -819,6 +1146,7 @@ private struct ControlInspector: View {
                     Button(action: onDuplicate) { Label("Duplicate", systemImage: "plus.square.on.square") }
                     Spacer()
                     Button(role: .destructive, action: onDelete) { Label("Delete", systemImage: "trash") }
+                }
                 }
             }
             .padding(14)
@@ -994,6 +1322,12 @@ private struct ControlInspector: View {
                 }
             }
         case .iPhoneHomePower:
+            VStack(alignment: .leading, spacing: 6) {
+                Text("This button is relayed through the iPhone and only works while the paperGIF iPhone app is connected. Matter device power runs on this Mac instead.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Use Matter Device Power") { actionChoiceBinding.wrappedValue = .matterPower }
+            }
             LabeledContent("Home accessory") {
                 Picker("", selection: homeAccessoryBinding) {
                     Text("Choose Accessory").tag("")
@@ -1980,6 +2314,7 @@ private struct ControlInspector: View {
 
         var title: String {
             switch self {
+            case .action(.iPhoneHomePower): "Apple Home power (through iPhone)"
             case .action(let type): type.title
             case .matterPower: "Matter device power"
             }
@@ -1993,19 +2328,12 @@ private struct ControlInspector: View {
         }
     }
 
-    private var hasMatterModule: Bool {
-        modules.contains { $0.id == MatterDeviceManager.moduleID }
-    }
-
-    // Apple Home power only works while the iPhone app is open, so Matter power replaces it in the menu.
+    // Apple Home power relays through the iPhone; Matter power runs on this Mac, so only it is offered.
+    // The Matter module ships inside the app, so this doesn't depend on the installed-module list.
     private var actionChoices: [ActionChoice] {
         RemoteActionType.allCases.flatMap { type -> [ActionChoice] in
             guard type == .iPhoneHomePower else { return [.action(type)] }
-            var choices: [ActionChoice] = hasMatterModule ? [.matterPower] : []
-            if control.action.type == .iPhoneHomePower || !hasMatterModule {
-                choices.append(.action(type))
-            }
-            return choices
+            return control.action.type == .iPhoneHomePower ? [.matterPower, .action(type)] : [.matterPower]
         }
     }
 
@@ -2020,17 +2348,19 @@ private struct ControlInspector: View {
                 case .action(let type):
                     actionTypeBinding.wrappedValue = type
                 case .matterPower:
+                    let power = control.action.type == .iPhoneHomePower ? control.action.text : "toggle"
                     control.iconBitmap = nil
                     control.action = RemoteAction(
                         type: .module,
                         host: MatterDeviceManager.moduleID,
-                        text: "toggle",
+                        text: ["on", "off"].contains(power) ? power : "toggle",
                         value: matterDevices.devices.first?.number ?? 0,
                         computerID: control.action.computerID
+                            ?? computers.first { $0.token == localComputerToken }?.id.uuidString
                     )
                     if control.kind != .textBox {
                         control.kind = .button
-                        control.isToggle = true
+                        control.isToggle = control.action.text == "toggle" ? true : nil
                     }
                 }
             }

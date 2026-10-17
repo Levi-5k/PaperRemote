@@ -277,6 +277,8 @@ internal sealed class UpdateService : IDisposable
         CancellationToken cancellationToken = default)
     {
         var firmware = await File.ReadAllBytesAsync(firmwarePath, cancellationToken);
+        if (!PaperGIF.Windows.Core.FirmwareCompatibility.HasM5PaperMarker(firmware))
+            throw new UpdateException("Firmware lacks the exact M5Paper board/revision marker; installation was blocked.");
         var boundary = $"paperGIF-{Guid.NewGuid():N}";
         using var request = new HttpRequestMessage(HttpMethod.Post, DeviceUri(address, "/firmware"))
         {

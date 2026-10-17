@@ -10,6 +10,14 @@ internal sealed class RemotePreviewPanel : Control
 {
     private readonly Dictionary<Guid, Rectangle> controlFrames = [];
     private readonly Dictionary<Guid, int> controlSlots = [];
+    private readonly Dictionary<string, Rectangle> inputFrames = new(StringComparer.Ordinal);
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public DeviceDescriptor? Descriptor { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public DeviceLayout? BoardLayout { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string? SelectedInputID { get; set; }
+    public event EventHandler<string>? InputSelected;
     private RemotePage? page;
     private Guid? draggedControlId;
     private int? draggedSourceSlot;
@@ -68,6 +76,7 @@ internal sealed class RemotePreviewPanel : Control
     protected override void OnMouseDown(MouseEventArgs eventArgs)
     {
         base.OnMouseDown(eventArgs);
+        if (Descriptor?.Display?.Touch != true && Descriptor is not null) return;
         var match = controlFrames.FirstOrDefault(pair => pair.Value.Contains(eventArgs.Location));
         draggedControlId = match.Key == Guid.Empty ? null : match.Key;
         draggedSourceSlot = draggedControlId is { } controlId && controlSlots.TryGetValue(controlId, out var slot)
@@ -172,6 +181,13 @@ internal sealed class RemotePreviewPanel : Control
     protected override void OnMouseClick(MouseEventArgs eventArgs)
     {
         base.OnMouseClick(eventArgs);
+        var input = inputFrames.FirstOrDefault(pair => pair.Value.Contains(eventArgs.Location));
+        if (input.Key is not null)
+        {
+            InputSelected?.Invoke(this, input.Key);
+            return;
+        }
+        if (Descriptor?.Display?.Touch != true && Descriptor is not null) return;
         var match = controlFrames.FirstOrDefault(pair => pair.Value.Contains(eventArgs.Location));
         if (match.Key != Guid.Empty)
         {
@@ -182,6 +198,10 @@ internal sealed class RemotePreviewPanel : Control
     protected override void OnPaint(PaintEventArgs eventArgs)
     {
         base.OnPaint(eventArgs);
+        controlFrames.Clear();
+        controlSlots.Clear();
+        inputFrames.Clear();
+        settingsSlot = -1;
         var graphics = eventArgs.Graphics;
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         using var pattern = new SolidBrush(Color.FromArgb(26, 255, 255, 255));
@@ -193,7 +213,10 @@ internal sealed class RemotePreviewPanel : Control
             }
         }
         var available = new Rectangle(24, 18, Math.Max(1, Width - 48), Math.Max(1, Height - 36));
-        const float aspect = 540f / 960f;
+        var display = Descriptor?.Display;
+        var rotated = display?.Rotation is 90 or 270;
+        var aspect = display is null ? 540f / 960f :
+            rotated ? display.Height / (float)display.Width : display.Width / (float)display.Height;
         var screenHeight = available.Height;
         var screenWidth = (int)(screenHeight * aspect);
         if (screenWidth > available.Width)
@@ -206,6 +229,33 @@ internal sealed class RemotePreviewPanel : Control
             available.Top + (available.Height - screenHeight) / 2,
             screenWidth,
             screenHeight);
+        if (Descriptor is { } descriptor && BoardLayout is { } layout &&
+            (descriptor.Inputs.Count > 0 || display is null))
+        {
+            var scale = Math.Min(available.Width / layout.Width, available.Height / layout.Height);
+            var board = new Rectangle(
+                available.Left + (available.Width - (int)(layout.Width * scale)) / 2,
+                available.Top + (available.Height - (int)(layout.Height * scale)) / 2,
+                (int)(layout.Width * scale), (int)(layout.Height * scale));
+            using var boardBrush = new SolidBrush(EditorTheme.Layer);
+            EditorTheme.FillRoundedRectangle(graphics, boardBrush, board, 12);
+            Rectangle Map(double x, double y, double width, double height) =>
+                new(board.Left + (int)(x * scale), board.Top + (int)(y * scale),
+                    Math.Max(1, (int)(width * scale)), Math.Max(1, (int)(height * scale)));
+            foreach (var geometry in layout.Inputs)
+            {
+                var frame = Map(geometry.X, geometry.Y, geometry.Width, geometry.Height);
+                inputFrames[geometry.Id] = frame;
+                using var brush = new SolidBrush(SelectedInputID == geometry.Id ? EditorTheme.Forest : EditorTheme.Paper);
+                EditorTheme.FillRoundedRectangle(graphics, brush, frame, 6);
+                using var font = new Font("Segoe UI", Math.Clamp(frame.Height / 5f, 7, 14));
+                var label = descriptor.Inputs.First(input => input.Id == geometry.Id);
+                graphics.DrawString($"{label.Name}\n{label.Kind}", font,
+                    SelectedInputID == geometry.Id ? Brushes.White : Brushes.Black, frame);
+            }
+            if (layout.Screen is not { } bounds) return;
+            screen = Map(bounds.X, bounds.Y, bounds.Width, bounds.Height);
+        }
         var shadowFrame = Rectangle.Inflate(screen, 9, 9);
         shadowFrame.Offset(0, 6);
         using var shadow = new SolidBrush(Color.FromArgb(110, 0, 0, 0));
@@ -215,8 +265,26 @@ internal sealed class RemotePreviewPanel : Control
         using var border = new Pen(Color.FromArgb(53, 65, 59), 2);
         EditorTheme.DrawRoundedRectangle(graphics, border, screen, 6);
 
-        var headerHeight = Math.Max(30, screen.Height / 15);
-        var footerHeight = Math.Max(24, screen.Height / 18);
+        if (Descriptor is { Display.Touch: false })
+        {
+            using var font = new Font("Segoe UI", 9);
+            graphics.DrawString("Display (no touch input)", font, Brushes.Black, screen);
+            return;
+        }
+        if (Descriptor?.BoardID is not (null or "m5stack.m5paper"))
+        {
+            if (page is null) return;
+            var content = DevicePreviewGeometry.GenericGrid(new(screen.X, screen.Y, screen.Width, screen.Height));
+            gridFrame = Rectangle.Round(new RectangleF((float)content.X, (float)content.Y,
+                (float)content.Width, (float)content.Height));
+            var logicalWidth = display!.Rotation is 90 or 270 ? display.Height : display.Width;
+            DrawControls(graphics, gridFrame, page, screen.Width / (float)logicalWidth, generic: true);
+            return;
+        }
+        var headerHeight = Descriptor?.BoardID is null or "m5stack.m5paper"
+            ? Math.Max(30, screen.Height / 15) : Math.Max(1, screen.Height / 15);
+        var footerHeight = Descriptor?.BoardID is null or "m5stack.m5paper"
+            ? Math.Max(24, screen.Height / 18) : Math.Max(1, screen.Height / 18);
         using var headerFont = new Font("Segoe UI Variable Display Semibold", Math.Max(8, screen.Width / 32f));
         graphics.DrawString(page?.Name ?? "Select a page", headerFont, Brushes.Black,
             new RectangleF(screen.Left + 12, screen.Top + 8, screen.Width - 24, headerHeight));
@@ -229,19 +297,22 @@ internal sealed class RemotePreviewPanel : Control
         {
             return;
         }
-        if (page.Layout == RemotePageLayout.OpenBuildsController)
+        if (page.Layout == RemotePageLayout.OpenBuildsController &&
+            Descriptor?.BoardID is null or "m5stack.m5paper")
         {
             gridFrame = ScaleFrame(screen, new RectangleF(24, 142, 504, 712));
             DrawOpenBuildsController(graphics, screen, page);
             return;
         }
         var grid = new Rectangle(
-            screen.Left + 10,
+            screen.Left + Math.Min(10, screen.Width / 12),
             screen.Top + headerHeight,
-            screen.Width - 20,
-            screen.Height - headerHeight - footerHeight);
+            Math.Max(1, screen.Width - 2 * Math.Min(10, screen.Width / 12)),
+            Math.Max(1, screen.Height - headerHeight - footerHeight));
         gridFrame = grid;
-        DrawControls(graphics, grid, page, screen.Width / 540f);
+        var pixelWidth = Descriptor?.Display is { } dimensions
+            ? dimensions.Rotation is 90 or 270 ? dimensions.Height : dimensions.Width : 540;
+        DrawControls(graphics, grid, page, screen.Width / (float)pixelWidth);
     }
 
     private void DrawPageTabs(Graphics graphics, Rectangle screen)
@@ -290,7 +361,7 @@ internal sealed class RemotePreviewPanel : Control
             settingsFrame = ScaleFrame(screen, new RectangleF(ox, oy, 152, 430));
         }
         RectangleF At(float x, float y, float width, float height) => new(ox + x - 364, oy + y - 292, width, height);
-        foreach (var control in controllerPage.Controls.Take(RemoteProfile.MaximumControlsPerPage))
+        foreach (var control in controllerPage.Controls.Take(Descriptor?.Capabilities.MaxControls ?? RemoteProfile.MaximumControlsPerPage))
         {
             var (width, height) = Span(control, columns, rows);
             var slot = FindSlot(PreferredSlot(controllerPage, control), width, height, occupied, columns, rows);
@@ -399,12 +470,12 @@ internal sealed class RemotePreviewPanel : Control
         graphics.DrawString(text, font, selected ? Brushes.White : Brushes.Black, frame, format);
     }
 
-    private void DrawControls(Graphics graphics, Rectangle grid, RemotePage remotePage, float screenScale)
+    private void DrawControls(Graphics graphics, Rectangle grid, RemotePage remotePage, float screenScale, bool generic = false)
     {
         var columns = Math.Clamp(remotePage.GridColumns, 1, 12);
         var rows = Math.Clamp(remotePage.GridRows, 1, 16);
         var occupied = new bool[columns * rows];
-        foreach (var control in remotePage.Controls.Take(RemoteProfile.MaximumControlsPerPage))
+        foreach (var control in remotePage.Controls.Take(Descriptor?.Capabilities.MaxControls ?? RemoteProfile.MaximumControlsPerPage))
         {
             var (width, height) = Span(control, columns, rows);
             var slot = FindSlot(PreferredSlot(remotePage, control), width, height, occupied, columns, rows);
@@ -422,6 +493,13 @@ internal sealed class RemotePreviewPanel : Control
                 grid.Top + row * cellHeight + 4,
                 cellWidth * width - 8,
                 cellHeight * height - 8));
+            if (generic)
+            {
+                var bounds = DevicePreviewGeometry.ControlFrame(new(grid.X, grid.Y, grid.Width, grid.Height),
+                    columns, rows, slot, width, height);
+                frame = Rectangle.Round(new RectangleF((float)bounds.X, (float)bounds.Y,
+                    (float)bounds.Width, (float)bounds.Height));
+            }
             controlFrames[control.Id] = frame;
             controlSlots[control.Id] = slot;
             if (!IsDragging(control))

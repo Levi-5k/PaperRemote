@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "deviceID": "fixture:screenless:001",
+  "name": "Reference knob controller",
+  "manufacturer": "PaperRemote reference",
+  "boardID": "paperremote.esp32-screenless-reference",
+  "hardwareRevision": "1",
+  "firmwareVersion": "reference-1",
+  "display": null,
+  "inputs": [
+    {"id": "button-1", "name": "Button", "kind": "button", "events": ["press", "hold", "release"]},
+    {"id": "encoder-1", "name": "Knob", "kind": "encoder", "events": ["rotate"]},
+    {"id": "slider-1", "name": "Slider", "kind": "slider", "events": ["change"], "minimum": 0, "maximum": 4095}
+  ],
+  "layout": {
+    "width": 320, "height": 160,
+    "inputs": [
+      {"id": "button-1", "x": 16, "y": 24, "width": 64, "height": 64},
+      {"id": "encoder-1", "x": 112, "y": 24, "width": 64, "height": 64},
+      {"id": "slider-1", "x": 208, "y": 24, "width": 64, "height": 112}
+    ]
+  },
+  "capabilities": {"profileVersions": [6, 7], "media": false, "firmwareUpdate": false, "maxProfileBytes": 32768, "maxControls": 24, "maxPages": 8}
+}

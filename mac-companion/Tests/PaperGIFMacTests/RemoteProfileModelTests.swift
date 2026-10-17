@@ -520,6 +520,39 @@ final class RemoteProfileModelTests: XCTestCase {
         XCTAssertEqual(setpoint?.action.value, 23)
     }
 
+    func testControlEditsAreSentAsControlUpdatesAndStructuralChangesAreNot() throws {
+        let base = RemoteProfile.starter
+        var edited = base
+        edited.markUpdated()
+        edited.pages[0].controls[1].title = "Play"
+        edited.pages[0].controls[3].layoutSlot = 6
+        XCTAssertEqual(
+            RemoteProfile.changedControls(from: base, to: edited),
+            [ControlLocation(page: 0, control: 1), ControlLocation(page: 0, control: 3)]
+        )
+        XCTAssertEqual(RemoteProfile.changedControls(from: base, to: base), [])
+
+        var renamedPage = edited
+        renamedPage.pages[0].name = "Media"
+        XCTAssertNil(RemoteProfile.changedControls(from: base, to: renamedPage))
+        var reordered = base
+        reordered.pages[0].controls.swapAt(0, 1)
+        XCTAssertNil(RemoteProfile.changedControls(from: base, to: reordered))
+        var added = base
+        added.pages[0].controls.append(base.pages[0].controls[0])
+        added.pages[0].controls[4].id = UUID()
+        XCTAssertNil(RemoteProfile.changedControls(from: base, to: added))
+
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: edited.controlUpdatePayload(for: [ControlLocation(page: 0, control: 1)])
+        ) as? [String: Any])
+        let item = try XCTUnwrap((body["controls"] as? [[String: Any]])?.first)
+        XCTAssertEqual(body["updatedAtMilliseconds"] as? Int64, edited.updatedAtMilliseconds)
+        XCTAssertEqual(item["pageID"] as? String, edited.pages[0].id.uuidString)
+        XCTAssertEqual((item["control"] as? [String: Any])?["title"] as? String, "Play")
+        XCTAssertEqual((item["control"] as? [String: Any])?["id"] as? String, edited.pages[0].controls[1].id.uuidString)
+    }
+
 }
 
 private func protocolFixture(_ name: String) -> URL {

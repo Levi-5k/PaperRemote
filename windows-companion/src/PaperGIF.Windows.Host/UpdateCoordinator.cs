@@ -9,6 +9,8 @@ internal sealed class UpdateCoordinator : IDisposable
     private readonly RemoteEditorStore editorStore;
     private readonly CompanionConfiguration configuration;
     private SynchronizationContext? uiContext;
+    private string? firmwareAddress;
+    private string? deviceFirmware;
 
     public UpdateCoordinator(RemoteEditorStore editorStore, CompanionConfiguration configuration)
     {
@@ -23,7 +25,13 @@ internal sealed class UpdateCoordinator : IDisposable
 
     public AvailableRelease? Release { get; private set; }
     // Null when the M5Paper could not be reached.
-    public string? DeviceFirmware { get; private set; }
+    public string? DeviceFirmware
+    {
+        get => editorStore.Descriptor is { FirmwareVersion: not "legacy" } descriptor
+            ? descriptor.FirmwareVersion
+            : firmwareAddress == editorStore.DeviceAddress ? deviceFirmware : null;
+        private set { deviceFirmware = value; firmwareAddress = editorStore.DeviceAddress; }
+    }
     public string? Activity { get; private set; }
     public string? Problem { get; private set; }
     public string? Notice { get; private set; }
@@ -39,6 +47,7 @@ internal sealed class UpdateCoordinator : IDisposable
             : null;
 
     public AvailableRelease? FirmwareUpdate =>
+        editorStore.CanInstallM5Firmware &&
         Release is { Manifest.Firmware: not null } release && DeviceFirmware is { } firmware &&
         SoftwareVersion.IsNewer(release.Version, firmware)
             ? release
@@ -85,30 +94,27 @@ internal sealed class UpdateCoordinator : IDisposable
     public async Task RefreshDeviceAsync()
     {
         var address = editorStore.DeviceAddress;
-        if (await service.DeviceFirmwareVersionAsync(address) is { } version)
-        {
-            DeviceFirmware = version;
-            RaiseChanged();
-            return;
-        }
-        // The saved address goes stale when the M5Paper gets a new IP; find it again.
+        var cancellationToken = editorStore.DeviceSessionCancellation;
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            foreach (var device in await NetworkDiscoveryService.ProbeNetworkAsync(address, timeout.Token))
+            await editorStore.IdentifyDeviceAsync();
+            var deviceID = editorStore.Descriptor?.DeviceID;
+            var version = address == editorStore.DeviceAddress && editorStore.CanInstallM5Firmware
+                ? await service.DeviceFirmwareVersionAsync(address, cancellationToken) : null;
+            if (address != editorStore.DeviceAddress || cancellationToken.IsCancellationRequested ||
+                deviceID != editorStore.Descriptor?.DeviceID) return;
+            if (version is not null)
             {
-                if (await service.DeviceFirmwareVersionAsync(device.Host) is { } found)
-                {
-                    Post(() => editorStore.DeviceAddress = device.Host);
-                    DeviceFirmware = found;
-                    RaiseChanged();
-                    return;
-                }
+                DeviceFirmware = version;
+                RaiseChanged();
+                return;
             }
         }
-        catch (OperationCanceledException)
+        catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or
+            InvalidOperationException or JsonException)
         {
         }
+        if (address != editorStore.DeviceAddress || cancellationToken.IsCancellationRequested) return;
         DeviceFirmware = null;
         RaiseChanged();
     }
@@ -154,14 +160,30 @@ internal sealed class UpdateCoordinator : IDisposable
         Problem = null;
         Notice = null;
         var address = editorStore.DeviceAddress;
+        var deviceID = editorStore.Descriptor?.DeviceID;
+        var cancellationToken = editorStore.DeviceSessionCancellation;
         SetActivity($"Downloading M5Paper firmware {release.Version}...");
         try
         {
-            var firmware = await service.DownloadAsync(asset, release);
+            var firmware = await service.DownloadAsync(asset, release, cancellationToken);
             try
             {
+                await editorStore.IdentifyDeviceAsync();
+                if (editorStore.DeviceAddress != address || editorStore.Descriptor?.DeviceID != deviceID ||
+                    !editorStore.CanInstallM5Firmware)
+                    throw new UpdateException("Device changed or this board is incompatible with M5Paper firmware.");
+                if (await service.DeviceFirmwareVersionAsync(address, cancellationToken) is not { } installed ||
+                    !SoftwareVersion.IsNewer(release.Version, installed))
+                    throw new UpdateException("Could not verify that this firmware is newer than the selected device.");
+                cancellationToken.ThrowIfCancellationRequested();
+                if (editorStore.DeviceAddress != address || editorStore.Descriptor?.DeviceID != deviceID)
+                    throw new UpdateException("Device changed before firmware installation.");
                 SetActivity($"Installing M5Paper firmware {release.Version}... the M5Paper shows progress and restarts when done.");
-                await service.InstallFirmwareAsync(firmware, release.Version, address, configuration.Token);
+                await service.InstallFirmwareAsync(firmware, release.Version, address, configuration.Token, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (editorStore.DeviceAddress != address || editorStore.Descriptor?.DeviceID != deviceID)
+                    throw new UpdateException("Device changed while waiting for firmware restart.");
+                await editorStore.IdentifyDeviceAsync();
             }
             finally
             {
@@ -185,7 +207,7 @@ internal sealed class UpdateCoordinator : IDisposable
     public void Dispose() => service.Dispose();
 
     private static bool IsUpdateFailure(Exception exception) =>
-        exception is UpdateException or HttpRequestException or TaskCanceledException or JsonException or
+        exception is UpdateException or HttpRequestException or OperationCanceledException or JsonException or InvalidOperationException or
             IOException or InvalidDataException or UnauthorizedAccessException or
             System.ComponentModel.Win32Exception;
 

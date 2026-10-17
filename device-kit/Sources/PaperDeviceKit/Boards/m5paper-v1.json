@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "boardID": "m5stack.m5paper",
+  "hardwareRevisions": ["1.0"],
+  "version": 1,
+  "name": "M5Stack M5Paper v1",
+  "layout": {
+    "width": 540,
+    "height": 960,
+    "screen": {"x": 0, "y": 0, "width": 540, "height": 960},
+    "inputs": []
+  }
+}

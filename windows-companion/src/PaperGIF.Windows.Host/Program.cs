@@ -1,4 +1,5 @@
 using PaperGIF.Windows.Host;
+using PaperGIF.Windows.Core.Ble;
 using PaperGIF.Windows.Core.Models;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
@@ -62,7 +63,10 @@ internal static class Program
         builder.Services.AddSingleton<NetHomeService>();
         builder.Services.AddSingleton<OpenBuildsControlService>();
         builder.Services.AddSingleton<StartupRegistration>();
+        builder.Services.AddSingleton<IBleDeviceConnector, WinRtBleConnector>();
+        builder.Services.AddSingleton(services => new BleSessionPool(services.GetRequiredService<IBleDeviceConnector>()));
         builder.Services.AddSingleton<RemoteEditorStore>();
+        builder.Services.AddHostedService<BleRelayService>();
         builder.Services.AddSingleton<NetworkDiscoveryService>();
         builder.Services.AddSingleton<ModuleCatalogService>();
         builder.Services.AddSingleton<HomeAccessoryCatalog>();
@@ -214,7 +218,7 @@ internal static class Program
 
         app.MapPost("/action", (RemoteRequest request, WindowsActionDispatcher dispatcher) =>
         {
-            var result = dispatcher.Perform(request);
+            var result = RelayedActionHandler.Perform(dispatcher, request);
             return result.Succeeded
                 ? Results.Json(new { ok = true, changed = result.Changed })
                 : Results.Json(new { ok = false }, statusCode: StatusCodes.Status400BadRequest);

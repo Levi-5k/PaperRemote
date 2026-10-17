@@ -1,6 +1,7 @@
 import AppKit
 import CryptoKit
 import Foundation
+import PaperDeviceKit
 import Security
 import UserNotifications
 
@@ -229,6 +230,10 @@ enum FirmwareInstaller {
     }
 
     static func install(firmwareAt fileURL: URL, version: String, address: String, token: String) async throws {
+        let (descriptor, _) = try await NativeDeviceAdapter().identify(address: address)
+        guard descriptor.isM5Paper, descriptor.capabilities.firmwareUpdate else {
+            throw UpdateError.deviceRejected("this firmware is only compatible with M5Paper hardware revision 1.0")
+        }
         let firmware = try Data(contentsOf: fileURL)
         let md5 = Insecure.MD5.hash(data: firmware).map { String(format: "%02x", $0) }.joined()
         let boundary = "paperGIF-\(UUID().uuidString)"
@@ -494,7 +499,22 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
             throw error
         }
         DiagnosticLog.info("Installing paperGIF Mac \(release.version) and relaunching")
-        NSApp.terminate(nil)
+        isShowingUpdates = false
+        Self.quitForReplacement()
+    }
+
+    /// AppKit refuses to quit (and beeps) while a sheet or modal is open, which the Updates page is.
+    private static func quitForReplacement() {
+        if NSApp.modalWindow != nil { NSApp.abortModal() }
+        for window in NSApp.windows {
+            if let sheet = window.attachedSheet { window.endSheet(sheet) }
+        }
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+        // The replacement script waits for this process to exit; never leave it waiting.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            NSApp.delegate?.applicationWillTerminate?(Notification(name: NSApplication.willTerminateNotification))
+            exit(0)
+        }
     }
 
     private static func extractApp(_ archive: URL, into staging: URL) async throws -> URL {

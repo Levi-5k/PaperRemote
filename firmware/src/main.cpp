@@ -131,6 +131,11 @@ constexpr uint8_t kRemoteProfileProgress = 0x45;
 constexpr uint8_t kBeginButtonImage = 0x46;
 constexpr uint8_t kFinishButtonImage = 0x47;
 constexpr uint8_t kButtonImageComplete = 0x48;
+// Control updates: [0x49][size u32][crc32 u32], data, 0x4A; 0x4B when applied, 0x7F if stale.
+constexpr uint8_t kBeginRemoteControls = 0x49;
+constexpr uint8_t kFinishRemoteControls = 0x4A;
+constexpr uint8_t kRemoteControlsComplete = 0x4B;
+constexpr char kRemoteControlsTemporaryPath[] = "/library/controls.tmp";
 constexpr uint8_t kLocalMediaState = 0x61;
 constexpr uint8_t kClaimIPhoneController = 0x62;
 constexpr uint8_t kHomePowerResult = 0x63;
@@ -784,6 +789,8 @@ struct ButtonTextureRuntime {
     volatile bool uploading = false;
     // BLE profile uploads install on the loop task; parsing overflows nimble_host's 4 KB stack.
     volatile bool profileInstallPending = false;
+    volatile bool controlsUploading = false;
+    volatile bool controlsInstallPending = false;
 };
 RTC_DATA_ATTR ButtonTextureRuntime* buttonTextureRuntime = nullptr;
 float climateTemperatureC = 0;
@@ -874,6 +881,7 @@ void resumeBluetoothAfterWifiUpload();
 void setBluetoothTransferPerformance(bool transferring);
 void displayRemote(bool fastFirst = false);
 void displayRemoteProfileChanges(const RemoteProfile& previousProfile, uint8_t previousPageIndex);
+void displayRemoteControlMoves(const RemotePage& previousPage, const RemotePage& page, uint32_t updatedMask);
 void redrawRemoteTextBox(RemotePage& page, uint8_t controlIndex);
 void syncOpenBuildsControllerActions(RemotePage& page);
 void upgradeLegacyOpenBuildsGrid(RemotePage& page);
@@ -1704,6 +1712,8 @@ __attribute__((noinline)) void parseButtonTexture(
     }
 }
 
+__attribute__((noinline)) bool parseRemoteProfileDocument(JsonDocument& document, RemoteProfile& output);
+
 bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     memset(&output, 0, sizeof(output));
     File file = SD.open(path, FILE_READ);
@@ -1713,9 +1723,18 @@ bool parseRemoteProfile(const char* path, RemoteProfile& output) {
     JsonDocument document(&profileJsonAllocator);
     const DeserializationError error = deserializeJson(document, file);
     file.close();
+    if (error) {
+        Serial.printf("Remote profile parse failed: %s\n", error.c_str());
+        return false;
+    }
+    return parseRemoteProfileDocument(document, output);
+}
+
+__attribute__((noinline)) bool parseRemoteProfileDocument(JsonDocument& document, RemoteProfile& output) {
+    memset(&output, 0, sizeof(output));
     const int profileVersion = document["version"] | 1;
-    if (error || profileVersion < 1 || profileVersion > 6) {
-        Serial.printf("Remote profile parse failed: %s\n", error ? error.c_str() : "version");
+    if (profileVersion < 1 || profileVersion > 6) {
+        Serial.println("Remote profile parse failed: version");
         return false;
     }
 
@@ -2195,7 +2214,230 @@ __attribute__((noinline)) void preserveRemoteThermostatValues(
     }
 }
 
+// Editor edits to existing controls apply in memory at once; the SD profile is rewritten shortly after.
+JsonDocument* remoteControlPatches = nullptr;
+constexpr uint32_t kRemoteControlPatchPersistDelayMs = 1500;
+constexpr size_t kMaximumRemoteControlPatchBytes = 64 * 1024;
+
+bool flushRemoteControlPatches() {
+    if (remoteControlPatches == nullptr || (*remoteControlPatches)["controls"].isNull()) {
+        return true;
+    }
+    JsonDocument document(&profileJsonAllocator);
+    File file = SD.open(kRemoteProfilePath, FILE_READ);
+    const bool loaded = file && !deserializeJson(document, file);
+    if (file) {
+        file.close();
+    }
+    bool written = false;
+    if (loaded) {
+        for (JsonPairConst item : (*remoteControlPatches)["controls"].as<JsonObjectConst>()) {
+            const char* pageId = item.value()["pageID"] | "";
+            for (JsonObject pageJson : document["pages"].as<JsonArray>()) {
+                if (strcasecmp(pageJson["id"] | "", pageId) != 0) {
+                    continue;
+                }
+                for (JsonObject controlJson : pageJson["controls"].as<JsonArray>()) {
+                    if (strcasecmp(controlJson["id"] | "", item.key().c_str()) == 0) {
+                        controlJson.set(item.value()["control"].as<JsonObjectConst>());
+                        break;
+                    }
+                }
+            }
+        }
+        document["updatedAtMilliseconds"] =
+            (*remoteControlPatches)["updatedAtMilliseconds"] | uint64_t(0);
+        String json;
+        json.reserve(measureJson(document) + 1);
+        serializeJson(document, json);
+        SD.remove(kRemoteProfileTemporaryPath);
+        File output = SD.open(kRemoteProfileTemporaryPath, FILE_WRITE);
+        written = output &&
+            output.write(reinterpret_cast<const uint8_t*>(json.c_str()), json.length()) == json.length();
+        if (output) {
+            output.flush();
+            output.close();
+        }
+        written = written && replaceFileTransactionally(
+            kRemoteProfileTemporaryPath, kRemoteProfilePath, kRemoteProfileBackupPath);
+    }
+    if (!written) {
+        Serial.println("Remote control changes could not be saved");
+    }
+    remoteControlPatches->clear();
+    return written;
+}
+
+void flushRemoteControlPatchesIfDue() {
+    if (remoteControlPatches != nullptr && !(*remoteControlPatches)["controls"].isNull() &&
+        static_cast<int32_t>(millis() - ((*remoteControlPatches)["persistAt"] | uint32_t(0))) >= 0) {
+        flushRemoteControlPatches();
+    }
+}
+
+// Parses one control in its page's grid, using the scratch profile.
+RemoteControl* parseRemoteControlPatch(
+    const RemotePage& page, JsonObjectConst controlJson, const char* buttonBackground) {
+    JsonDocument single(&profileJsonAllocator);
+    single["version"] = 6;
+    single["buttonBackground"] = buttonBackground;
+    JsonObject pageJson = single["pages"].add<JsonObject>();
+    pageJson["id"] = static_cast<const char*>(page.id);
+    pageJson["gridColumns"] = page.gridColumns;
+    pageJson["gridRows"] = page.gridRows;
+    pageJson["controls"].add(controlJson);
+    if (!parseRemoteProfileDocument(single, *pendingRemoteProfile) ||
+        pendingRemoteProfile->pages[0].controlCount != 1) {
+        return nullptr;
+    }
+    RemoteControl& control = pendingRemoteProfile->pages[0].controls[0];
+    if (!controlJson["buttonTexture"].is<JsonObjectConst>()) {
+        control.buttonTexture = remoteProfile->buttonTexture;
+    }
+    return &control;
+}
+
+// Handles POST /remote/controls: replaces existing controls in place. Returns the HTTP status.
+__attribute__((noinline)) int applyRemoteControlPatches(const String& payload) {
+    if (remoteProfile == nullptr || pendingRemoteProfile == nullptr || !remoteProfile->configured) {
+        return 409;
+    }
+    JsonDocument request(&profileJsonAllocator);
+    if (payload.length() > kMaximumRemoteControlPatchBytes || deserializeJson(request, payload) ||
+        !request["controls"].is<JsonArrayConst>() || request["controls"].size() == 0 ||
+        request["controls"].size() > kMaximumRemoteControls) {
+        return 400;
+    }
+    const char* buttonBackground = request["buttonBackground"] | "outline";
+    uint8_t pageIndices[kMaximumRemoteControls];
+    uint8_t controlIndices[kMaximumRemoteControls];
+    size_t count = 0;
+    // Resolve and validate everything first; unknown IDs mean the editor is stale and should upload the profile.
+    for (JsonObjectConst item : request["controls"].as<JsonArrayConst>()) {
+        const char* pageId = item["pageID"] | "";
+        const char* controlId = item["control"]["id"] | "";
+        bool found = false;
+        for (uint8_t pageIndex = 0; pageIndex < remoteProfile->pageCount && !found; ++pageIndex) {
+            const RemotePage& page = remoteProfile->pages[pageIndex];
+            if (strcasecmp(page.id, pageId) != 0) {
+                continue;
+            }
+            for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+                if (strcasecmp(page.controls[controlIndex].id, controlId) == 0) {
+                    pageIndices[count] = pageIndex;
+                    controlIndices[count] = controlIndex;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            return 404;
+        }
+        if (parseRemoteControlPatch(
+                remoteProfile->pages[pageIndices[count]],
+                item["control"].as<JsonObjectConst>(), buttonBackground) == nullptr) {
+            return 400;
+        }
+        ++count;
+    }
+    if (remoteControlPatches == nullptr) {
+        void* storage = heap_caps_malloc(sizeof(JsonDocument), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (storage == nullptr) {
+            return 500;
+        }
+        remoteControlPatches = new (storage) JsonDocument(&profileJsonAllocator);
+    }
+
+    bool redrawPage = false;
+    uint32_t redrawMask = 0;
+    // Snapshot of the visible page so moves can clear just the vacated areas instead of the whole screen.
+    RemotePage* previousVisiblePage = nullptr;
+    if (remoteVisible && !screensaverActive && remotePageIndex < remoteProfile->pageCount) {
+        void* storage = heap_caps_malloc(sizeof(RemotePage), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (storage != nullptr) {
+            previousVisiblePage = new (storage) RemotePage(remoteProfile->pages[remotePageIndex]);
+        }
+    }
+    size_t index = 0;
+    for (JsonObjectConst item : request["controls"].as<JsonArrayConst>()) {
+        RemotePage& page = remoteProfile->pages[pageIndices[index]];
+        const uint8_t controlIndex = controlIndices[index];
+        const bool visible = pageIndices[index] == remotePageIndex;
+        ++index;
+        RemoteControl& updated = *parseRemoteControlPatch(
+            page, item["control"].as<JsonObjectConst>(), buttonBackground);
+        RemoteControl& current = page.controls[controlIndex];
+        // Keep live device state: fetched text, slider positions, setpoints and toggle state.
+        if (updated.kind == current.kind && current.hasResolvedValue &&
+            strcmp(updated.textSource, current.textSource) == 0 &&
+            strcmp(updated.sourceText, current.sourceText) == 0 &&
+            strcmp(updated.textComputerId, current.textComputerId) == 0) {
+            strlcpy(updated.resolvedText, current.resolvedText, sizeof(updated.resolvedText));
+            updated.hasResolvedValue = true;
+        }
+        const bool sameAction = strcmp(updated.action.type, current.action.type) == 0;
+        if (sameAction && ((updated.slider && current.slider) ||
+                strcmp(updated.action.type, "netHomeTemperature") == 0)) {
+            updated.action.value = current.action.value;
+            updated.action.valueTenths = current.action.valueTenths;
+        }
+        if (sameAction && updated.toggle && current.toggle) {
+            updated.toggleOn = current.toggleOn;
+        }
+        const bool layoutChanged = updated.kind != current.kind ||
+            updated.layoutSlot != current.layoutSlot ||
+            updated.gridWidth != current.gridWidth || updated.gridHeight != current.gridHeight;
+        current = updated;
+        current.nextRefreshAt = 0;
+        if (page.openBuildsController) {
+            syncOpenBuildsControllerActions(page);
+        }
+        JsonObject saved = (*remoteControlPatches)["controls"][static_cast<const char*>(current.id)]
+            .to<JsonObject>();
+        saved["pageID"] = static_cast<const char*>(page.id);
+        saved["control"] = item["control"];
+        if (visible) {
+            redrawPage = redrawPage || layoutChanged;
+            redrawMask |= 1UL << controlIndex;
+        }
+    }
+    remoteProfile->updatedAtMilliseconds =
+        request["updatedAtMilliseconds"] | remoteProfile->updatedAtMilliseconds;
+    (*remoteControlPatches)["updatedAtMilliseconds"] = remoteProfile->updatedAtMilliseconds;
+    (*remoteControlPatches)["persistAt"] = millis() + kRemoteControlPatchPersistDelayMs;
+
+    if (remoteVisible && !screensaverActive && redrawMask != 0) {
+        RemotePage& page = remoteProfile->pages[remotePageIndex];
+        if (redrawPage && previousVisiblePage != nullptr) {
+            displayRemoteControlMoves(*previousVisiblePage, page, redrawMask);
+            for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+                if ((redrawMask & (1UL << controlIndex)) != 0) {
+                    refreshReferencedTextBoxes(page, page.controls[controlIndex].id);
+                }
+            }
+        } else if (redrawPage) {
+            displayRemote();
+        } else {
+            for (uint8_t controlIndex = 0; controlIndex < page.controlCount; ++controlIndex) {
+                if ((redrawMask & (1UL << controlIndex)) != 0) {
+                    displayRemoteSliderValue(page, controlIndex, false);
+                    refreshReferencedTextBoxes(page, page.controls[controlIndex].id);
+                }
+            }
+        }
+    }
+    if (previousVisiblePage != nullptr) {
+        previousVisiblePage->~RemotePage();
+        heap_caps_free(previousVisiblePage);
+    }
+    return 200;
+}
+
 bool installTemporaryRemoteProfile() {
+    if (remoteControlPatches != nullptr) {
+        remoteControlPatches->clear();
+    }
     if (remoteProfile == nullptr || pendingRemoteProfile == nullptr ||
         !parseRemoteProfile(kRemoteProfileTemporaryPath, *pendingRemoteProfile)) {
         SD.remove(kRemoteProfileTemporaryPath);
@@ -2585,6 +2827,10 @@ void cancelRemoteProfileUpload(bool notifyFailure) {
     setBluetoothTransferPerformance(false);
     if (buttonTextureRuntime != nullptr) {
         buttonTextureRuntime->profileInstallPending = false;
+    }
+    if (buttonTextureRuntime != nullptr && buttonTextureRuntime->controlsUploading) {
+        buttonTextureRuntime->controlsUploading = false;
+        SD.remove(kRemoteControlsTemporaryPath);
     }
     if (buttonTextureRuntime != nullptr && buttonTextureRuntime->uploading) {
         buttonTextureRuntime->uploading = false;
@@ -3141,6 +3387,7 @@ void configureWifiServer() {
             wifiServer.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
             return;
         }
+        flushRemoteControlPatches();
         File file = SD.open(kRemoteProfilePath, FILE_READ);
         if (!file) {
             wifiServer.send(404, "application/json", "{\"ok\":false,\"error\":\"profile_not_found\"}");
@@ -3251,6 +3498,15 @@ void configureWifiServer() {
             return;
         }
         wifiServer.send(201, "application/json", "{\"ok\":true}");
+    });
+    wifiServer.on("/remote/controls", HTTP_POST, []() {
+        if (!wifiRequestAuthorized()) {
+            wifiServer.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+            return;
+        }
+        const int status = applyRemoteControlPatches(wifiServer.arg("plain"));
+        wifiServer.send(status, "application/json", status == 200
+            ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"profile_changed\"}");
     });
     wifiServer.on("/text-source/update", HTTP_POST, []() {
         if (!wifiRequestAuthorized()) {
@@ -3988,6 +4244,35 @@ void beginRemoteProfileUpload(const uint8_t* value, size_t length) {
     notifyControl(kRemoteProfileReady);
 }
 
+void beginRemoteControlsUpload(const uint8_t* value, size_t length) {
+    const uint32_t expectedBytes = length == 9 ? readLittleEndian32(value + 1) : 0;
+    if (upload.active || buttonTextureRuntime == nullptr || expectedBytes == 0 ||
+        expectedBytes > kMaximumRemoteControlPatchBytes ||
+        !openRemoteTransfer(kRemoteControlsTemporaryPath, expectedBytes, readLittleEndian32(value + 5))) {
+        notifyControl(kUploadFailed);
+        return;
+    }
+    buttonTextureRuntime->controlsUploading = true;
+    notifyControl(kRemoteProfileReady);
+}
+
+// Runs on the loop task once a Bluetooth control update has arrived.
+void installRemoteControlsUpload() {
+    File file = SD.open(kRemoteControlsTemporaryPath, FILE_READ);
+    String payload;
+    if (file) {
+        payload.reserve(file.size() + 1);
+        while (file.available()) {
+            payload += static_cast<char>(file.read());
+        }
+        file.close();
+    }
+    SD.remove(kRemoteControlsTemporaryPath);
+    const int status = payload.isEmpty() ? 400 : applyRemoteControlPatches(payload);
+    notifyControl(status == 200 ? kRemoteControlsComplete : kUploadFailed);
+    setBluetoothTransferPerformance(false);
+}
+
 // [opcode][size u32][crc32 u32][36-character image UUID]
 void beginButtonImageUpload(const uint8_t* value, size_t length) {
     using namespace remote_button_texture;
@@ -4078,6 +4363,11 @@ void completeRemoteProfileUpload() {
         buttonTextureRuntime->uploading = false;
         notifyControl(kButtonImageComplete);
         setBluetoothTransferPerformance(false);
+        return;
+    }
+    if (buttonTextureRuntime != nullptr && buttonTextureRuntime->controlsUploading) {
+        buttonTextureRuntime->controlsUploading = false;
+        buttonTextureRuntime->controlsInstallPending = true;
         return;
     }
     if (buttonTextureRuntime != nullptr) {
@@ -4182,6 +4472,10 @@ class ControlCallbacks final : public NimBLECharacteristicCallbacks {
                    value.size() == 9 + remote_button_texture::kImageIdBytes - 1) {
             beginButtonImageUpload(value.data(), value.size());
         } else if (value[0] == kFinishButtonImage && value.size() == 1) {
+            finishRemoteProfileUpload();
+        } else if (value[0] == kBeginRemoteControls && value.size() == 9) {
+            beginRemoteControlsUpload(value.data(), value.size());
+        } else if (value[0] == kFinishRemoteControls && value.size() == 1) {
             finishRemoteProfileUpload();
         } else if (value[0] == kClaimIPhoneController && value.size() == 1) {
             bluetoothConnectionHandle = connectionInfo.getConnHandle();
@@ -5449,6 +5743,37 @@ void clearRemoteControl(const RemotePage& page, size_t index) {
     if (remoteControlFrame(page, index, frame)) {
         M5.Display.fillRect(frame.x, frame.y, frame.width, frame.height, TFT_WHITE);
     }
+}
+
+// After controls move or resize in place, redraws the updated controls and any whose
+// automatic placement shifted, clearing only their old areas.
+void displayRemoteControlMoves(
+    const RemotePage& previousPage, const RemotePage& page, uint32_t updatedMask) {
+    boostCpu();
+    bool redraw[kMaximumRemoteControls] = {};
+    for (uint8_t index = 0; index < page.controlCount && index < previousPage.controlCount; ++index) {
+        RemoteControlFrame before;
+        RemoteControlFrame after;
+        const bool hadFrame = remoteControlFrame(previousPage, index, before);
+        const bool hasFrame = remoteControlFrame(page, index, after);
+        redraw[index] = (updatedMask & (1UL << index)) != 0 || hadFrame != hasFrame ||
+            (hasFrame && (before.x != after.x || before.y != after.y ||
+                before.width != after.width || before.height != after.height));
+    }
+    M5.Display.waitDisplay();
+    M5.Display.setEpdMode(epd_mode_t::epd_text);
+    M5.Display.startWrite();
+    for (uint8_t index = 0; index < previousPage.controlCount; ++index) {
+        if (redraw[index]) {
+            clearRemoteControl(previousPage, index);
+        }
+    }
+    for (uint8_t index = 0; index < page.controlCount; ++index) {
+        if (redraw[index]) {
+            drawRemoteControl(page, index);
+        }
+    }
+    M5.Display.endWrite();
 }
 
 size_t remoteControlIndicesInDisplayOrder(
@@ -9774,6 +10099,7 @@ bool changedFrameBounds(int32_t& x, int32_t& y, int32_t& width, int32_t& height)
 }
 
 void enterM5PaperDeepSleep(uint64_t microseconds) {
+    flushRemoteControlPatches();
     if (sleepAttemptDeferred && millis() - sleepAttemptDeferredAt < 1000) {
         // The caller clears this flag before an attempt. Preserve the retry
         // for a displayed still without blocking touch/buttons/HTTP meanwhile.
@@ -10593,6 +10919,7 @@ void loop() {
     sendDeferredFanSpeed();
     sendNextPendingRemoteAction();
     pollRemoteNetworkResults();
+    flushRemoteControlPatchesIfDue();
     if (homeWifiStatusChanged) {
         homeWifiStatusChanged = false;
         if (homeWifiState == 2) {
@@ -10609,10 +10936,14 @@ void loop() {
         notifyControl(installTemporaryRemoteProfile() ? kRemoteProfileComplete : kUploadFailed);
         setBluetoothTransferPerformance(false);
     }
+    if (buttonTextureRuntime != nullptr && buttonTextureRuntime->controlsInstallPending) {
+        buttonTextureRuntime->controlsInstallPending = false;
+        installRemoteControlsUpload();
+    }
     if (remoteProfileDisplayPending &&
         static_cast<int32_t>(millis() - remoteProfileDisplayAt) >= 0) {
         remoteProfileDisplayPending = false;
-        displayRemote();
+        displayRemote(true);
     }
     if (homeWifiNotificationPending && deviceConnected) {
         homeWifiNotificationPending = false;
@@ -10673,6 +11004,12 @@ void loop() {
                pendingUploadProgress > displayedUploadProgress &&
                    (pendingUploadProgress == 100 || now - lastProgressDisplayAt >= 500)) {
             displayUploadProgress(pendingUploadProgress);
+        }
+    } else if (displayedUploadProgress != UINT8_MAX) {
+        // The Bluetooth receiving screen covered the remote; animations redraw themselves.
+        displayedUploadProgress = UINT8_MAX;
+        if (remoteVisible) {
+            displayRemote(true);
         }
     }
     if (remoteProfileUpload.active &&

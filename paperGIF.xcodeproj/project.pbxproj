@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		A100000130439000005D92DC /* modules in Resources */ = {isa = PBXBuildFile; fileRef = A100000230439000005D92DC /* modules */; };
+		D100000130439000005D92DC /* PaperDeviceKit in Frameworks */ = {isa = PBXBuildFile; productRef = D100000230439000005D92DC /* PaperDeviceKit */; };
+		D100000430439000005D92DC /* Protocol fixtures in Resources */ = {isa = PBXBuildFile; fileRef = D100000530439000005D92DC /* Protocol fixtures */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -32,6 +34,7 @@
 		459C7ECB304389CC005D92DC /* paperGIFTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = paperGIFTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		459C7ED5304389CC005D92DC /* paperGIFUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = paperGIFUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100000230439000005D92DC /* modules */ = {isa = PBXFileReference; lastKnownFileType = folder; path = modules; sourceTree = "<group>"; };
+		D100000530439000005D92DC /* Protocol fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "Protocol fixtures"; path = protocol/fixtures; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -57,6 +60,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D100000130439000005D92DC /* PaperDeviceKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -82,6 +86,7 @@
 			children = (
 				459C7EC0304389C9005D92DC /* paperGIF */,
 				A100000230439000005D92DC /* modules */,
+				D100000530439000005D92DC /* Protocol fixtures */,
 				459C7ECE304389CC005D92DC /* paperGIFTests */,
 				459C7ED8304389CC005D92DC /* paperGIFUITests */,
 				459C7EBF304389C9005D92DC /* Products */,
@@ -118,6 +123,7 @@
 			);
 			name = paperGIF;
 			packageProductDependencies = (
+				D100000230439000005D92DC /* PaperDeviceKit */,
 			);
 			productName = paperGIF;
 			productReference = 459C7EBE304389C9005D92DC /* paperGIF.app */;
@@ -206,6 +212,9 @@
 			);
 			mainGroup = 459C7EB5304389C9005D92DC;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D100000330439000005D92DC /* XCLocalSwiftPackageReference "device-kit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 459C7EBF304389C9005D92DC /* Products */;
 			projectDirPath = "";
@@ -231,6 +240,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D100000430439000005D92DC /* Protocol fixtures in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -586,6 +596,21 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D100000330439000005D92DC /* XCLocalSwiftPackageReference "device-kit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "device-kit";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D100000230439000005D92DC /* PaperDeviceKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D100000330439000005D92DC /* XCLocalSwiftPackageReference "device-kit" */;
+			productName = PaperDeviceKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 459C7EB6304389C9005D92DC /* Project object */;
 }

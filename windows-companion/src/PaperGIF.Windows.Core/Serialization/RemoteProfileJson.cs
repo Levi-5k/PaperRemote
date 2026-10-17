@@ -14,17 +14,47 @@ public static class RemoteProfileJson
         var sourceVersion = document.RootElement.TryGetProperty("version", out var versionElement)
             ? versionElement.GetInt32()
             : 1;
-        if (sourceVersion is < 1 or > RemoteProfile.CurrentVersion)
+        if (sourceVersion is < 1 or > RemoteProfile.HardwareBindingsVersion)
         {
             throw new JsonException($"Unsupported remote profile version {sourceVersion}.");
+        }
+        if (sourceVersion < 7 && document.RootElement.TryGetProperty("hardwareBindings", out _))
+            throw new JsonException("Hardware bindings require profile version 7.");
+        if (sourceVersion == 7)
+        {
+            if (!document.RootElement.TryGetProperty("hardwareBindings", out var bindings) ||
+                bindings.ValueKind != JsonValueKind.Array || bindings.GetArrayLength() > 256)
+                throw new JsonException("v7 requires a bounded hardwareBindings array.");
+            foreach (var binding in bindings.EnumerateArray())
+            {
+                if (binding.ValueKind != JsonValueKind.Object ||
+                    new[] { "inputID", "event", "mode" }.Any(name =>
+                        !binding.TryGetProperty(name, out var field) || field.ValueKind != JsonValueKind.String) ||
+                    new[] { "minimum", "maximum", "step" }.Any(name =>
+                        !binding.TryGetProperty(name, out var field) || field.ValueKind != JsonValueKind.Number ||
+                        !field.TryGetDouble(out var value) || !double.IsFinite(value)) ||
+                    !binding.TryGetProperty("action", out var action) || action.ValueKind != JsonValueKind.Object ||
+                    new[] { "type", "host", "text" }.Any(name =>
+                        !action.TryGetProperty(name, out var field) || field.ValueKind != JsonValueKind.String) ||
+                    !action.TryGetProperty("value", out var actionValue) || actionValue.ValueKind != JsonValueKind.Number || !actionValue.TryGetInt32(out _) ||
+                    !action.TryGetProperty("modifiers", out var modifiers) || modifiers.ValueKind != JsonValueKind.Array)
+                    throw new JsonException("Invalid v7 hardware binding or action.");
+            }
         }
 
         var profile = JsonSerializer.Deserialize<RemoteProfile>(json, Options)
             ?? throw new JsonException("Remote profile was empty.");
-        profile.Version = RemoteProfile.CurrentVersion;
+        profile.Version = Math.Max(sourceVersion, RemoteProfile.CurrentVersion);
+        if (BindingValidationMessage(profile.HardwareBindings ?? []) is { } bindingError)
+            throw new JsonException(bindingError);
         profile.Computers ??= [];
         profile.Pages ??= [];
-        var pageElements = document.RootElement.GetProperty("pages").EnumerateArray().ToArray();
+        if (!document.RootElement.TryGetProperty("pages", out var pagesElement) || pagesElement.ValueKind != JsonValueKind.Array ||
+            profile.Pages.Any(page => page is null || page.Controls is null ||
+                page.Controls.Any(control => control is null || control.Action is null)) ||
+            profile.Computers.Any(computer => computer is null) || profile.ButtonTexture is null)
+            throw new JsonException("Invalid profile pages, controls, computers or texture.");
+        var pageElements = pagesElement.EnumerateArray().ToArray();
         for (var index = 0; index < Math.Min(profile.Pages.Count, pageElements.Length); index++)
         {
             if (profile.Pages[index].OpenBuildsController is { } settings &&
@@ -87,8 +117,64 @@ public static class RemoteProfileJson
         }
     }
 
-    public static string Serialize(RemoteProfile profile) =>
-        JsonSerializer.Serialize(profile, Options);
+    public static string Serialize(RemoteProfile profile)
+    {
+        if (BindingValidationMessage(profile.HardwareBindings ?? []) is { } error)
+            throw new InvalidOperationException(error);
+        if (profile.Version < 7 && profile.HardwareBindings is { Count: > 0 })
+            throw new InvalidOperationException("Hardware bindings require profile version 7.");
+        var node = JsonSerializer.SerializeToNode(profile, Options)!.AsObject();
+        if (profile.Version < 7) node.Remove("hardwareBindings");
+        else node["hardwareBindings"] = JsonSerializer.SerializeToNode(profile.HardwareBindings ?? [], Options);
+        return node.ToJsonString(Options);
+    }
+
+    private static string? BindingValidationMessage(IReadOnlyList<HardwareBinding> bindings)
+    {
+        if (bindings.Count > 256 || bindings.Any(binding => binding is null))
+            return "Hardware bindings must be non-null and bounded.";
+        foreach (var binding in bindings)
+            if (binding.ValidateShape() is { } error) return error;
+        if (bindings.Select(binding => (binding.InputID, binding.Event, binding.Direction)).Distinct().Count() != bindings.Count ||
+            bindings.GroupBy(binding => (binding.InputID, binding.Event)).Any(group =>
+                group.Count() > 1 && group.Any(binding => binding.Direction is null)))
+            return "Duplicate or overlapping wildcard/directional hardware bindings.";
+        return null;
+    }
+
+    public static string SerializeForDevice(RemoteProfile profile, DeviceDescriptor device)
+    {
+        device.Validate();
+        var hasBindings = profile.HardwareBindings is { Count: > 0 };
+        var version = device.Capabilities.ProfileVersions.Contains(7) ? 7 : 6;
+        if (hasBindings && version < 7)
+            throw new InvalidOperationException("This device only supports v6; hardware bindings cannot be sent.");
+        if (profile.Pages.Count > device.Capabilities.MaxPages ||
+            profile.Pages.Any(page => page.Controls.Count > device.Capabilities.MaxControls))
+            throw new InvalidOperationException("Profile exceeds the device's page/control capacity.");
+        if ((device.Display is null || !device.Display.Touch) && profile.Pages.Any(page => page.Controls.Count > 0))
+            throw new InvalidOperationException("This device has no touchscreen; remove screen controls and assign physical inputs.");
+        var usesImages = profile.ButtonTexture.Kind == RemoteButtonTextureKind.Image ||
+            profile.Pages.SelectMany(page => page.Controls).Any(control => control.ButtonTexture?.Kind == RemoteButtonTextureKind.Image);
+        if (usesImages && device is not { BoardID: "m5stack.m5paper", Display: { Width: 540, Height: 960, PixelFormat: "gray4" }, Capabilities.Media: true })
+            throw new InvalidOperationException("Button image assets use the M5Paper media format; custom-display conversion/upload is unavailable.");
+        var bindings = profile.HardwareBindings ?? [];
+        if (BindingValidationMessage(bindings) is { } bindingError)
+            throw new InvalidOperationException(bindingError);
+        if (bindings.Count > Math.Min(256, device.Capabilities.MaxControls))
+            throw new InvalidOperationException("Hardware input/event bindings must be unique and bounded.");
+        foreach (var binding in bindings)
+            if (binding.Validate(device) is { } error)
+                throw new InvalidOperationException(error);
+        var node = JsonSerializer.SerializeToNode(profile, Options)!.AsObject();
+        node["version"] = version;
+        if (version == 6) node.Remove("hardwareBindings");
+        else node["hardwareBindings"] = JsonSerializer.SerializeToNode(bindings, Options);
+        var json = node.ToJsonString(Options);
+        if (System.Text.Encoding.UTF8.GetByteCount(json) > device.Capabilities.MaxProfileBytes)
+            throw new InvalidOperationException("Profile exceeds this device's byte limit.");
+        return json;
+    }
 
     private static JsonSerializerOptions CreateOptions()
     {

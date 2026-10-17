@@ -121,12 +121,14 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private enum BluetoothTransferKind: Equatable {
         case media
         case remoteProfile
+        case remoteControls
         case buttonImage(UUID)
 
         var finishOpcode: UInt8 {
             switch self {
             case .media: 0x12
             case .remoteProfile: 0x42
+            case .remoteControls: 0x4A
             case .buttonImage: 0x47
             }
         }
@@ -255,6 +257,10 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private var homeWiFiAuthorization: String?
     private var remoteProfilePullTask: Task<Void, Never>?
     private var isAwaitingRemoteProfilePull = false
+    /// The profile the M5Paper is known to have; edits are diffed against it.
+    private var deviceRemoteProfile: PaperGIFRemoteProfile?
+    private var sendingRemoteProfile: PaperGIFRemoteProfile?
+    private var controlUpdatesUnsupported = false
     private var isBluetoothSuspendedForWiFiTransfer = false
     private var pendingLocalMediaState: LocalMediaState?
     private var lastSentLocalMediaState: LocalMediaState?
@@ -615,7 +621,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
                 let isReachable = await self.probeWiFiConnection(
                     at: deviceURL,
                     authorization: authorization,
-                    updatesAccessPointState: !usesHomeWiFi
+                    updatesAccessPointState: !usesHomeWiFi,
+                    timeout: usesHomeWiFi ? 3 : 1
                 )
                 let isReady: Bool
                 if !isReachable {
@@ -689,8 +696,22 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         if beginNextButtonImageUpload(for: profile) {
             return
         }
+        // Edits to existing controls are sent on their own so the M5Paper updates at once.
+        if !controlUpdatesUnsupported, let deviceRemoteProfile,
+           let changes = PaperGIFRemoteProfile.changedControls(from: deviceRemoteProfile, to: profile) {
+            if changes.isEmpty {
+                pendingRemoteProfile = nil
+                remoteSyncStatus = "Remote synced"
+                return
+            }
+            if let payload = profile.controlUpdatePayload(for: changes) {
+                sendControlUpdate(payload, profile: profile)
+                return
+            }
+        }
 
         pendingRemoteProfile = nil
+        sendingRemoteProfile = profile
         transferMediaID = nil
         transferProgress = 0
         transferStatus = "Preparing remote"
@@ -703,6 +724,67 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         guard let profile = pendingRemoteProfile else { return }
         pendingRemoteProfile = nil
         syncRemoteProfile(profile)
+    }
+
+    /// True when only existing controls differ from the M5Paper, so the edit can be sent at once.
+    func canSendAsControlUpdate(_ profile: PaperGIFRemoteProfile) -> Bool {
+        !controlUpdatesUnsupported && deviceRemoteProfile.flatMap {
+            PaperGIFRemoteProfile.changedControls(from: $0, to: profile)
+        } != nil
+    }
+
+    private func sendControlUpdate(_ payload: Data, profile: PaperGIFRemoteProfile) {
+        pendingRemoteProfile = nil
+        sendingRemoteProfile = profile
+        isTransferring = true
+        remoteSyncStatus = "Syncing changes"
+        guard homeWiFiState == .connected, let deviceURL = homeWiFiDeviceURL,
+              let authorization = homeWiFiAuthorization else {
+            transferMediaID = nil
+            transferProgress = 0
+            beginBluetoothTransfer(payload, command: 0x49, kind: .remoteControls)
+            return
+        }
+        Task { [weak self] in
+            var request = URLRequest(url: deviceURL.appending(path: "remote/controls"))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 5
+            request.httpBody = payload
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.allowsCellularAccess = false
+            configuration.waitsForConnectivity = false
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let response = try? await session.data(for: request).1 as? HTTPURLResponse
+            self?.finishControlUpdate(succeeded: response?.statusCode == 200)
+        }
+    }
+
+    private func finishControlUpdate(succeeded: Bool) {
+        preparationTimeout?.cancel()
+        chunkTimeout?.cancel()
+        completionTimeout?.cancel()
+        isTransferring = false
+        uploadData = nil
+        bluetoothTransferKind = nil
+        let sent = sendingRemoteProfile
+        sendingRemoteProfile = nil
+        if succeeded {
+            deviceRemoteProfile = sent
+            transferProgress = 1
+            remoteSyncStatus = "Remote synced"
+            syncPendingRemoteProfile()
+            sendPendingLocalMediaState()
+            return
+        }
+        // Older firmware or a profile changed elsewhere: send the whole profile instead.
+        deviceRemoteProfile = nil
+        if let profile = pendingRemoteProfile ?? sent {
+            pendingRemoteProfile = nil
+            syncRemoteProfile(profile)
+        }
     }
 
     private var uploadedButtonImagesKey: String? {
@@ -809,10 +891,11 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private func probeWiFiConnection(
         at deviceURL: URL = PaperGIFBluetoothManager.wifiDeviceURL,
         authorization: String? = nil,
-        updatesAccessPointState: Bool = true
+        updatesAccessPointState: Bool = true,
+        timeout: TimeInterval = 1
     ) async -> Bool {
         var request = URLRequest(url: deviceURL.appending(path: "status"))
-        request.timeoutInterval = 1
+        request.timeoutInterval = timeout
         if let authorization {
             request.setValue("Bearer \(authorization)", forHTTPHeaderField: "Authorization")
         }
@@ -820,8 +903,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.allowsCellularAccess = false
         configuration.waitsForConnectivity = false
-        configuration.timeoutIntervalForRequest = 1
-        configuration.timeoutIntervalForResource = 2
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout + 1
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
@@ -932,6 +1015,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
                 guard !Task.isCancelled else { return }
                 pendingRemoteProfile = nil
                 remoteProfileFromDevice = profile
+                deviceRemoteProfile = profile
                 isAwaitingRemoteProfilePull = false
                 remoteSyncStatus = "Loaded remote from M5Paper"
             } catch is CancellationError {
@@ -1241,8 +1325,12 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             isTransferring = false
             uploadData = nil
             bluetoothTransferKind = nil
+            deviceRemoteProfile = sendingRemoteProfile
+            sendingRemoteProfile = nil
             syncPendingRemoteProfile()
             sendPendingLocalMediaState()
+        case 0x4B:
+            finishControlUpdate(succeeded: true)
         case 0x48:
             preparationTimeout?.cancel()
             chunkTimeout?.cancel()
@@ -1255,7 +1343,9 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             bluetoothTransferKind = nil
             syncPendingRemoteProfile()
         case 0x7F:
-            if isTransferring {
+            if bluetoothTransferKind == .remoteControls {
+                finishControlUpdate(succeeded: false)
+            } else if isTransferring {
                 failTransfer("The M5Paper rejected the transfer")
             } else if isScanningWiFiNetworks {
                 failWiFiScan("The M5Paper could not scan for networks")
@@ -1577,6 +1667,12 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     }
 
     private func failTransfer(_ message: String) {
+        if bluetoothTransferKind == .remoteControls {
+            // No answer usually means firmware without control updates; use full uploads on this connection.
+            controlUpdatesUnsupported = true
+            finishControlUpdate(succeeded: false)
+            return
+        }
         preparationTimeout?.cancel()
         chunkTimeout?.cancel()
         completionTimeout?.cancel()
@@ -1619,6 +1715,9 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         remoteProfilePullTask?.cancel()
         remoteProfilePullTask = nil
         isAwaitingRemoteProfilePull = false
+        deviceRemoteProfile = nil
+        sendingRemoteProfile = nil
+        controlUpdatesUnsupported = false
         bluetoothTransferKind = nil
         uploadOffset = 0
         acknowledgedUploadOffset = 0

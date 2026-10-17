@@ -1018,6 +1018,50 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         ]),
     ])
 
+    /// Existing controls whose settings differ, or nil when anything else changed
+    /// (pages, control order or membership, profile settings), which needs a full upload.
+    static func changedControls(from old: RemoteProfile, to new: RemoteProfile) -> [ControlLocation]? {
+        guard old.pages.count == new.pages.count else { return nil }
+        var oldShape = old
+        var newShape = new
+        oldShape.updatedAtMilliseconds = 0
+        newShape.updatedAtMilliseconds = 0
+        var changes: [ControlLocation] = []
+        for pageIndex in new.pages.indices {
+            let oldControls = old.pages[pageIndex].controls
+            let newControls = new.pages[pageIndex].controls
+            guard oldControls.map(\.id) == newControls.map(\.id) else { return nil }
+            for controlIndex in newControls.indices where oldControls[controlIndex] != newControls[controlIndex] {
+                changes.append(ControlLocation(page: pageIndex, control: controlIndex))
+            }
+            oldShape.pages[pageIndex].controls = []
+            newShape.pages[pageIndex].controls = []
+        }
+        return oldShape == newShape ? changes : nil
+    }
+
+    /// Body for the M5Paper's `POST /remote/controls`, encoded exactly like the full profile upload.
+    func controlUpdatePayload(for changes: [ControlLocation]) throws -> Data {
+        guard let object = try JSONSerialization.jsonObject(with: devicePayload) as? [String: Any],
+              let pages = object["pages"] as? [[String: Any]] else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        let controls: [[String: Any]] = try changes.map { change in
+            guard pages.indices.contains(change.page),
+                  let pageControls = pages[change.page]["controls"] as? [[String: Any]],
+                  pageControls.indices.contains(change.control) else {
+                throw CocoaError(.coderInvalidValue)
+            }
+            return ["pageID": pages[change.page]["id"] ?? "", "control": pageControls[change.control]]
+        }
+        var body: [String: Any] = [
+            "updatedAtMilliseconds": updatedAtMilliseconds,
+            "controls": controls,
+        ]
+        body["buttonBackground"] = object["buttonBackground"]
+        return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
     var devicePayload: Data {
         get throws {
             let encoder = JSONEncoder()
@@ -1042,6 +1086,11 @@ struct RemoteProfile: Codable, Equatable, Sendable {
             )
         }
     }
+}
+
+struct ControlLocation: Equatable, Sendable {
+    let page: Int
+    let control: Int
 }
 
 struct RemoteIcon: Identifiable, Sendable {
