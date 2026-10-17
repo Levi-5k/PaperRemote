@@ -169,6 +169,27 @@ public final class DeviceSession: ObservableObject {
         }
     }
 
+    /// Saves a device identified over Bluetooth (or another side channel) without
+    /// changing the active device. Keeps any known network address.
+    @discardableResult
+    public func remember(_ descriptor: DeviceDescriptor, address: String = "") throws -> SavedDevice {
+        try descriptor.validate()
+        if let index = records.firstIndex(where: { $0.id == descriptor.deviceID }) {
+            records[index].descriptor = descriptor
+            if !address.isEmpty { records[index].address = address }
+            if selectedID == descriptor.deviceID {
+                self.descriptor = descriptor
+                layout = records[index].layoutOverride ?? self.layout ?? descriptor.layout
+            }
+            try persist()
+            return records[index]
+        }
+        let record = SavedDevice(descriptor: descriptor, address: address, adapter: .native)
+        records.append(record)
+        try persist()
+        return record
+    }
+
     public func select(id: String) {
         catalogTask?.cancel()
         generation = UUID()

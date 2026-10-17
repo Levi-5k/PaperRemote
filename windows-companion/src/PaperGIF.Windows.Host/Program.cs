@@ -65,6 +65,8 @@ internal static class Program
         builder.Services.AddSingleton<StartupRegistration>();
         builder.Services.AddSingleton<IBleDeviceConnector, WinRtBleConnector>();
         builder.Services.AddSingleton(services => new BleSessionPool(services.GetRequiredService<IBleDeviceConnector>()));
+        builder.Services.AddSingleton<IBleAdvertisementScanner, WinRtBleAdvertisementScanner>();
+        builder.Services.AddSingleton<BleNearbyDeviceService>();
         builder.Services.AddSingleton<RemoteEditorStore>();
         builder.Services.AddHostedService<BleRelayService>();
         builder.Services.AddSingleton<NetworkDiscoveryService>();
@@ -87,6 +89,7 @@ internal static class Program
             app.Services.GetRequiredService<StartupRegistration>(),
             app.Services.GetRequiredService<RemoteEditorStore>(),
             app.Services.GetRequiredService<NetworkDiscoveryService>(),
+            app.Services.GetRequiredService<BleNearbyDeviceService>(),
             app.Services.GetRequiredService<NetHomeService>(),
             app.Services.GetRequiredService<ModuleCatalogService>(),
             app.Services.GetRequiredService<HomeAccessoryCatalog>()));

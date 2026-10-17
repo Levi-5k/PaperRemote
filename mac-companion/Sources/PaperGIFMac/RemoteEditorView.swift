@@ -43,6 +43,7 @@ private struct RemoteEditorView: View {
     @StateObject private var discovery = WLEDDiscovery()
     @StateObject private var computerDiscovery = ComputerDiscovery()
     @StateObject private var deviceDiscovery = DeviceDiscovery()
+    @StateObject private var bluetoothDevices = DeviceBluetoothScanner()
     @State private var inspectorTab = InspectorTab.catalog
     @State private var automaticallyLoadedDeviceAddress: String?
 
@@ -77,11 +78,13 @@ private struct RemoteEditorView: View {
             discovery.start()
             computerDiscovery.start()
             deviceDiscovery.start(preferredAddress: store.deviceAddress)
+            bluetoothDevices.start()
         }
         .onDisappear {
             discovery.stop()
             computerDiscovery.stop()
             deviceDiscovery.stop()
+            bluetoothDevices.stop()
             store.saveImmediately()
         }
         .onChange(of: deviceDiscovery.devices) { devices in
@@ -120,7 +123,7 @@ private struct RemoteEditorView: View {
             }
             Spacer()
             sendStatus
-            if deviceDiscovery.devices.isEmpty && devices.descriptor == nil {
+            if deviceDiscovery.devices.isEmpty && bluetoothOnlyDevices.isEmpty && devices.descriptor == nil {
                 Label(
                     deviceDiscovery.isScanning ? "Scanning for devices" : "No device found",
                     systemImage: deviceDiscovery.isScanning ? "dot.radiowaves.left.and.right" : "exclamationmark.triangle"
@@ -128,16 +131,20 @@ private struct RemoteEditorView: View {
                     .foregroundStyle(.secondary)
                     .font(.caption)
                     .frame(width: 180)
-                    .help(deviceDiscovery.scanMessage ?? "Searching Bonjour and the local network")
+                    .help(deviceDiscovery.scanMessage ?? bluetoothDevices.status ?? "Searching Bonjour, the local network and Bluetooth")
             } else {
                 Picker("Device", selection: deviceSelection) {
                     ForEach(deviceDiscovery.devices) { device in
                         Text(device.name).tag(device.address)
                     }
                     if let descriptor = devices.descriptor,
+                       !store.deviceAddress.isEmpty,
                        devices.address == store.deviceAddress,
                        !deviceDiscovery.devices.contains(where: { $0.address == store.deviceAddress }) {
                         Text(descriptor.name).tag(store.deviceAddress)
+                    }
+                    ForEach(bluetoothOnlyDevices) { device in
+                        Text("\(device.displayName) (Bluetooth)").tag(device.tag)
                     }
                 }
                 .labelsHidden()
@@ -146,6 +153,7 @@ private struct RemoteEditorView: View {
             }
             Button {
                 deviceDiscovery.scan(preferredAddress: store.deviceAddress)
+                bluetoothDevices.refresh()
             } label: {
                 if deviceDiscovery.isScanning {
                     ProgressView().controlSize(.small)
@@ -178,6 +186,18 @@ private struct RemoteEditorView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    /// Nearby Bluetooth devices that are not already listed through the LAN.
+    private var bluetoothOnlyDevices: [DeviceBluetoothScanner.Nearby] {
+        let lanAddresses = Set(deviceDiscovery.devices.map(\.address))
+        return bluetoothDevices.nearby.filter { device in
+            guard let id = device.descriptor?.deviceID else { return true }
+            if id == devices.selectedID, !devices.address.isEmpty,
+               lanAddresses.contains(devices.address) { return false }
+            return !devices.records.contains { $0.id == id && !$0.address.isEmpty && lanAddresses.contains($0.address) }
+        }
+        .sorted { $0.rssi > $1.rssi }
+    }
+
     private var selectedDevice: DeviceDiscovery.Device? {
         deviceDiscovery.devices.first { $0.address == store.deviceAddress }
     }
@@ -185,10 +205,20 @@ private struct RemoteEditorView: View {
     private var deviceSelection: Binding<String> {
         Binding(
             get: {
-                selectedDevice?.address ?? (devices.descriptor != nil && devices.address == store.deviceAddress
+                if store.deviceAddress.isEmpty, let id = devices.selectedID,
+                   let device = bluetoothOnlyDevices.first(where: { $0.descriptor?.deviceID == id }) {
+                    return device.tag
+                }
+                return selectedDevice?.address ?? (devices.descriptor != nil && devices.address == store.deviceAddress
                     ? store.deviceAddress : deviceDiscovery.devices.first?.address ?? "")
             },
             set: { address in
+                if let device = bluetoothDevices.device(tag: address) {
+                    guard let descriptor = device.descriptor else { return }
+                    automaticallyLoadedDeviceAddress = address
+                    Task { await store.useBluetoothDevice(descriptor) }
+                    return
+                }
                 guard store.deviceAddress != address else { return }
                 automaticallyLoadedDeviceAddress = address
                 store.deviceAddress = address

@@ -58,6 +58,14 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         var id: String { ssid }
     }
 
+    struct NearbyDevice: Identifiable, Equatable, Sendable {
+        let id: UUID
+        var name: String
+        var rssi: Int
+        var lastSeen: Date
+        var deviceID: String?
+    }
+
     enum ConnectionState: Equatable {
         case bluetoothUnavailable
         case searching
@@ -67,7 +75,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         var description: String {
             switch self {
             case .bluetoothUnavailable: "Bluetooth unavailable"
-            case .searching: "Looking for M5Paper"
+            case .searching: "Looking for devices"
             case .connecting: "Connecting"
             case .connected: "Connected"
             }
@@ -198,6 +206,12 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     @Published private(set) var connectionState = ConnectionState.bluetoothUnavailable
     @Published private(set) var bluetoothDescriptor: DeviceDescriptor?
     @Published private(set) var descriptorStatus: String?
+    @Published private(set) var nearbyDevices: [NearbyDevice] = []
+    @Published private(set) var isBrowsingNearby = false
+    private var browseClients = 0
+    private var userSelectedPeripheral: UUID?
+    private var nearbyExpiry: Task<Void, Never>?
+    private static let peripheralDeviceIDsKey = "bluetooth.peripheralDeviceIDs"
     weak var deviceSession: DeviceSession?
     private var nativeProfileTask: Task<Void, Never>?
     private var mediaUploadTask: Task<Void, Never>?
@@ -1368,10 +1382,118 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         guard centralManager.state == .poweredOn else { return }
         connectionTimeout?.cancel()
         connectionState = .searching
+        startScan()
+    }
+
+    private func startScan() {
         centralManager.scanForPeripherals(
             withServices: [Self.serviceUUID],
-            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: isBrowsingNearby]
         )
+    }
+
+    /// Lists nearby PaperRemote devices while a setup screen is visible.
+    func startBrowsingNearby() {
+        browseClients += 1
+        guard browseClients == 1 else { return }
+        isBrowsingNearby = true
+        if let peripheral, peripheral.state == .connected {
+            noteConnectedPeripheral(peripheral)
+        }
+        if centralManager.state == .poweredOn { startScan() }
+        nearbyExpiry?.cancel()
+        nearbyExpiry = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self else { return }
+                let cutoff = Date().addingTimeInterval(-20)
+                let current = self.peripheral?.identifier
+                self.nearbyDevices.removeAll { $0.lastSeen < cutoff && $0.id != current }
+            }
+        }
+    }
+
+    func stopBrowsingNearby() {
+        browseClients = max(0, browseClients - 1)
+        guard browseClients == 0 else { return }
+        isBrowsingNearby = false
+        nearbyExpiry?.cancel()
+        nearbyExpiry = nil
+        if connectionState != .searching, centralManager.state == .poweredOn { centralManager.stopScan() }
+    }
+
+    var connectedPeripheralID: UUID? {
+        connectionState == .connected ? peripheral?.identifier : nil
+    }
+
+    /// Switches the Bluetooth connection to a specific nearby device.
+    func connectNearby(_ id: UUID) {
+        userSelectedPeripheral = id
+        if peripheral?.identifier == id, connectionState == .connected, let bluetoothDescriptor {
+            rememberBluetoothDevice(bluetoothDescriptor)
+            return
+        }
+        connectionTimeout?.cancel()
+        UserDefaults.standard.set(id.uuidString, forKey: Self.savedPeripheralKey)
+        if let peripheral, peripheral.state != .disconnected {
+            centralManager.cancelPeripheralConnection(peripheral)
+        } else {
+            resetConnection()
+            reconnectOrScan()
+        }
+    }
+
+    /// Connects over Bluetooth to a saved device that was previously identified over Bluetooth.
+    @discardableResult
+    func connectSavedDevice(deviceID: String) -> Bool {
+        guard let id = peripheralDeviceIDs.first(where: { $0.value == deviceID })?.key,
+              let uuid = UUID(uuidString: id) else { return false }
+        if bluetoothDescriptor?.deviceID == deviceID, connectionState == .connected { return true }
+        connectNearby(uuid)
+        return true
+    }
+
+    private var peripheralDeviceIDs: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: Self.peripheralDeviceIDsKey) as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: Self.peripheralDeviceIDsKey) }
+    }
+
+    private func noteNearby(_ peripheral: CBPeripheral, advertisementData: [String: Any], rssi: Int) {
+        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? "PaperRemote device"
+        let deviceID = peripheralDeviceIDs[peripheral.identifier.uuidString]
+        if let index = nearbyDevices.firstIndex(where: { $0.id == peripheral.identifier }) {
+            nearbyDevices[index].name = name
+            if rssi != 127 { nearbyDevices[index].rssi = rssi }
+            nearbyDevices[index].lastSeen = Date()
+            nearbyDevices[index].deviceID = deviceID ?? nearbyDevices[index].deviceID
+        } else {
+            nearbyDevices.append(NearbyDevice(id: peripheral.identifier, name: name, rssi: rssi,
+                                              lastSeen: Date(), deviceID: deviceID))
+        }
+    }
+
+    private func noteConnectedPeripheral(_ peripheral: CBPeripheral) {
+        noteNearby(peripheral, advertisementData: [:], rssi: 127)
+    }
+
+    private func rememberBluetoothDevice(_ descriptor: DeviceDescriptor) {
+        guard let peripheral else { return }
+        var map = peripheralDeviceIDs
+        map[peripheral.identifier.uuidString] = descriptor.deviceID
+        peripheralDeviceIDs = map
+        noteConnectedPeripheral(peripheral)
+        if let index = nearbyDevices.firstIndex(where: { $0.id == peripheral.identifier }) {
+            nearbyDevices[index].name = descriptor.name
+            nearbyDevices[index].deviceID = descriptor.deviceID
+        }
+        guard let deviceSession else { return }
+        try? deviceSession.remember(descriptor)
+        let requested = userSelectedPeripheral == peripheral.identifier
+        if requested { userSelectedPeripheral = nil }
+        if requested || deviceSession.selectedID == nil,
+           deviceSession.selectedID != descriptor.deviceID {
+            deviceSession.select(id: descriptor.deviceID)
+        }
     }
 
     private func finishConnectingIfReady() {
@@ -1390,6 +1512,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             : "Native device identified. Add its HTTP endpoint in Device Setup to sync profiles."
         connectionTimeout?.cancel()
         UserDefaults.standard.set(peripheral?.identifier.uuidString, forKey: Self.savedPeripheralKey)
+        rememberBluetoothDevice(descriptor)
         if descriptor.isM5Paper {
             finishConnectingIfReady()
         } else {
@@ -2017,7 +2140,9 @@ extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
         rssi RSSI: NSNumber
     ) {
         MainActor.assumeIsolated {
-            central.stopScan()
+            noteNearby(peripheral, advertisementData: advertisementData, rssi: RSSI.intValue)
+            guard connectionState == .searching, self.peripheral == nil else { return }
+            if !isBrowsingNearby { central.stopScan() }
             connectionState = .connecting
             self.peripheral = peripheral
             peripheral.delegate = self

@@ -159,6 +159,35 @@ Limitations:
   consulted. Over Wi-Fi, values that change on the device are picked up by
   polling, not pushed.
 
+## Bluetooth-only devices in the picker
+
+Some controllers start out reachable only over Bluetooth, for example a fresh
+"paperGIF SuperMini S3" that is still on its setup AP. These now appear in the
+device picker as well.
+
+- **Scanning.** While the editor window is visible, the Windows Bluetooth scanner
+  runs and lists peripherals that advertise the PaperRemote service
+  (`7A230001-7D2A-4C7B-9C42-504749460001`). It takes the device name from the
+  scan response. A device that has not been seen for about 30 s is dropped from
+  the list. **Scan** restarts both LAN and Bluetooth discovery.
+- **Picker.** Bluetooth devices are labelled `<name> (Bluetooth)`. Once a device
+  has been identified, the companion knows its `deviceID`. If a LAN entry has
+  the same `deviceID`, the device is listed only once, as the LAN entry.
+- **Identification.** Selecting a Bluetooth entry reads the device's descriptor
+  over BLE using the paged descriptor lease (`7A230004-…`). The companion then
+  disconnects, so the lease is always released. The descriptor goes through the
+  same checks as `GET /device`, and the device becomes the active one with no
+  network address.
+  - Its profile is stored under its `deviceID`, the same as any other device.
+  - The layout preview and Device controls (over BLE) work.
+- **No profile send.** Sending a profile needs HTTP, so **Send** is disabled for
+  these devices. The status reads "Connect this device to Wi-Fi from the phone
+  app to send profiles."
+- **Not hardware-tested.** The descriptor page reader, nearby-device tracker,
+  LAN/Bluetooth merge and identifier are tested against fakes
+  (`BleNearbyDeviceTests`). The WinRT advertisement watcher has not been run on
+  Windows hardware.
+
 ## Reproducing validation
 
 Run from the repository root with .NET SDK

@@ -99,32 +99,12 @@ public static class BleControlCodec
     }
 
     /// <summary>
-    /// Reads the descriptor characteristic with the offset/slice protocol. <paramref name="write"/> must write
-    /// with response; <paramref name="read"/> must read uncached.
+    /// Reads the descriptor characteristic with the offset/page lease (see <see cref="BleDescriptorPageReader"/>).
+    /// <paramref name="write"/> must write with response; <paramref name="read"/> must read uncached.
     /// </summary>
-    public static async Task<string> ReadDescriptorAsync(
-        Func<byte[], CancellationToken, Task> write, Func<CancellationToken, Task<byte[]>> read, CancellationToken cancellationToken)
-    {
-        using var buffer = new MemoryStream();
-        uint offset = 0;
-        while (true)
-        {
-            await write(EncodeDescriptorOffset(offset), cancellationToken);
-            var slice = await read(cancellationToken);
-            if (slice.Length == 0) break;
-            if (slice.Length > BleProtocol.DescriptorSliceBytes || buffer.Length + slice.Length > BleProtocol.MaximumMessageBytes)
-                throw new BleProtocolException("Device descriptor exceeds 64 KiB.");
-            buffer.Write(slice);
-            if (slice.Length < BleProtocol.DescriptorSliceBytes)
-            {
-                await write(EncodeDescriptorOffset((uint)buffer.Length), cancellationToken);
-                if ((await read(cancellationToken)).Length != 0) throw new BleProtocolException("Descriptor did not end after a short slice.");
-                break;
-            }
-            offset += BleProtocol.DescriptorSliceBytes;
-        }
-        return DecodeUtf8(buffer.ToArray());
-    }
+    public static Task<string> ReadDescriptorAsync(
+        Func<byte[], CancellationToken, Task> write, Func<CancellationToken, Task<byte[]>> read, CancellationToken cancellationToken) =>
+        BleDescriptorPageReader.ReadAsync(write, read, cancellationToken);
 }
 
 /// <summary>Reassembles 0x51 snapshot fragments: <c>[0x51, flags, fragment...]</c>, flags bit 0 = final.</summary>

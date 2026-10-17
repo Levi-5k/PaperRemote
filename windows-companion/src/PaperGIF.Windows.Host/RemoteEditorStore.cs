@@ -97,6 +97,10 @@ internal sealed class RemoteEditorStore : IDisposable
     public bool CanInstallM5Firmware => adapter is not null && FirmwareCompatibility.SupportsM5PaperUpdate(Descriptor);
     public string? SelectedInputID { get; set; }
     public IReadOnlyList<SavedDevice> SavedDevices => devices.Values.ToArray();
+    public string? ActiveDeviceId => activeDeviceId;
+    public const string BluetoothOnlyMessage = "Connect this device to Wi-Fi from the phone app to send profiles.";
+    /// <summary>The active device was identified over Bluetooth and has no network address, so HTTP operations are unavailable.</summary>
+    public bool IsBluetoothOnly => string.IsNullOrWhiteSpace(DeviceAddress);
     public CancellationToken DeviceSessionCancellation => sessionCancellation.Token;
 
     private void RestoreOfflineDescriptor(SavedDevice saved)
@@ -204,6 +208,71 @@ internal sealed class RemoteEditorStore : IDisposable
         Save();
         Changed?.Invoke(this, EventArgs.Empty);
         _ = RefreshBoardAsync(catalog, Descriptor, generation, cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads a nearby device's descriptor over Bluetooth (via <paramref name="readDescriptor"/>) and installs it as the
+    /// active device with an empty network address. The per-device profile record is keyed by its deviceID.
+    /// </summary>
+    public async Task<bool> ActivateBluetoothDeviceAsync(string name, Func<CancellationToken, Task<DeviceDescriptor>> readDescriptor)
+    {
+        if (IsBusy) return false;
+        IsBusy = true;
+        var generation = sessionGeneration;
+        SetStatus($"Reading {name} over Bluetooth...");
+        try
+        {
+            var descriptor = await readDescriptor(sessionCancellation.Token);
+            if (generation != sessionGeneration) return false;
+            ActivateBluetoothDevice(descriptor);
+            SetStatus($"{descriptor.Name} connected over Bluetooth. {BluetoothOnlyMessage}");
+            return true;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            if (generation == sessionGeneration) SetStatus($"Could not read {name} over Bluetooth: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            if (generation == sessionGeneration)
+            {
+                IsBusy = false;
+                StatusChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+    }
+
+    private void ActivateBluetoothDevice(DeviceDescriptor descriptor)
+    {
+        descriptor.Validate();
+        Save();
+        sessionCancellation.Cancel();
+        sessionCancellation.Dispose();
+        sessionCancellation = new();
+        sessionGeneration++;
+        liveSyncCancellation?.Cancel();
+        deviceAddress = string.Empty;
+        adapter = null;
+        deviceProfileJson = null;
+        HasLoadedDeviceProfile = false;
+        IsBusy = false;
+        devices.TryGetValue(descriptor.DeviceID, out var saved);
+        activeDeviceId = descriptor.DeviceID;
+        Profile = saved?.Profile ?? CreateEmptyProfile();
+        manualLayout = saved?.LayoutOverride;
+        Descriptor = descriptor;
+        var catalog = new BoardCatalog(catalogClient, Path.Combine(Path.GetDirectoryName(DocumentPath)!, "boards"));
+        var cached = catalog.Cached(descriptor);
+        ApplyLayout(cached.Layout);
+        CatalogStatus = cached.Status;
+        SelectedPageId = Profile.Pages.FirstOrDefault()?.Id;
+        SelectedControlId = null;
+        SelectedInputID = null;
+        EnsureLocalComputer();
+        Save();
+        Changed?.Invoke(this, EventArgs.Empty);
+        _ = RefreshBoardAsync(catalog, descriptor, sessionGeneration, sessionCancellation.Token);
     }
 
     private async Task RefreshBoardAsync(BoardCatalog catalog, DeviceDescriptor descriptor, int generation, CancellationToken cancellationToken)
@@ -1063,6 +1132,11 @@ internal sealed class RemoteEditorStore : IDisposable
         {
             return false;
         }
+        if (IsBluetoothOnly)
+        {
+            SetStatus(BluetoothOnlyMessage);
+            return false;
+        }
         IsBusy = true;
         var generation = sessionGeneration;
         var cancellationToken = sessionCancellation.Token;
@@ -1127,6 +1201,7 @@ internal sealed class RemoteEditorStore : IDisposable
     private Uri DeviceRemoteUri()
     {
         var address = DeviceAddress.Trim();
+        if (address.Length == 0) throw new InvalidOperationException($"This device is connected over Bluetooth only. {BluetoothOnlyMessage}");
         if (!address.Contains("://", StringComparison.Ordinal))
         {
             address = $"http://{address}";
@@ -1180,7 +1255,9 @@ internal sealed class RemoteEditorStore : IDisposable
         {
             Directory.CreateDirectory(Path.GetDirectoryName(DocumentPath)!);
             var id = activeDeviceId ?? $"unidentified:{DeviceAddress}";
-            devices[id] = new SavedDevice(id, DeviceAddress, Profile, Descriptor, manualLayout);
+            // A Bluetooth-only session keeps the device's last known network address in its record.
+            var address = IsBluetoothOnly && devices.TryGetValue(id, out var previous) ? previous.Address : DeviceAddress;
+            devices[id] = new SavedDevice(id, address, Profile, Descriptor, manualLayout);
             var document = new RemoteEditorDocument(Profile, DeviceAddress, devices.Values.ToList(), activeDeviceId);
             var json = JsonSerializer.Serialize(document, RemoteProfileJson.Options);
             var temporaryPath = DocumentPath + ".tmp";

@@ -1,3 +1,4 @@
+using PaperGIF.Windows.Core.Ble;
 using PaperGIF.Windows.Core.Models;
 using System.Text.Json;
 
@@ -12,6 +13,7 @@ internal sealed class RemoteEditorWindow : Form
     private readonly RemoteEditorStore store;
     private readonly CompanionActivity activity;
     private readonly NetworkDiscoveryService discovery;
+    private readonly BleNearbyDeviceService bluetoothDevices;
     private readonly NetHomeService netHomeService;
     private readonly ModuleCatalogService moduleCatalog;
     private readonly PageListBox pagesList = new();
@@ -84,6 +86,7 @@ internal sealed class RemoteEditorWindow : Form
     private readonly Button scanDevicesButton = new();
     private readonly Label syncStatus = new();
     private readonly Button sendButton = new();
+    private readonly ToolTip sendButtonTip = new();
     private readonly Button updatesButton = new();
     private readonly UpdateCoordinator updates;
     private readonly Icon icon;
@@ -97,7 +100,8 @@ internal sealed class RemoteEditorWindow : Form
     private bool modulesLoaded;
     private string? automaticallyLoadedDevice;
 
-    private sealed record DeviceChoice(string DisplayName, DiscoveredEndpoint? Endpoint);
+    private sealed record DeviceChoice(string DisplayName, DiscoveredEndpoint? Endpoint, BleNearbyDevice? Bluetooth = null,
+        string? DeviceId = null);
 
     private sealed record ApplicationList(IReadOnlyList<RemoteApplication> Applications, string? Error, DateTime LoadedAt);
 
@@ -105,6 +109,7 @@ internal sealed class RemoteEditorWindow : Form
         RemoteEditorStore store,
         CompanionActivity activity,
         NetworkDiscoveryService discovery,
+        BleNearbyDeviceService bluetoothDevices,
         NetHomeService netHomeService,
         ModuleCatalogService moduleCatalog,
         HomeAccessoryCatalog homeAccessories,
@@ -115,6 +120,7 @@ internal sealed class RemoteEditorWindow : Form
         deviceControls = new DeviceControlsPanel(store);
         this.activity = activity;
         this.discovery = discovery;
+        this.bluetoothDevices = bluetoothDevices;
         this.netHomeService = netHomeService;
         this.moduleCatalog = moduleCatalog;
         this.homeAccessories = homeAccessories;
@@ -165,6 +171,13 @@ internal sealed class RemoteEditorWindow : Form
         store.Changed += HandleStoreChanged;
         store.StatusChanged += HandleStatusChanged;
         discovery.Changed += HandleDiscoveryChanged;
+        bluetoothDevices.Changed += HandleBluetoothDevicesChanged;
+        // Scan for nearby Bluetooth controllers only while the editor is open.
+        VisibleChanged += (_, _) =>
+        {
+            if (Visible) bluetoothDevices.Start();
+            else bluetoothDevices.Stop();
+        };
         homeAccessories.Changed += HandleStatusChanged;
         _ = discovery.ScanDevicesAsync(store.DeviceAddress);
         RefreshAll();
@@ -254,6 +267,8 @@ internal sealed class RemoteEditorWindow : Form
             store.Changed -= HandleStoreChanged;
             store.StatusChanged -= HandleStatusChanged;
             discovery.Changed -= HandleDiscoveryChanged;
+            bluetoothDevices.Changed -= HandleBluetoothDevicesChanged;
+            bluetoothDevices.Stop();
             homeAccessories.Changed -= HandleStatusChanged;
             updates.Changed -= HandleUpdatesChanged;
         }
@@ -312,6 +327,12 @@ internal sealed class RemoteEditorWindow : Form
         devicePicker.DisplayMember = nameof(DeviceChoice.DisplayName);
         devicePicker.SelectedIndexChanged += async (_, _) =>
         {
+            if (!refreshing && devicePicker.SelectedItem is DeviceChoice { Bluetooth: { } bluetooth })
+            {
+                if (!store.IsBluetoothOnly || bluetooth.DeviceId is null || bluetooth.DeviceId != store.ActiveDeviceId)
+                    await SelectBluetoothDeviceAsync(bluetooth);
+                return;
+            }
             if (refreshing || devicePicker.SelectedItem is not DeviceChoice { Endpoint: { } endpoint } ||
                 EndpointAddress(endpoint).Equals(store.DeviceAddress, StringComparison.OrdinalIgnoreCase))
             {
@@ -326,8 +347,12 @@ internal sealed class RemoteEditorWindow : Form
         scanDevicesButton.Text = "Scan";
         EditorTheme.StyleButton(scanDevicesButton);
         CenterInBar(scanDevicesButton, new Padding(0, 0, 8, 0));
-        scanDevicesButton.Click += (_, _) => _ = discovery.ScanDevicesAsync(store.DeviceAddress);
-        new ToolTip().SetToolTip(scanDevicesButton, "Scan the network for compatible controllers");
+        scanDevicesButton.Click += (_, _) =>
+        {
+            _ = discovery.ScanDevicesAsync(store.DeviceAddress);
+            if (Visible) bluetoothDevices.Start();
+        };
+        new ToolTip().SetToolTip(scanDevicesButton, "Scan the network and Bluetooth for compatible controllers");
         sendButton.Text = "Send";
         EditorTheme.StyleButton(sendButton, prominent: true);
         CenterInBar(sendButton, Padding.Empty);
@@ -1302,18 +1327,34 @@ internal sealed class RemoteEditorWindow : Form
         wifiNetworks.SelectedItem = store.WifiNetworks.FirstOrDefault(network =>
             network.Ssid == (selectedNetwork?.Ssid ?? store.Profile.WifiSSID));
         var selectedDeviceHost = store.DeviceAddress;
-        var deviceChoices = discovery.Endpoints
+        var lanEndpoints = discovery.Endpoints
             .Where(endpoint => endpoint.Kind == DiscoveredServiceKind.M5Paper)
-            .Select(endpoint => new DeviceChoice(endpoint.Name, endpoint))
+            .GroupBy(EndpointAddress, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        // Only controllers actually found on the LAN hide their Bluetooth entry; saved addresses may be stale.
+        var lanDevices = lanEndpoints.Values.Select(endpoint => new LanPickerDevice(
+            EndpointAddress(endpoint), endpoint.Name, LanDeviceId(EndpointAddress(endpoint)))).ToList();
+        var deviceChoices = DevicePickerMerger.Merge(lanDevices, bluetoothDevices.Devices)
+            .Select(entry => entry.Lan is { } lan
+                ? new DeviceChoice(entry.DisplayName, lanEndpoints[lan.Address], DeviceId: entry.DeviceId)
+                : new DeviceChoice(entry.DisplayName, null, entry.Bluetooth, entry.DeviceId))
             .ToList();
         foreach (var saved in store.SavedDevices)
         {
             var address = saved.Address.Contains("://", StringComparison.Ordinal) ? saved.Address : $"http://{saved.Address}";
-            if (Uri.TryCreate(address, UriKind.Absolute, out var uri) &&
+            if (saved.Address.Length > 0 && Uri.TryCreate(address, UriKind.Absolute, out var uri) &&
                 !deviceChoices.Any(choice => choice.Endpoint is { } endpoint &&
                     EndpointAddress(endpoint) == saved.Address))
                 deviceChoices.Add(new DeviceChoice(saved.Descriptor?.Name ?? saved.DeviceID,
                     new(saved.Descriptor?.Name ?? saved.DeviceID, uri.Host, uri.Port, DiscoveredServiceKind.M5Paper, uri.Scheme)));
+        }
+        if (store.IsBluetoothOnly && store.Descriptor is { } activeDescriptor &&
+            !deviceChoices.Any(choice => choice.Bluetooth is not null && choice.DeviceId == activeDescriptor.DeviceID))
+        {
+            // The active Bluetooth device stays listed while it is out of range so the picker reflects the editor.
+            deviceChoices.Insert(0, new DeviceChoice(
+                DevicePickerMerger.DisplayName(activeDescriptor.Name) + DevicePickerMerger.BluetoothSuffix, null,
+                DeviceId: activeDescriptor.DeviceID));
         }
         if (deviceChoices.Count == 0)
         {
@@ -1322,15 +1363,25 @@ internal sealed class RemoteEditorWindow : Form
                 null));
         }
         devicePicker.DataSource = deviceChoices;
-        devicePicker.SelectedItem = deviceChoices.FirstOrDefault(choice =>
-            choice.Endpoint is { } endpoint && EndpointAddress(endpoint).Equals(selectedDeviceHost, StringComparison.OrdinalIgnoreCase))
+        devicePicker.SelectedItem = (store.IsBluetoothOnly
+                ? deviceChoices.FirstOrDefault(choice => choice.Endpoint is null && choice.DeviceId is not null &&
+                    choice.DeviceId == store.ActiveDeviceId)
+                : deviceChoices.FirstOrDefault(choice => choice.Endpoint is { } endpoint &&
+                    EndpointAddress(endpoint).Equals(selectedDeviceHost, StringComparison.OrdinalIgnoreCase)))
             ?? deviceChoices[0];
-        devicePicker.Enabled = !store.IsBusy && deviceChoices.Any(choice => choice.Endpoint is not null);
+        devicePicker.Enabled = !store.IsBusy &&
+            deviceChoices.Any(choice => choice.Endpoint is not null || choice.Bluetooth is not null);
         scanDevicesButton.Enabled = !discovery.IsScanning;
         scanDevicesButton.Text = discovery.IsScanning ? "..." : "Scan";
         syncStatus.Text = store.ValidationMessage ?? store.Status;
         netHomeStatus.Text = netHomeService.IsSignedIn ? $"Connected: {netHomeService.Account}" : "Not connected";
-        sendButton.Enabled = !store.IsBusy && store.ValidationMessage is null && store.Descriptor is not null;
+        sendButton.Enabled = !store.IsBusy && !store.IsBluetoothOnly && store.ValidationMessage is null && store.Descriptor is not null;
+        sendButtonTip.SetToolTip(sendButton, store.IsBluetoothOnly
+            ? $"Profiles are sent over Wi-Fi. {RemoteEditorStore.BluetoothOnlyMessage}"
+            : "Install this profile on the device");
+        if (store.IsBluetoothOnly && !store.IsBusy && store.ValidationMessage is null && store.Descriptor is not null &&
+            store.Status is "Ready")
+            syncStatus.Text = RemoteEditorStore.BluetoothOnlyMessage;
         refreshing = false;
         preview.Invalidate();
     }
@@ -1693,6 +1744,31 @@ internal sealed class RemoteEditorWindow : Form
             automaticallyLoadedDevice = EndpointAddress(device);
             _ = store.LoadFromDeviceAsync();
         }
+    }
+
+    private void HandleBluetoothDevicesChanged(object? sender, EventArgs eventArgs)
+    {
+        if (!IsHandleCreated || IsDisposed) return;
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => HandleBluetoothDevicesChanged(sender, eventArgs));
+            return;
+        }
+        // Avoid rebuilding the list under an open drop-down.
+        if (!devicePicker.DroppedDown) RefreshAll();
+    }
+
+    private string? LanDeviceId(string address) =>
+        address.Equals(store.DeviceAddress, StringComparison.OrdinalIgnoreCase) && store.Descriptor is { } descriptor
+            ? descriptor.DeviceID
+            : store.SavedDevices.FirstOrDefault(saved =>
+                saved.Address.Equals(address, StringComparison.OrdinalIgnoreCase) && saved.Descriptor is not null)?.DeviceID;
+
+    private async Task SelectBluetoothDeviceAsync(BleNearbyDevice device)
+    {
+        var name = DevicePickerMerger.DisplayName(device.Name);
+        await store.ActivateBluetoothDeviceAsync(name, token => bluetoothDevices.IdentifyAsync(device, token));
+        RefreshAll();
     }
 
     private async Task UseDiscoveredAsync()

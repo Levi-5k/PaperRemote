@@ -55,6 +55,7 @@ struct PaperGIFDeviceSetupView: View {
                         connectionTask?.cancel()
                         session.select(id: record.id)
                         token = PaperGIFDeviceCredentials.token(for: record.id)
+                        bluetooth.connectSavedDevice(deviceID: record.id)
                     } label: {
                         HStack {
                             VStack(alignment: .leading) {
@@ -146,30 +147,27 @@ struct PaperGIFDeviceSetupView: View {
                     }
                 }
             }
-            Section("Bluetooth Discovery") {
-                LabeledContent("Status", value: bluetooth.connectionState.description)
-                if let status = bluetooth.descriptorStatus { Text(status).font(.footnote) }
-                if let descriptor = bluetooth.bluetoothDescriptor {
-                    Button("Select Discovered \(descriptor.name)") {
-                        connectionTask?.cancel()
-                        if let id = session.selectedID {
-                            do { try PaperGIFStorage.saveRemoteProfile(profile, deviceID: id) }
-                            catch { problem = error.localizedDescription; return }
-                        }
-                        connectionTask = Task {
-                            do {
-                                let savedAddress = session.records.first { $0.id == descriptor.deviceID }?.address ?? ""
-                                try await session.applyDescriptor(descriptor, address: savedAddress)
-                            } catch { problem = error.localizedDescription }
-                        }
+            Section("Nearby Bluetooth Devices") {
+                if bluetooth.nearbyDevices.isEmpty {
+                    HStack {
+                        ProgressView()
+                        Text(bluetooth.connectionState == .bluetoothUnavailable
+                             ? "Bluetooth unavailable" : "Searching for nearby devices…")
+                            .foregroundStyle(.secondary)
                     }
                 }
-                Text("Discovery is limited to the PaperRemote BLE service. Native custom boards use HTTP for profile sync; legacy BLE commands are enabled only for recognized M5Paper hardware.")
+                ForEach(bluetooth.nearbyDevices.sorted { $0.rssi > $1.rssi }) { device in
+                    nearbyRow(device)
+                }
+                if let status = bluetooth.descriptorStatus { Text(status).font(.footnote) }
+                Text("New PaperRemote boards appear here as soon as they power on. Connecting reads the board's details and layout over Bluetooth and saves it under Controllers.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if let problem { Section("Problem") { Text(problem).foregroundStyle(.orange) } }
         }
         .navigationTitle("Device Setup")
+        .onAppear { bluetooth.startBrowsingNearby() }
+        .onDisappear { bluetooth.stopBrowsingNearby() }
         .onAppear {
             address = session.address
             if let id = session.selectedID { token = PaperGIFDeviceCredentials.token(for: id) }
@@ -214,6 +212,31 @@ struct PaperGIFDeviceSetupView: View {
         guard data.count <= 65_536 else { throw DeviceContractError.invalid("layout exceeds 64 KiB") }
         try session.setLayoutOverride(JSONDecoder().decode(DeviceLayout.self, from: data))
         problem = nil
+    }
+
+    @ViewBuilder private func nearbyRow(_ device: PaperGIFBluetoothManager.NearbyDevice) -> some View {
+        let connected = bluetooth.connectedPeripheralID == device.id
+        let saved = device.deviceID.flatMap { id in session.records.first { $0.id == id } }
+        HStack {
+            Image(systemName: connected ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right")
+                .foregroundStyle(connected ? Color.accentColor : .secondary)
+            VStack(alignment: .leading) {
+                Text(saved?.descriptor.name ?? device.name)
+                Text(connected ? "Connected" : saved != nil ? "Saved controller" : "New device")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if device.rssi != 127 { Text("\(device.rssi) dBm").font(.caption).foregroundStyle(.secondary) }
+            if connected && session.selectedID == device.deviceID {
+                Image(systemName: "checkmark.circle.fill")
+            } else {
+                Button(connected ? "Use" : "Connect") {
+                    connectionTask?.cancel()
+                    bluetooth.connectNearby(device.id)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
     }
 
     private func connect() {

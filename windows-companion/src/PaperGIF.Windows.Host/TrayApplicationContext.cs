@@ -27,6 +27,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         StartupRegistration startupRegistration,
         RemoteEditorStore editorStore,
         NetworkDiscoveryService discovery,
+        BleNearbyDeviceService bluetoothDevices,
         NetHomeService netHomeService,
         ModuleCatalogService moduleCatalog,
         HomeAccessoryCatalog homeAccessories)
@@ -38,7 +39,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         this.editorStore = editorStore;
         icon = PaperGifIcon.Create(64);
         updates = new UpdateCoordinator(editorStore, configuration) { ExitApplication = ExitThread };
-        window = new RemoteEditorWindow(editorStore, activity, discovery, netHomeService, moduleCatalog, homeAccessories, updates, icon);
+        window = new RemoteEditorWindow(editorStore, activity, discovery, bluetoothDevices, netHomeService, moduleCatalog, homeAccessories, updates, icon);
         var openItem = new ToolStripMenuItem(
             "Open paperGIF",
             null,

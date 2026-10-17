@@ -270,6 +270,12 @@ public sealed class BleSessionPool(IBleDeviceConnector connector, TimeSpan? scan
         }
     }
 
+    /// <summary>Records an address already verified to belong to <paramref name="deviceId"/> so it is tried first.</summary>
+    public void RememberAddress(string deviceId, ulong address)
+    {
+        lock (sync) knownAddresses[deviceId] = address;
+    }
+
     public bool IsConnected(string deviceId)
     {
         lock (sync)

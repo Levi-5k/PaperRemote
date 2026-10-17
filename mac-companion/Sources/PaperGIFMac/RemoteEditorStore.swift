@@ -511,6 +511,10 @@ final class RemoteEditorStore: ObservableObject {
             sendState = .failed("Connect to a supported device before sending a profile.")
             return
         }
+        guard !deviceAddress.isEmpty else {
+            sendState = .failed("This device is connected over Bluetooth only. Join it to Wi-Fi from the phone to send profiles.")
+            return
+        }
         let validationMessage = validateEditorFields
             ? validationMessage
             : Self.validationMessage(for: profile)
@@ -625,59 +629,73 @@ final class RemoteEditorStore: ObservableObject {
         }
     }
 
+    /// Saves the current device's profile, installs another device and loads its saved profile.
+    private func switchDevice(_ install: () async throws -> Void) async -> Bool {
+        let switchID = UUID()
+        deviceSwitchID = switchID
+        isSwitchingDevice = true
+        defer {
+            if deviceSwitchID == switchID { isSwitchingDevice = false }
+        }
+        saveTask?.cancel()
+        sendState = .loading
+        let previousID = devices.selectedID
+        let hadSavedDevices = !devices.records.isEmpty
+        if previousID != nil {
+            do { try devices.saveProfile(JSONEncoder().encode(profile)) }
+            catch {
+                sendState = .failed("Could not save the previous device: \(error.localizedDescription)")
+                return false
+            }
+        }
+        profileSyncGeneration &+= 1
+        profileSyncWorkerID = UUID()
+        wifiScanID = UUID()
+        wifiNetworks = []
+        wifiScanError = nil
+        isScanningWiFi = false
+        profileSyncTask?.cancel()
+        profileSyncTask = nil
+        pendingProfileSync = nil
+        profileSyncRetryTask?.cancel()
+        profileSyncRetryTask = nil
+        liveSyncTask?.cancel()
+        deviceProfile = nil
+        let requestedAddress = deviceAddress
+        do {
+            try await install()
+            guard deviceAddress == requestedAddress else { return false }
+            isApplyingDeviceProfile = true
+            defer { isApplyingDeviceProfile = false }
+            if let saved = devices.profileData {
+                profile = try JSONDecoder().decode(RemoteProfile.self, from: saved)
+            } else if hadSavedDevices || devices.descriptor?.isM5Paper != true {
+                profile = RemoteProfile(pages: [RemotePage(name: "Main", controls: [])])
+                profile.computers = [localComputer]
+                synchronizeDefaultComputer()
+            }
+            selectedPageID = profile.pages.first?.id
+            selectedControlID = nil
+            try devices.saveProfile(JSONEncoder().encode(profile))
+            saveImmediately()
+        } catch {
+            sendState = .failed(error.localizedDescription)
+            return false
+        }
+        return true
+    }
+
+    /// Uses a device identified over Bluetooth that is not reachable on the network.
+    func useBluetoothDevice(_ descriptor: DeviceDescriptor) async {
+        deviceAddress = ""
+        guard await switchDevice({ try await self.devices.applyDescriptor(descriptor, address: "") }) else { return }
+        sendState = .succeeded("Connected over Bluetooth. Join it to Wi-Fi from the phone to send profiles.")
+    }
+
     func loadFromDevice() async {
         if devices.descriptor == nil || devices.address != deviceAddress {
-            let switchID = UUID()
-            deviceSwitchID = switchID
-            isSwitchingDevice = true
-            defer {
-                if deviceSwitchID == switchID { isSwitchingDevice = false }
-            }
-            saveTask?.cancel()
-            sendState = .loading
-            let previousID = devices.selectedID
-            let hadSavedDevices = !devices.records.isEmpty
-            if previousID != nil {
-                do { try devices.saveProfile(JSONEncoder().encode(profile)) }
-                catch {
-                    sendState = .failed("Could not save the previous device: \(error.localizedDescription)")
-                    return
-                }
-            }
-            profileSyncGeneration &+= 1
-            profileSyncWorkerID = UUID()
-            wifiScanID = UUID()
-            wifiNetworks = []
-            wifiScanError = nil
-            isScanningWiFi = false
-            profileSyncTask?.cancel()
-            profileSyncTask = nil
-            pendingProfileSync = nil
-            profileSyncRetryTask?.cancel()
-            profileSyncRetryTask = nil
-            liveSyncTask?.cancel()
-            deviceProfile = nil
-            let requestedAddress = deviceAddress
-            do {
-                try await devices.connect(address: requestedAddress)
-                guard deviceAddress == requestedAddress else { return }
-                isApplyingDeviceProfile = true
-                defer { isApplyingDeviceProfile = false }
-                if let saved = devices.profileData {
-                    profile = try JSONDecoder().decode(RemoteProfile.self, from: saved)
-                } else if hadSavedDevices || devices.descriptor?.isM5Paper != true {
-                    profile = RemoteProfile(pages: [RemotePage(name: "Main", controls: [])])
-                    profile.computers = [localComputer]
-                    synchronizeDefaultComputer()
-                }
-                selectedPageID = profile.pages.first?.id
-                selectedControlID = nil
-                try devices.saveProfile(JSONEncoder().encode(profile))
-                saveImmediately()
-            } catch {
-                sendState = .failed(error.localizedDescription)
-                return
-            }
+            let address = deviceAddress
+            guard await switchDevice({ try await self.devices.connect(address: address) }) else { return }
         }
         guard pendingProfileSync == nil, profileSyncTask == nil, profileSyncRetryTask == nil else {
             sendState = .failed("Waiting to install local changes on the device")

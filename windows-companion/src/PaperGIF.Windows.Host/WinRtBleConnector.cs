@@ -86,6 +86,86 @@ internal sealed class WinRtBleConnector : IBleDeviceConnector
     }
 }
 
+/// <summary>
+/// Continuous active scan for the editor's device picker. The PaperRemote service UUID travels in the primary
+/// advertisement while the local name arrives in the scan response, so a WinRT AdvertisementFilter on the UUID
+/// would drop the names; filtering on the UUID happens in <see cref="BleNearbyDeviceTracker"/> instead.
+/// </summary>
+internal sealed class WinRtBleAdvertisementScanner : IBleAdvertisementScanner
+{
+    private readonly object sync = new();
+    private BluetoothLEAdvertisementWatcher? watcher;
+
+    public event EventHandler<BleAdvertisement>? Received;
+
+    public bool IsRunning
+    {
+        get { lock (sync) return watcher?.Status is BluetoothLEAdvertisementWatcherStatus.Started or BluetoothLEAdvertisementWatcherStatus.Created; }
+    }
+
+    public void Start()
+    {
+        lock (sync)
+        {
+            if (watcher is { Status: BluetoothLEAdvertisementWatcherStatus.Started }) return;
+            Detach();
+            watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+            watcher.Received += HandleReceived;
+            watcher.Stopped += HandleStopped;
+            try { watcher.Start(); }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                DiagnosticLog.Error("Bluetooth scan could not start", exception);
+                Detach();
+            }
+        }
+    }
+
+    public void Stop()
+    {
+        lock (sync) Detach();
+    }
+
+    public void Dispose() => Stop();
+
+    private void Detach()
+    {
+        if (watcher is null) return;
+        watcher.Received -= HandleReceived;
+        watcher.Stopped -= HandleStopped;
+        try
+        {
+            if (watcher.Status == BluetoothLEAdvertisementWatcherStatus.Started) watcher.Stop();
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            DiagnosticLog.Error("Bluetooth scan could not stop", exception);
+        }
+        watcher = null;
+    }
+
+    private void HandleReceived(BluetoothLEAdvertisementWatcher sender, BluetoothLEAdvertisementReceivedEventArgs args)
+    {
+        try
+        {
+            Received?.Invoke(this, new BleAdvertisement(
+                args.BluetoothAddress,
+                args.Advertisement.LocalName,
+                args.RawSignalStrengthInDBm,
+                args.Advertisement.ServiceUuids.Contains(BleProtocol.ServiceUuid)));
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            DiagnosticLog.Error("Bluetooth advertisement handling failed", exception);
+        }
+    }
+
+    private void HandleStopped(BluetoothLEAdvertisementWatcher sender, BluetoothLEAdvertisementWatcherStoppedEventArgs args)
+    {
+        if (args.Error != BluetoothError.Success) DiagnosticLog.Info($"Bluetooth scan stopped: {args.Error}");
+    }
+}
+
 internal sealed class WinRtBleLink(
     BleCandidate candidate,
     BluetoothLEDevice device,

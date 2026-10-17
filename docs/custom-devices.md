@@ -9,6 +9,20 @@ automatically make every network accessory a configurable remote.
 Use the Device setup controls in the iPhone/iPad app or desktop editor. Select a
 discovered controller, or enter its hostname/IP address and optional port.
 
+New controllers are discovered two ways:
+
+- **Wi-Fi:** Bonjour (`_papergif-device._tcp`) and local-subnet `/status` probes
+  on the Mac and Windows editors.
+- **Bluetooth:** every app scans for the PaperRemote BLE service, so a fresh
+  board that is only on its own setup access point still shows up. On the phone,
+  Device setup → **Nearby Bluetooth Devices** lists each board with its signal
+  strength. Tapping **Connect** reads its descriptor and saves it under
+  Controllers. In the Mac and Windows device pickers these boards appear as
+  "Name (Bluetooth)", and selecting one reads its descriptor so the layout and
+  device controls are available. Desktop editors can send profiles only after
+  the board joins Wi-Fi (set its network from the phone's Native Network
+  Configuration); until then, Send is blocked with an explanation.
+
 1. PaperRemote reads the controller's identity, display, physical inputs,
    capabilities, and basic layout.
 2. You can use its device-reported layout without an internet connection.
