@@ -45,6 +45,15 @@ Compiled input defaults: `PAPERGIF_BUTTON_PIN=25` (active-low pull-up),
 `PAPERGIF_SLIDER_PIN=34` (ADC1, raw 0–4095). No encoder push or display is wired.
 BLE enrollment has no added authentication or bonding enforcement.
 
+The `supermini-s3-mt6701` target uses an ESP32-S3 SuperMini with two active-low
+pull-up buttons and an MT6701 absolute dial: GPIO11/10 are Button 1/2, and
+GPIO13/12 are I2C SDA/SCL. The dial reads the MT6701's 14-bit angle at I2C
+address `0x06` and advertises `dial-1` from 0 to 16383. Build with
+`pio run -d firmware -e supermini-s3-mt6701`. Its explicit
+`supermini-s3-mt6701-provision` variant formats LittleFS only after a mount
+failure; use that only for intentional first-time provisioning, then install
+the normal target without erasing flash.
+
 ## Descriptor BLE reader ownership
 
 Service `7A230001-7D2A-4C7B-9C42-504749460001`, READ|WRITE descriptor characteristic

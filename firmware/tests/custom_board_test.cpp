@@ -29,7 +29,7 @@ static JsonDocument example() {
     return json;
 }
 static void descriptorTests() {
-    for (const auto* board : {&m5paper(), &esp32Reference()}) {
+    for (const auto* board : {&m5paper(), &esp32Reference(), &superminiS3Mt6701()}) {
         JsonDocument json;
         writeDeviceDescriptor(json, *board, "stable-id", "test");
         assert(json["schemaVersion"] == 1 && json["protocolVersion"] == 1);
@@ -60,6 +60,8 @@ static void descriptorTests() {
     assert(!compatibleFirmware(m5paper(), esp32Reference().id, esp32Reference().revision));
     assert(!compatibleFirmware(m5paper(), m5paper().id, "2.0"));
     assert(!compatibleFirmware(m5paper(), nullptr, "1.0"));
+    assert(compatibleFirmware(superminiS3Mt6701(), "paperremote.supermini-s3-mt6701", "1"));
+    assert(superminiS3Mt6701().inputs[2].maximum == 16383);
     FirmwareIdentityScanner valid, wrong;
     const std::string marker = m5paperFirmwareIdentity;
     for (size_t i = 0; i < marker.size(); ++i)

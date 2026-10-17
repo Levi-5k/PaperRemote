@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "boardID": "paperremote.supermini-s3-mt6701",
+  "hardwareRevisions": ["1"],
+  "version": 1,
+  "name": "ESP32-S3 SuperMini with MT6701",
+  "layout": {
+    "width": 320,
+    "height": 160,
+    "inputs": [
+      {"id": "button-1", "x": 48, "y": 88, "width": 48, "height": 48},
+      {"id": "button-2", "x": 224, "y": 88, "width": 48, "height": 48},
+      {"id": "dial-1", "x": 112, "y": 32, "width": 96, "height": 96}
+    ]
+  }
+}

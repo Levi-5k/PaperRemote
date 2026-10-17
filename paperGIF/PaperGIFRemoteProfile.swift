@@ -993,6 +993,19 @@ extension PaperGIFRemotePage {
     }
 }
 
+struct PaperGIFHardwareBinding: Codable, Equatable, Identifiable, Sendable {
+    var inputID: String
+    var event: String
+    var direction: String? = nil
+    var mode = "action"
+    var action: PaperGIFRemoteAction
+    var minimum: Double = 0
+    var maximum: Double = 100
+    var step: Double = 1
+
+    var id: String { "\(inputID):\(event):\(direction ?? "both")" }
+}
+
 struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     static let currentVersion = 6
     static let maximumControlsPerPage = 24
@@ -1020,6 +1033,7 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     var temperatureUnit: PaperGIFTemperatureUnit = .celsius
     var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
     var pages: [PaperGIFRemotePage]
+    var hardwareBindings: [PaperGIFHardwareBinding] = []
 
     init(
         version: Int = currentVersion,
@@ -1075,20 +1089,43 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         case version, updatedAtMilliseconds, wifiSSID, wifiPassword, macHost, macPort, macToken
         case computers, screensaverDelaySeconds, buttonQualityRefreshInterval, maxButtonTextSize
         case elementRefreshDelayMilliseconds, buttonBackground, buttonTexture, temperatureUnit
-        case timeZoneOffsetMinutes, pages
+        case timeZoneOffsetMinutes, pages, hardwareBindings
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        let encodedVersion = hardwareBindings.isEmpty ? version : 7
+        try container.encode(encodedVersion, forKey: .version)
+        try container.encode(updatedAtMilliseconds, forKey: .updatedAtMilliseconds)
+        try container.encode(wifiSSID, forKey: .wifiSSID)
+        try container.encode(wifiPassword, forKey: .wifiPassword)
+        try container.encode(macHost, forKey: .macHost)
+        try container.encode(macPort, forKey: .macPort)
+        try container.encode(macToken, forKey: .macToken)
+        try container.encode(computers, forKey: .computers)
+        try container.encode(screensaverDelaySeconds, forKey: .screensaverDelaySeconds)
+        try container.encode(buttonQualityRefreshInterval, forKey: .buttonQualityRefreshInterval)
+        try container.encode(maxButtonTextSize, forKey: .maxButtonTextSize)
+        try container.encode(elementRefreshDelayMilliseconds, forKey: .elementRefreshDelayMilliseconds)
+        try container.encode(buttonBackground, forKey: .buttonBackground)
+        try container.encode(buttonTexture, forKey: .buttonTexture)
+        try container.encode(temperatureUnit, forKey: .temperatureUnit)
+        try container.encode(timeZoneOffsetMinutes, forKey: .timeZoneOffsetMinutes)
+        try container.encode(pages, forKey: .pages)
+        if encodedVersion >= 7 { try container.encode(hardwareBindings, forKey: .hardwareBindings) }
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedVersion = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
-        guard (1...Self.currentVersion).contains(decodedVersion) else {
+        guard (1...7).contains(decodedVersion) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .version,
                 in: container,
                 debugDescription: "Unsupported remote profile version \(decodedVersion)."
             )
         }
-        version = Self.currentVersion
+        version = max(Self.currentVersion, decodedVersion)
         updatedAtMilliseconds = try container.decodeIfPresent(
             Int64.self, forKey: .updatedAtMilliseconds
         ) ?? 0
@@ -1118,6 +1155,15 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
         timeZoneOffsetMinutes = try container.decodeIfPresent(Int.self, forKey: .timeZoneOffsetMinutes)
             ?? TimeZone.current.secondsFromGMT() / 60
         pages = try container.decode([PaperGIFRemotePage].self, forKey: .pages)
+        hardwareBindings = try container.decodeIfPresent(
+            [PaperGIFHardwareBinding].self, forKey: .hardwareBindings
+        ) ?? []
+        guard decodedVersion >= 7 || hardwareBindings.isEmpty else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .hardwareBindings, in: container,
+                debugDescription: "Hardware bindings require profile version 7."
+            )
+        }
         if decodedVersion < 6 {
             pages = pages.map { $0.upgradingGeneratedThermostat() }
         }
@@ -1186,6 +1232,12 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
     }
 
     var devicePayload: Data? {
+        guard hardwareBindings.isEmpty else { return nil }
+        return devicePayload(version: 6)
+    }
+
+    func devicePayload(version: Int) -> Data? {
+        guard [6, 7].contains(version), version == 7 || hardwareBindings.isEmpty else { return nil }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         guard let encoded = try? encoder.encode(self),
@@ -1193,6 +1245,8 @@ struct PaperGIFRemoteProfile: Codable, Equatable, Sendable {
             return nil
         }
         let components = Calendar.current.dateComponents(in: .current, from: Date())
+        object["version"] = version
+        if version == 6 { object.removeValue(forKey: "hardwareBindings") }
         object["deviceClock"] = [
             "year": components.year ?? 0,
             "month": components.month ?? 0,

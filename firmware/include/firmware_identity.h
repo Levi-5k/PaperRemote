@@ -7,6 +7,7 @@ namespace paper_board {
 // A compatibility guard, not a signature or a substitute for authenticated updates.
 constexpr char m5paperFirmwareIdentity[] = "PGIFBOARD:m5stack.m5paper@1.0;";
 constexpr char referenceFirmwareIdentity[] = "PGIFBOARD:paperremote.esp32-screenless-reference@1;";
+constexpr char superminiS3FirmwareIdentity[] = "PGIFBOARD:paperremote.supermini-s3-mt6701@1;";
 class FirmwareIdentityScanner {
     size_t matched = 0;
     bool found = false;

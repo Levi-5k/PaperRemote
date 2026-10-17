@@ -56,6 +56,17 @@ inline const BoardInfo& esp32Reference() {
         "PaperGIF", nullptr, {0, 0, 320, 160}, {}, inputs, 3, true, false, 32768, 24, 8};
     return board;
 }
+inline const BoardInfo& superminiS3Mt6701() {
+    static const InputInfo inputs[] = {
+        {"button-1", "Button 1", "button", {"press", "hold", "release"}, {48, 88, 48, 48}, 0, 0},
+        {"button-2", "Button 2", "button", {"press", "hold", "release"}, {224, 88, 48, 48}, 0, 0},
+        {"dial-1", "MT6701 dial", "dial", {"change", nullptr, nullptr}, {112, 32, 96, 96}, 0, 16383},
+    };
+    static const BoardInfo board{"paperremote.supermini-s3-mt6701", "1",
+        "ESP32-S3 SuperMini with MT6701", "PaperGIF", nullptr,
+        {0, 0, 320, 160}, {}, inputs, 3, true, false, 32768, 24, 8};
+    return board;
+}
 inline bool validRect(const Rect& r) {
     return std::isfinite(r.x) && std::isfinite(r.y) && std::isfinite(r.width) &&
         std::isfinite(r.height) && r.width > 0 && r.height > 0;

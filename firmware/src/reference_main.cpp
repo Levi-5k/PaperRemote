@@ -11,6 +11,7 @@
 #include "local_http_policy.h"
 #include "reference_controls.h"
 #include "reference_inputs.h"
+#include "supermini_s3_board.h"
 #include "reference_profile.h"
 #include "remote_action_payload.h"
 #include "remote_computer.h"
@@ -29,7 +30,15 @@ using namespace paper_board;
 constexpr char serviceUuid[] = "7A230001-7D2A-4C7B-9C42-504749460001";
 constexpr char controlUuid[] = "7A230002-7D2A-4C7B-9C42-504749460001";
 constexpr char dataUuid[] = "7A230003-7D2A-4C7B-9C42-504749460001";
+#if defined(PAPERGIF_SUPERMINI_S3)
+SuperMiniS3Board board;
+constexpr const char* deviceFirmwareIdentity = superminiS3FirmwareIdentity;
+constexpr const char* bluetoothDeviceName = "paperGIF SuperMini S3";
+#else
 ReferenceBoard board;
+constexpr const char* deviceFirmwareIdentity = referenceFirmwareIdentity;
+constexpr const char* bluetoothDeviceName = "paperGIF Reference";
+#endif
 WebServer server(80);
 String deviceJSON;
 DescriptorCallbacks descriptorCallbacks(deviceJSON);
@@ -40,6 +49,10 @@ const char* profileError = "invalid_profile";
 bool storageReady = false;
 bool pressed[3]{};
 volatile bool disconnected = false;
+#if defined(PAPERGIF_SUPERMINI_S3)
+InputEvent lastSuperminiInput{"", "", 0, 0};
+bool hasLastSuperminiInput = false;
+#endif
 NimBLECharacteristic* control = nullptr;
 uint16_t iPhoneController = UINT16_MAX;
 SemaphoreHandle_t networkMutex = nullptr;
@@ -361,6 +374,10 @@ public:
     }
 } controlCallbacks(true), dataCallbacks(false);
 class ServerCallbacks final : public NimBLEServerCallbacks {
+    void onConnect(NimBLEServer* server, NimBLEConnInfo&) override {
+        // Keep a slot discoverable so a phone and a computer relay can both connect.
+        if (server->getConnectedCount() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) NimBLEDevice::startAdvertising();
+    }
     void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int) override {
         const uint16_t handle = info.getConnHandle();
         descriptorCallbacks.disconnected(handle);
@@ -562,8 +579,15 @@ void processBLE() {
 
 void setup() {
     Serial.begin(115200);
-    Serial.println(referenceFirmwareIdentity);
+    Serial.println(deviceFirmwareIdentity);
     board.begin();
+#if defined(PAPERGIF_SUPERMINI_S3)
+    {
+        uint16_t angle = 0;
+        if (board.readDialForDiagnostics(angle)) Serial.printf("MT6701 ready: angle=%u\n", angle);
+        else Serial.println("MT6701 not responding on I2C 0x06; check SDA/SCL wiring");
+    }
+#endif
     deviceJSON = descriptor(board.info(), PAPERGIF_FIRMWARE_VERSION,
         reference_controls::controls, reference_controls::count);
     networkMutex = xSemaphoreCreateMutex();
@@ -600,6 +624,27 @@ void setup() {
             ? "{\"device\":\"paperGIF\",\"ready\":true,\"uploading\":false}"
             : "{\"device\":\"paperGIF\",\"ready\":false,\"uploading\":false}");
     });
+#if defined(PAPERGIF_SUPERMINI_S3)
+    server.on("/debug/inputs", HTTP_GET, [] {
+        auto& supermini = static_cast<SuperMiniS3Board&>(board);
+        uint16_t angle = 0;
+        JsonDocument status;
+        status["boardID"] = board.info().id;
+        status["button1Pressed"] = supermini.buttonPressedForDiagnostics(0);
+        status["button2Pressed"] = supermini.buttonPressedForDiagnostics(1);
+        status["mt6701Present"] = supermini.readDialForDiagnostics(angle);
+        status["angle"] = angle;
+        if (hasLastSuperminiInput) {
+            status["lastInputID"] = lastSuperminiInput.inputID;
+            status["lastEvent"] = lastSuperminiInput.event;
+            status["lastValue"] = lastSuperminiInput.value;
+            status["lastSequence"] = lastSuperminiInput.sequence;
+        }
+        String response;
+        serializeJson(status, response);
+        server.send(200, "application/json", response);
+    });
+#endif
     server.on("/remote", HTTP_GET, [] {
         if (!authorized()) { server.send(401, "application/json", "{\"error\":\"unauthorized\"}"); return; }
         if (!configured) { server.send(404, "application/json", "{\"error\":\"profile_not_found\"}"); return; }
@@ -638,7 +683,7 @@ void setup() {
     });
     server.begin();
     if (MDNS.begin(name)) MDNS.addService("papergif-device", "tcp", 80);
-    NimBLEDevice::init("paperGIF Reference");
+    NimBLEDevice::init(bluetoothDeviceName);
     NimBLEDevice::setMTU(517);
     auto* bleServer = NimBLEDevice::createServer();
     bleServer->setCallbacks(&serverCallbacks, false);
@@ -651,6 +696,9 @@ void setup() {
     addDescriptorCharacteristic(service, descriptorCallbacks);
     bleServer->start();
     NimBLEDevice::getAdvertising()->addServiceUUID(serviceUuid);
+    // The 128-bit service UUID fills the advertisement; the name goes in the scan response.
+    NimBLEDevice::getAdvertising()->enableScanResponse(true);
+    NimBLEDevice::getAdvertising()->setName(bluetoothDeviceName);
     NimBLEDevice::getAdvertising()->start();
     if (xTaskCreate(networkWorker, "actions", 8192, nullptr, 1, nullptr) != pdPASS) abort();
 }
@@ -676,6 +724,12 @@ void loop() {
     processBLE();
     pollDeviceControls();
     InputEvent event;
-    for (int i = 0; i < 8 && board.inputs()->poll(event); ++i) handleInput(event);
+    for (int i = 0; i < 8 && board.inputs()->poll(event); ++i) {
+#if defined(PAPERGIF_SUPERMINI_S3)
+        lastSuperminiInput = event;
+        hasLastSuperminiInput = true;
+#endif
+        handleInput(event);
+    }
     delay(1);
 }

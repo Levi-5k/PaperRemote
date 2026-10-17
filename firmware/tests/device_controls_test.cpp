@@ -252,6 +252,14 @@ static void descriptorTests(const std::string& directory) {
     writeDeviceDescriptor(reference, esp32Reference(), "papergif-000000000002", "test",
         reference_controls::controls, reference_controls::count);
     assert(reference["controls"].size() == reference_controls::count);
+    JsonDocument supermini;
+    writeDeviceDescriptor(supermini, paper_board::superminiS3Mt6701(), "papergif-000000000004", "test",
+        reference_controls::controls, reference_controls::count);
+    assert(supermini["boardID"] == "paperremote.supermini-s3-mt6701");
+    assert(supermini["display"].isNull());
+    assert(supermini["inputs"][2]["kind"] == "dial");
+    assert(supermini["inputs"][2]["minimum"] == 0);
+    assert(supermini["inputs"][2]["maximum"] == 16383);
     JsonDocument plain;
     writeDeviceDescriptor(plain, m5paper(), "papergif-000000000003", "test");
     assert(plain["controls"].isUnbound() && plain["capabilities"]["transports"].size() == 2);
@@ -262,6 +270,9 @@ static void descriptorTests(const std::string& directory) {
     wire.clear();
     serializeJson(reference, wire);
     write(directory + "/descriptor-reference.json", wire);
+    wire.clear();
+    serializeJson(supermini, wire);
+    write(directory + "/descriptor-supermini-s3.json", wire);
     write(directory + "/controls-m5paper-snapshot.json", snapshotJson(false));
     write(directory + "/controls-m5paper-set-response.json", snapshotJson(true));
     char frame[256];

@@ -25,7 +25,7 @@ def main() -> None:
     descriptor_validator = Draft202012Validator(schemas["device-descriptor-v1"], registry=registry)
     controls_validator = Draft202012Validator(schemas["device-controls-v1"], registry=registry)
     descriptors = {}
-    for name in ["m5paper", "reference"]:
+    for name in ["m5paper", "reference", "supermini-s3"]:
         descriptor = json.loads((output / f"descriptor-{name}.json").read_text(encoding="utf-8"))
         descriptor_validator.validate(descriptor)
         validate_descriptor(descriptor)

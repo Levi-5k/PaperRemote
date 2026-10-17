@@ -1,4 +1,5 @@
 import Foundation
+import PaperDeviceKit
 
 enum RemoteTemperatureUnit: String, Codable, CaseIterable, Identifiable, Sendable {
     case celsius
@@ -936,6 +937,7 @@ struct RemoteProfile: Codable, Equatable, Sendable {
     var temperatureUnit: RemoteTemperatureUnit = .celsius
     var timeZoneOffsetMinutes = TimeZone.current.secondsFromGMT() / 60
     var pages: [RemotePage]
+    var hardwareBindings: [DeviceHardwareBinding<RemoteAction>]? = nil
 
     init(maxButtonTextSize: Int = 24, pages: [RemotePage]) {
         self.maxButtonTextSize = min(24, max(9, maxButtonTextSize))
@@ -954,20 +956,28 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         case version, updatedAtMilliseconds, wifiSSID, wifiPassword, macHost, macPort, macToken
         case computers, screensaverDelaySeconds, buttonQualityRefreshInterval, maxButtonTextSize
         case elementRefreshDelayMilliseconds, buttonBackground, buttonTexture, temperatureUnit
-        case timeZoneOffsetMinutes, pages
+        case timeZoneOffsetMinutes, pages, hardwareBindings
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedVersion = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
-        guard (1...Self.currentVersion).contains(decodedVersion) else {
+        guard (1...7).contains(decodedVersion) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .version,
                 in: container,
                 debugDescription: "Unsupported remote profile version \(decodedVersion)."
             )
         }
-        version = Self.currentVersion
+        version = decodedVersion == 7 ? 7 : Self.currentVersion
+        hardwareBindings = try container.decodeIfPresent(
+            [DeviceHardwareBinding<RemoteAction>].self, forKey: .hardwareBindings
+        )
+        guard decodedVersion == 7 || hardwareBindings == nil else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .hardwareBindings, in: container, debugDescription: "Hardware bindings require profile v7."
+            )
+        }
         updatedAtMilliseconds = try container.decodeIfPresent(
             Int64.self, forKey: .updatedAtMilliseconds
         ) ?? 0
@@ -1085,6 +1095,65 @@ struct RemoteProfile: Codable, Equatable, Sendable {
                 options: [.sortedKeys, .withoutEscapingSlashes]
             )
         }
+    }
+
+    func devicePayload(for descriptor: DeviceDescriptor) throws -> Data {
+        try descriptor.validate()
+        let bindings = hardwareBindings ?? []
+        guard descriptor.display != nil || pages.allSatisfy({ $0.controls.isEmpty }) else {
+            throw DeviceContractError.invalid("screenless devices cannot install touchscreen controls")
+        }
+        guard pages.count <= descriptor.capabilities.maxPages,
+            pages.allSatisfy({ $0.controls.count <= descriptor.capabilities.maxControls }),
+            bindings.count <= 256,
+            Set(bindings.map { "\($0.inputID):\($0.event):\($0.direction ?? "")" }).count == bindings.count
+        else {
+            throw DeviceContractError.invalid("profile exceeds device limits or contains duplicate bindings")
+        }
+        for binding in bindings {
+            try binding.validate(for: descriptor)
+            if binding.direction != nil
+                && bindings.contains(where: {
+                    $0.inputID == binding.inputID && $0.event == binding.event && $0.direction == nil
+                })
+            {
+                throw DeviceContractError.invalid("directional knob bindings overlap a both-directions binding")
+            }
+            if binding.mode != "action" {
+                guard let range = binding.action.hardwareValueRange,
+                      range.contains(binding.minimum), range.contains(binding.maximum) else {
+                    throw DeviceContractError.invalid("this action does not accept the configured adjustable range")
+                }
+            }
+        }
+        let negotiated = descriptor.capabilities.profileVersions.contains(7) ? 7 : 6
+        guard negotiated == 7 || bindings.isEmpty else {
+            throw DeviceContractError.unsupported("hardware bindings require profile v7")
+        }
+        guard var object = try JSONSerialization.jsonObject(with: devicePayload) as? [String: Any] else {
+            throw DeviceContractError.invalid("profile object")
+        }
+        object["version"] = negotiated
+        if negotiated == 7 {
+            object["hardwareBindings"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(bindings))
+        } else {
+            object.removeValue(forKey: "hardwareBindings")
+        }
+        let payload = try JSONSerialization.data(
+            withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        guard payload.count <= descriptor.capabilities.maxProfileBytes else {
+            throw DeviceContractError.invalid("profile exceeds device byte limit")
+        }
+        return payload
+    }
+}
+
+extension RemoteAction {
+    var hardwareValueRange: ClosedRange<Double>? {
+        if type == .wledBrightness { return 0...255 }
+        if type == .netHomeTemperature { return -3276.8...3276.7 }
+        if (type == .computerMedia || type == .iPhoneMedia) && text == "volume" { return 0...100 }
+        return nil
     }
 }
 

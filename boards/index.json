@@ -14,6 +14,13 @@
       "version": 1,
       "path": "esp32-screenless-reference.json",
       "sha256": "7425c1d80e15219a14e1ffdf7dfdc13ab4caabe781d4595d566aaa3416ac0039"
+    },
+    {
+      "boardID": "paperremote.supermini-s3-mt6701",
+      "hardwareRevisions": ["1"],
+      "version": 1,
+      "path": "supermini-s3-mt6701.json",
+      "sha256": "ebdc274e48d5f3685d4fe7544ef22716ec6caf41dd03fe7e8d819462600724d2"
     }
   ]
 }

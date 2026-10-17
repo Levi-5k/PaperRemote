@@ -259,6 +259,7 @@ public sealed class OpenBuildsControllerSettings
 public sealed class RemoteProfile
 {
     public const int CurrentVersion = 6;
+    public const int HardwareBindingsVersion = 7;
     public const int MaximumControlsPerPage = 24;
     public const int MinimumButtonTextSize = 9;
     public const int MaximumButtonTextSize = 24;
@@ -286,6 +287,7 @@ public sealed class RemoteProfile
     public TemperatureUnit TemperatureUnit { get; set; } = TemperatureUnit.Celsius;
     public int TimeZoneOffsetMinutes { get; set; } = (int)TimeZoneInfo.Local.GetUtcOffset(DateTimeOffset.Now).TotalMinutes;
     public List<RemotePage> Pages { get; set; } = [];
+    public List<HardwareBinding>? HardwareBindings { get; set; }
 
     public RemoteButtonBackground ButtonBackgroundFor(RemoteControl control) =>
         control.ButtonBackground ?? ButtonBackground;

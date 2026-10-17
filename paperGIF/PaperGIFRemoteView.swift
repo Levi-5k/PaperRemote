@@ -1,6 +1,7 @@
 import Combine
 import HomeKit
 import NetworkExtension
+import PaperDeviceKit
 import SwiftUI
 import UIKit
 
@@ -34,6 +35,7 @@ private enum PaperGIFRemoteEditorPanel: String, CaseIterable, Identifiable {
 struct PaperGIFRemoteView: View {
     @Binding var profile: PaperGIFRemoteProfile
     @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
+    @ObservedObject var deviceSession: DeviceSession
 
     @StateObject private var computerDiscovery = PaperGIFComputerDiscovery()
     @StateObject private var wledDiscovery = PaperGIFWLEDDiscovery()
@@ -69,6 +71,11 @@ struct PaperGIFRemoteView: View {
     @State private var isLoadingModules = false
     @State private var moduleStatus: String?
 
+    private var canAddPage: Bool {
+        (deviceSession.descriptor == nil || deviceSession.descriptor?.display != nil) &&
+            profile.pages.count < (deviceSession.descriptor?.capabilities.maxPages ?? 8)
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -83,12 +90,23 @@ struct PaperGIFRemoteView: View {
 
                 List {
                     if selectedPanel == .layout {
-                        pagesSection
-                        modulesSection
-                        screensaverSection
+                        if let descriptor = deviceSession.descriptor {
+                            PaperGIFPhysicalInputsSection(
+                                profile: $profile, descriptor: descriptor,
+                                layout: deviceSession.layout ?? descriptor.layout,
+                                wledDiscovery: wledDiscovery
+                            )
+                        }
+                        if deviceSession.descriptor?.display != nil || deviceSession.descriptor == nil {
+                            pagesSection
+                            modulesSection
+                        }
+                        if deviceSession.descriptor?.canUseLegacyMedia != false {
+                            screensaverSection
+                        }
                         saveSection
                     } else {
-                        deviceWiFiSection
+                        if bluetoothManager.legacyBLEPermitted { deviceWiFiSection }
                         computerSection
                         temperatureUnitSection
                         netHomeSection
@@ -120,6 +138,10 @@ struct PaperGIFRemoteView: View {
                 networkDeviceDiscovery.stop()
                 liveSyncTask?.cancel()
             }
+            .onChange(of: profile.hardwareBindings) {
+                profile.version = 7
+                applyLiveProfile(profile)
+            }
             .task { await refreshNetHomeUnits() }
             .task { await refreshModuleCatalog() }
             .onChange(of: bluetoothManager.remoteSyncStatus) {
@@ -128,7 +150,7 @@ struct PaperGIFRemoteView: View {
                     wifiStatus = status
                 }
                 if bluetoothManager.remoteSyncStatus == "Remote synced" {
-                    liveSyncStatus = "Live on M5Paper"
+                    liveSyncStatus = "Live on \(deviceSession.descriptor?.name ?? "device")"
                 }
                 if bluetoothManager.remoteSyncStatus == "Loaded remote from M5Paper" {
                     liveSyncTask?.cancel()
@@ -489,7 +511,7 @@ struct PaperGIFRemoteView: View {
                             Label("Add Thermostat Page", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(profile.pages.count >= 8)
+                        .disabled(!canAddPage)
                     }
                 }
             }
@@ -545,7 +567,7 @@ struct PaperGIFRemoteView: View {
                             Label("Add WLED Page", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(profile.pages.count >= 8)
+                        .disabled(!canAddPage)
                     }
                 }
             }
@@ -582,7 +604,7 @@ struct PaperGIFRemoteView: View {
                 .disabled(
                     isConnectingWLED ||
                     manualWLEDAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                    profile.pages.count >= 8
+                    !canAddPage
                 )
             }
         } header: {
@@ -644,7 +666,7 @@ struct PaperGIFRemoteView: View {
                                 Label("Add Switch Page", systemImage: "plus.circle.fill")
                             }
                             .buttonStyle(.bordered)
-                            .disabled(profile.pages.count >= 8)
+                            .disabled(!canAddPage)
                         }
                     }
                 }
@@ -740,7 +762,7 @@ struct PaperGIFRemoteView: View {
                                 Label("Add Switch Page", systemImage: "plus.circle.fill")
                             }
                             .buttonStyle(.bordered)
-                            .disabled(profile.pages.count >= 8)
+                            .disabled(!canAddPage)
                         }
                     } else if !hasLocalHTTPControl(for: device) {
                         Button {
@@ -752,7 +774,7 @@ struct PaperGIFRemoteView: View {
                             )
                         }
                         .buttonStyle(.bordered)
-                        .disabled(profile.pages.count >= 8)
+                        .disabled(!canAddPage)
                     }
                 }
             }
@@ -785,7 +807,7 @@ struct PaperGIFRemoteView: View {
                 }
                 .disabled(
                     manualNetworkAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                    profile.pages.count >= 8
+                    !canAddPage
                 )
             }
         } header: {
@@ -821,12 +843,21 @@ struct PaperGIFRemoteView: View {
                         maxButtonTextSize: profile.maxButtonTextSize,
                         buttonBackground: profile.buttonBackground,
                         buttonTexture: profile.buttonTexture,
-                        wledDiscovery: wledDiscovery
+                        wledDiscovery: wledDiscovery,
+                        deviceDisplay: deviceSession.descriptor?.isM5Paper == false
+                            ? deviceSession.descriptor?.display : nil
                     )
                 } label: {
                     HStack(spacing: 14) {
-                        PaperGIFRemotePageThumbnail(page: page)
-                            .frame(width: 52, height: 92)
+                        if let descriptor = deviceSession.descriptor,
+                           !descriptor.isM5Paper, let display = descriptor.display {
+                            PaperGIFAdaptivePagePreview(page: .constant(page), display: display, onEdit: { _ in })
+                                .frame(width: 52, height: 72)
+                                .allowsHitTesting(false)
+                        } else {
+                            PaperGIFRemotePageThumbnail(page: page)
+                                .frame(width: 52, height: 92)
+                        }
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text(page.name)
@@ -862,7 +893,7 @@ struct PaperGIFRemoteView: View {
             } label: {
                 Label("Add Page", systemImage: "plus")
             }
-            .disabled(profile.pages.count >= 8)
+            .disabled(!canAddPage)
         }
     }
 
@@ -940,7 +971,7 @@ struct PaperGIFRemoteView: View {
                 .accessibilityLabel(installed
                     ? "Configure \(definition.page.name)"
                     : "Add \(definition.page.name)")
-                .disabled(!installed && profile.pages.count >= 8)
+                .disabled(!installed && !canAddPage)
             } else if installed {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
@@ -956,7 +987,7 @@ struct PaperGIFRemoteView: View {
                     Image(systemName: "plus.circle")
                 }
                 .accessibilityLabel("Add \(definition.page.name)")
-                .disabled(profile.pages.count >= 8)
+                .disabled(!canAddPage)
             }
         }
     }
@@ -1025,17 +1056,17 @@ struct PaperGIFRemoteView: View {
             } label: {
                 Label("Save Remote", systemImage: "square.and.arrow.down")
             }
-            .disabled(profile.pages.isEmpty)
+            .disabled(profile.pages.isEmpty && profile.hardwareBindings.isEmpty)
 
             Button {
                 guard save() else { return }
                 bluetoothManager.syncRemoteProfile(profile)
             } label: {
-                Label("Save & Sync to M5Paper", systemImage: "arrow.triangle.2.circlepath")
+                Label("Save & Sync to \(deviceSession.descriptor?.name ?? "Device")", systemImage: "arrow.triangle.2.circlepath")
             }
             .disabled(
-                profile.pages.isEmpty ||
-                bluetoothManager.connectionState != .connected ||
+                (profile.pages.isEmpty && profile.hardwareBindings.isEmpty) ||
+                !bluetoothManager.canSyncSelectedProfile ||
                 bluetoothManager.isTransferring
             )
 
@@ -1044,7 +1075,7 @@ struct PaperGIFRemoteView: View {
                     .foregroundStyle(.secondary)
             }
         } footer: {
-            Text("Layout changes save automatically and sync over Bluetooth after you pause editing.")
+            Text("Changes save per device and sync after you pause editing. Native devices use their verified HTTP endpoint; legacy M5Paper uses Bluetooth.")
         }
     }
 
@@ -1089,8 +1120,8 @@ struct PaperGIFRemoteView: View {
         if immediately {
             liveSyncTask?.cancel()
             guard save(updatedProfile) else { return }
-            guard bluetoothManager.connectionState == .connected else {
-                liveSyncStatus = "Saved; connect M5Paper to sync"
+            guard bluetoothManager.canSyncSelectedProfile else {
+                liveSyncStatus = "Saved; connect the selected device to sync"
                 return
             }
             liveSyncStatus = "Syncing changes…"
@@ -1135,8 +1166,8 @@ struct PaperGIFRemoteView: View {
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled, save(profileSnapshot) else { return }
 
-            guard bluetoothManager.connectionState == .connected else {
-                liveSyncStatus = "Saved; connect M5Paper to sync"
+            guard bluetoothManager.canSyncSelectedProfile else {
+                liveSyncStatus = "Saved; connect the selected device to sync"
                 return
             }
 
@@ -1154,7 +1185,10 @@ struct PaperGIFRemoteView: View {
     @discardableResult
     private func save(_ profile: PaperGIFRemoteProfile) -> Bool {
         do {
-            try PaperGIFStorage.saveRemoteProfile(profile)
+            try PaperGIFStorage.saveRemoteProfile(profile, deviceID: deviceSession.selectedID)
+            if deviceSession.selectedID != nil {
+                try deviceSession.saveProfile(JSONEncoder().encode(profile))
+            }
             return true
         } catch {
             saveError = error.localizedDescription
@@ -1679,11 +1713,22 @@ private struct PaperGIFRemotePageEditor: View {
     let buttonBackground: PaperGIFRemoteButtonBackground
     let buttonTexture: PaperGIFRemoteButtonTexture
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
+    var deviceDisplay: DeviceDisplay? = nil
     @State private var selectedControlID: UUID?
 
     var body: some View {
         List {
             Section("Preview") {
+                if let deviceDisplay {
+                    PaperGIFAdaptivePagePreview(page: $page, display: deviceDisplay) {
+                        selectedControlID = $0
+                    }
+                    .frame(maxHeight: 420)
+                    if !deviceDisplay.touch {
+                        Text("Display only — actions are assigned to physical inputs.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                } else {
                 PaperGIFRemotePagePreview(
                     page: $page,
                     pageIndex: pages.firstIndex { $0.id == page.id } ?? 0,
@@ -1698,6 +1743,7 @@ private struct PaperGIFRemotePageEditor: View {
                 .frame(maxWidth: 280)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
+                }
             }
 
             Section("Page") {
@@ -1718,7 +1764,8 @@ private struct PaperGIFRemotePageEditor: View {
                             gridRows: page.gridRows,
                             defaultButtonBackground: buttonBackground,
                             defaultButtonTexture: buttonTexture,
-                            wledDiscovery: wledDiscovery
+                            wledDiscovery: wledDiscovery,
+                            supportsButtonImages: deviceDisplay == nil
                         )
                     } label: {
                         Label {
@@ -1784,7 +1831,8 @@ private struct PaperGIFRemotePageEditor: View {
                     gridRows: page.gridRows,
                     defaultButtonBackground: buttonBackground,
                     defaultButtonTexture: buttonTexture,
-                    wledDiscovery: wledDiscovery
+                    wledDiscovery: wledDiscovery,
+                    supportsButtonImages: deviceDisplay == nil
                 )
             }
         }
@@ -2405,7 +2453,7 @@ private struct PaperGIFOpenBuildsSettingsPreview: View {
     }
 }
 
-private struct PaperGIFRemoteControlEditor: View {
+struct PaperGIFRemoteControlEditor: View {
     @Binding var control: PaperGIFRemoteControl
     let pages: [PaperGIFRemotePage]
     let computers: [PaperGIFRemoteComputer]
@@ -2415,6 +2463,8 @@ private struct PaperGIFRemoteControlEditor: View {
     var defaultButtonBackground: PaperGIFRemoteButtonBackground = .outline
     var defaultButtonTexture = PaperGIFRemoteButtonTexture()
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
+    var hardwareOnly = false
+    var supportsButtonImages = true
     @StateObject private var applicationCatalog = PaperGIFMacApplicationCatalog()
     @StateObject private var homeManager = PaperGIFHomeManager()
 
@@ -2432,6 +2482,7 @@ private struct PaperGIFRemoteControlEditor: View {
 
     var body: some View {
         Form {
+            if !hardwareOnly {
             Section("Appearance") {
                 TextField("Label", text: $control.title)
                 if control.kind != .textBox {
@@ -2450,6 +2501,7 @@ private struct PaperGIFRemoteControlEditor: View {
                                 .lineLimit(1)
                                 .foregroundStyle(.secondary)
                         }
+                        }
                     }
                     TextField("Color hex", text: $control.tintHex)
                         .textInputAutocapitalization(.characters)
@@ -2464,6 +2516,11 @@ private struct PaperGIFRemoteControlEditor: View {
                         )
                     } label: {
                         LabeledContent("Background", value: backgroundSummary)
+                    }
+                    .disabled(!supportsButtonImages)
+                    if !supportsButtonImages {
+                        Text("The M5Paper button image/background encoder is unavailable for this panel.")
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
                 Picker("Control", selection: controlKindBinding) {

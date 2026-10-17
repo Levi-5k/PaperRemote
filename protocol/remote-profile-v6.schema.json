@@ -32,6 +32,7 @@
       "minimum": 1,
       "maximum": 100
     },
+    "maxButtonTextSize": {"type": "integer", "minimum": 9, "maximum": 24},
     "elementRefreshDelayMilliseconds": {
       "type": "integer",
       "minimum": 0,

@@ -41,6 +41,12 @@
 #include "screensaver_battery.h"
 #include "sleep_wake.h"
 #include "render_diagnostics.h"
+#include "board_driver.h"
+#include "device_descriptor.h"
+#include "firmware_identity.h"
+#include "remote_action_payload.h"
+#include "m5paper_board.h"
+#include "m5paper_controls.h"
 
 #ifndef PAPERGIF_FIRMWARE_VERSION
 #define PAPERGIF_FIRMWARE_VERSION "0.0.0"
@@ -49,6 +55,9 @@
 namespace {
 
 PsramJsonAllocator profileJsonAllocator;
+String deviceDescriptor;
+paper_board::DescriptorCallbacks descriptorCallbacks(deviceDescriptor);
+paper_board::M5PaperBoard m5Board;
 
 // Gates the IT8951's clocks while the panel is idle; the next panel
 // transaction (draw, busy poll or wait) sends SYS_RUN before anything else.
@@ -168,6 +177,8 @@ constexpr size_t kSlideshowIntervalCount =
     sizeof(kSlideshowIntervalsSeconds) / sizeof(kSlideshowIntervalsSeconds[0]);
 constexpr uint8_t kDefaultSlideshowIntervalIndex = 2;
 constexpr uint8_t kUseProfileScreensaverDelay = 0xFF;
+// Exact seconds set through device controls, stored after the eight legacy setting bytes.
+constexpr uint8_t kCustomSecondsIndex = 0xFE;
 enum class ScreensaverStyle : uint8_t { media = 0, geometricSnake = 1 };
 constexpr uint32_t kSnakeCleanRefreshInterval = 240;
 constexpr lgfx::bgr888_t kGrayscalePalette[] = {
@@ -348,6 +359,8 @@ struct RemoteControl {
     RemoteAction action;
 };
 
+constexpr int8_t kNoRelayComputer = -3;
+
 struct PendingRemoteAction {
     RemoteAction action;
     char controlId[40] = {};
@@ -376,6 +389,8 @@ struct RemoteNetworkRequest {
     bool deviceLogRequest = false;
     uint8_t logComputerIndex = 0;
     uint32_t logEntryId = 0;
+    // Computer index for a direct BLE relay retry after a connect failure.
+    int8_t relayComputer = kNoRelayComputer;
 };
 
 struct RemoteNetworkResult {
@@ -393,6 +408,7 @@ struct RemoteNetworkResult {
     bool deviceLogRequest = false;
     uint8_t logComputerIndex = 0;
     uint32_t logEntryId = 0;
+    int8_t relaySlot = -1;
 };
 
 using RemoteRequestQueue = remote_network::WorkQueue<
@@ -599,6 +615,7 @@ uint32_t wifiUploadRequestOffset = 0;
 uint32_t wifiUploadExpectedChunkBytes = 0;
 // Heap-allocated only while an OTA upload is in progress; internal DRAM has no spare static room.
 struct FirmwareUpdateSession {
+    paper_board::FirmwareIdentityScanner identity;
     const esp_partition_t* partition;
     mbedtls_md5_context md5;
     uint32_t expectedBytes;
@@ -638,8 +655,12 @@ bool remoteSleepNever = false;
 bool deepSleepSuspended = false;
 uint8_t slideshowIntervalIndex = kDefaultSlideshowIntervalIndex;
 uint8_t screensaverDelayIndex = kUseProfileScreensaverDelay;
+uint16_t customSlideshowIntervalSeconds = 0;
+uint16_t customScreensaverDelaySeconds = 0;
 ScreensaverStyle screensaverStyle = ScreensaverStyle::media;
 bool imagesOnlyOnBattery = false;
+// Set whenever a device-control value may have changed; snapshot subscribers get a 0x51.
+bool controlsDirty = false;
 bool batteryImagesOnly = false;
 bool batteryPolicySampled = false;
 uint32_t batteryPolicySampledAt = 0;
@@ -872,7 +893,8 @@ bool sendHttpResponse(
     String& responseBody,
     const char* token,
     uint32_t responseTimeoutMs = 5000,
-    KeepAliveConnection* keepAlive = nullptr);
+    KeepAliveConnection* keepAlive = nullptr,
+    bool* connectFailed = nullptr);
 void stopWifiMode();
 void startBluetooth();
 void ensureBluetoothAdvertising();
@@ -907,6 +929,16 @@ void applyWifiSleep();
 void boostCpu();
 void configureAdvertisingInterval(NimBLEAdvertising* advertising);
 void refreshRemoteBatteryIndicator(bool force = false);
+void handleDeviceControlsGet();
+void handleDeviceControlsPost();
+bool enqueueDeviceControlPacket(uint16_t handle, const uint8_t* data, size_t length);
+void forgetDeviceControlHandle(uint16_t handle);
+bool isRelayOnlyHandle(uint16_t handle);
+bool sendRelayAction(int computerIndex, bool directOnly, const char* body);
+bool claimRelayRetrySlot(int computerIndex, const char* body, int8_t& slot);
+bool retryRelaySlot(int8_t slot);
+void clearDeviceControlHandles();
+void initDeviceControls();
 
 void loadSliderPositionStore() {
     if (sliderPositionStoreLoaded || sliderPositionStore == nullptr) {
@@ -1381,6 +1413,7 @@ void restoreScreenAfterFirmwareFailure(uint8_t screen) {
 
 // Raw partition writes; esp_ota_begin/write would add static DRAM the firmware cannot spare.
 bool writeFirmwareChunk(const uint8_t* data, size_t length) {
+    firmwareUpdate->identity.append(data, length);
     const uint32_t end = firmwareUpdate->receivedBytes + length;
     if (end > firmwareUpdate->erasedBytes) {
         const uint32_t eraseEnd =
@@ -1409,6 +1442,10 @@ void finishFirmwareUpdate() {
     }
     if (strcasecmp(actualMd5, firmwareUpdate->expectedMd5) != 0) {
         failFirmwareUpdate("md5_mismatch");
+        return;
+    }
+    if (!firmwareUpdate->identity.compatible()) {
+        failFirmwareUpdate("incompatible_board");
         return;
     }
     // Verifies the written image (checksum and embedded SHA-256) before switching boot slots.
@@ -1455,10 +1492,18 @@ bool wifiRequestAuthorized() {
 }
 
 uint32_t slideshowIntervalSeconds() {
-    return kSlideshowIntervalsSeconds[slideshowIntervalIndex];
+    if (slideshowIntervalIndex == kCustomSecondsIndex && customSlideshowIntervalSeconds > 0) {
+        return customSlideshowIntervalSeconds;
+    }
+    return kSlideshowIntervalsSeconds[
+        slideshowIntervalIndex < kSlideshowIntervalCount
+            ? slideshowIntervalIndex : kDefaultSlideshowIntervalIndex];
 }
 
 uint32_t screensaverDelaySeconds() {
+    if (screensaverDelayIndex == kCustomSecondsIndex && customScreensaverDelaySeconds > 0) {
+        return customScreensaverDelaySeconds;
+    }
     if (screensaverDelayIndex < kSlideshowIntervalCount) {
         return kSlideshowIntervalsSeconds[screensaverDelayIndex];
     }
@@ -1519,6 +1564,7 @@ bool replaceFileTransactionally(
 }
 
 void persistSettings() {
+    controlsDirty = true;
     SD.remove(kSettingsTemporaryPath);
     File file = SD.open(kSettingsTemporaryPath, FILE_WRITE);
     if (!file) {
@@ -1533,6 +1579,10 @@ void persistSettings() {
         static_cast<uint8_t>(imagesOnlyOnBattery ? 1 : 0),
         static_cast<uint8_t>(remoteSleepNever ? 1 : 0),
         static_cast<uint8_t>(remoteQualityRefreshes ? 1 : 0),
+        static_cast<uint8_t>(customSlideshowIntervalSeconds & 0xFF),
+        static_cast<uint8_t>(customSlideshowIntervalSeconds >> 8),
+        static_cast<uint8_t>(customScreensaverDelaySeconds & 0xFF),
+        static_cast<uint8_t>(customScreensaverDelaySeconds >> 8),
     };
     const bool written = file.write(settings, sizeof(settings)) == sizeof(settings);
     file.flush();
@@ -1557,17 +1607,27 @@ bool restoreSettingsFrom(const char* path) {
     const int batteryOnly = file.read();
     const int sleepNever = file.read();
     const int qualityRefreshes = file.read();
+    uint8_t customBytes[4] = {};
+    const bool hasCustomSeconds = file.read(customBytes, sizeof(customBytes)) == sizeof(customBytes);
     file.close();
     if (enabled < 0) {
         return false;
     }
     slideshowEnabled = enabled == 1;
     slideshowDeepSleep = deepSleep == 1;
+    customSlideshowIntervalSeconds = hasCustomSeconds
+        ? static_cast<uint16_t>(customBytes[0] | (customBytes[1] << 8)) : 0;
+    customScreensaverDelaySeconds = hasCustomSeconds
+        ? static_cast<uint16_t>(customBytes[2] | (customBytes[3] << 8)) : 0;
     if (intervalIndex >= 0 && intervalIndex < kSlideshowIntervalCount) {
         slideshowIntervalIndex = static_cast<uint8_t>(intervalIndex);
+    } else if (intervalIndex == kCustomSecondsIndex && customSlideshowIntervalSeconds > 0) {
+        slideshowIntervalIndex = kCustomSecondsIndex;
     }
     if (delayIndex >= 0 && delayIndex < kSlideshowIntervalCount) {
         screensaverDelayIndex = static_cast<uint8_t>(delayIndex);
+    } else if (delayIndex == kCustomSecondsIndex && customScreensaverDelaySeconds > 0) {
+        screensaverDelayIndex = kCustomSecondsIndex;
     }
     // Older settings have only 3 or 4 bytes; missing/unknown styles use media.
     screensaverStyle = style == static_cast<int>(ScreensaverStyle::geometricSnake)
@@ -1607,6 +1667,9 @@ void boostCpu() {
 void applyLowPowerMode(bool active) {
     const bool changed = active != lowPowerMode;
     lowPowerMode = active;
+    if (changed) {
+        controlsDirty = true;
+    }
     if (active) {
         // Wi-Fi and BLE need at least 80 MHz.
         setCpuFrequencyMhz(80);
@@ -3305,6 +3368,11 @@ void configureWifiServer() {
             wifiSsid);
         wifiServer.send(200, "application/json", response);
     });
+    wifiServer.on("/device", HTTP_GET, []() {
+        wifiServer.send(200, "application/json", deviceDescriptor);
+    });
+    wifiServer.on("/device/controls", HTTP_GET, handleDeviceControlsGet);
+    wifiServer.on("/device/controls", HTTP_POST, handleDeviceControlsPost);
     wifiServer.on("/wifi/networks", HTTP_GET, []() {
         if (!wifiRequestAuthorized()) {
             wifiServer.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
@@ -4419,8 +4487,27 @@ void receiveRemoteProfileData(const uint8_t* value, size_t length) {
 
 class ControlCallbacks final : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connectionInfo) override {
-        lastRemoteActivityAt = millis();
         const NimBLEAttValue value = characteristic->getValue();
+        // Device controls and relay packets never claim the active controller, and
+        // relay traffic does not count as activity that keeps the device awake.
+        if (value.size() > 0 &&
+            (value[0] == device_controls::snapshotRequest || value[0] == device_controls::setRequest ||
+             value[0] == device_controls::relayRegister || value[0] == device_controls::relayResult)) {
+            const uint16_t handle = connectionInfo.getConnHandle();
+            if (value[0] == device_controls::setRequest) {
+                lastRemoteActivityAt = millis();
+            }
+            if (!enqueueDeviceControlPacket(handle, value.data(), value.size()) &&
+                value[0] == device_controls::setRequest) {
+                const uint8_t status = value.size() > device_controls::maxSetRequestBytes + 1
+                    ? static_cast<uint8_t>(device_controls::Status::invalidValue)
+                    : static_cast<uint8_t>(device_controls::Status::busy);
+                const uint8_t response[] = {device_controls::setResult, status};
+                characteristic->notify(response, sizeof(response), handle);
+            }
+            return;
+        }
+        lastRemoteActivityAt = millis();
         if (value.size() == 0) {
             bluetoothConnectionHandle = connectionInfo.getConnHandle();
             notifyControl(kUploadFailed);
@@ -4557,6 +4644,8 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
     }
 
     void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connectionInfo, int reason) override {
+        descriptorCallbacks.disconnected(connectionInfo.getConnHandle());
+        forgetDeviceControlHandle(connectionInfo.getConnHandle());
         Serial.printf("BLE disconnected, reason: %d\n", reason);
         const bool activeControllerDisconnected =
             bluetoothConnectionHandle == connectionInfo.getConnHandle();
@@ -4565,8 +4654,13 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
         }
         deviceConnected = server->getConnectedCount() > 0;
         if (activeControllerDisconnected) {
-            const std::vector<uint16_t> peers = server->getPeerDevices();
-            bluetoothConnectionHandle = peers.empty() ? UINT16_MAX : peers.front();
+            bluetoothConnectionHandle = UINT16_MAX;
+            for (const uint16_t peer : server->getPeerDevices()) {
+                if (peer != connectionInfo.getConnHandle() && !isRelayOnlyHandle(peer)) {
+                    bluetoothConnectionHandle = peer;
+                    break;
+                }
+            }
         }
         if (bluetoothStopping) {
             return;
@@ -4608,6 +4702,7 @@ void startBluetooth() {
     if (bluetoothActive) {
         return;
     }
+    initDeviceControls();
     NimBLEDevice::init("paperGIF");
     NimBLEDevice::setMTU(517);
     bluetoothServer = NimBLEDevice::createServer();
@@ -4616,11 +4711,12 @@ void startBluetooth() {
 
     NimBLEService* service = bluetoothServer->createService(kServiceUuid);
     controlCharacteristic = service->createCharacteristic(
-        kControlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 96);
+        kControlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 256);
     NimBLECharacteristic* dataCharacteristic = service->createCharacteristic(
         kDataUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR, 512);
     controlCharacteristic->setCallbacks(&controlCallbacks);
     dataCharacteristic->setCallbacks(&dataCallbacks);
+    paper_board::addDescriptorCharacteristic(service, descriptorCallbacks);
     bluetoothServer->start();
 
     NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
@@ -4683,6 +4779,7 @@ void suspendBluetoothForWifiUpload() {
     bluetoothConnectionHandle = UINT16_MAX;
     iPhoneControllerHandle = UINT16_MAX;
     controlCharacteristic = nullptr;
+    clearDeviceControlHandles();
     bluetoothSuspendedForWifiUpload = true;
     bluetoothSuspendedAt = millis();
     WiFi.setSleep(false);
@@ -4843,7 +4940,7 @@ void drawToggleRow(const char* label, bool enabled, int32_t y) {
 }
 
 void formatDuration(uint32_t seconds, char* text, size_t capacity) {
-    if (seconds < 60) {
+    if (seconds < 60 || seconds % 60 != 0) {
         snprintf(text, capacity, "%lu SEC", static_cast<unsigned long>(seconds));
     } else {
         snprintf(text, capacity, "%lu MIN", static_cast<unsigned long>(seconds / 60));
@@ -4904,13 +5001,29 @@ void adjustScreensaverDelay(int direction) {
 }
 
 void adjustSlideshowInterval(int direction) {
-    if (direction < 0 && slideshowIntervalIndex > 0) {
-        --slideshowIntervalIndex;
-    } else if (direction > 0 && slideshowIntervalIndex + 1 < kSlideshowIntervalCount) {
-        ++slideshowIntervalIndex;
-    } else {
+    // Step from the current seconds so a custom value moves to its neighbouring preset.
+    const uint32_t currentSeconds = slideshowIntervalSeconds();
+    int nextIndex = -1;
+    if (direction < 0) {
+        for (int index = static_cast<int>(kSlideshowIntervalCount) - 1; index >= 0; --index) {
+            if (kSlideshowIntervalsSeconds[index] < currentSeconds) {
+                nextIndex = index;
+                break;
+            }
+        }
+    } else if (direction > 0) {
+        for (size_t index = 0; index < kSlideshowIntervalCount; ++index) {
+            if (kSlideshowIntervalsSeconds[index] > currentSeconds) {
+                nextIndex = static_cast<int>(index);
+                break;
+            }
+        }
+    }
+    if (nextIndex < 0) {
         return;
     }
+    slideshowIntervalIndex = static_cast<uint8_t>(nextIndex);
+    controlsDirty = true;
     persistSettings();
     displaySlideshowMenu();
 }
@@ -5741,7 +5854,8 @@ void drawRemoteControl(const RemotePage& page, size_t index, bool pressed = fals
 void clearRemoteControl(const RemotePage& page, size_t index) {
     RemoteControlFrame frame;
     if (remoteControlFrame(page, index, frame)) {
-        M5.Display.fillRect(frame.x, frame.y, frame.width, frame.height, TFT_WHITE);
+        m5Board.display()->drawControl("", {double(frame.x), double(frame.y),
+            double(frame.width), double(frame.height)});
     }
 }
 
@@ -6669,7 +6783,8 @@ bool sendHttpResponse(
     String& responseBody,
     const char* token = nullptr,
     uint32_t responseTimeoutMs,
-    KeepAliveConnection* keepAlive) {
+    KeepAliveConnection* keepAlive,
+    bool* connectFailed) {
     if (WiFi.status() != WL_CONNECTED || !url.startsWith("http://")) {
         return false;
     }
@@ -6692,6 +6807,7 @@ bool sendHttpResponse(
         resolvedAddress = MDNS.queryHost(mdnsHost, 2000);
         if (resolvedAddress == INADDR_NONE || resolvedAddress == IPAddress()) {
             Serial.printf("mDNS lookup failed for %s\n", authority.c_str());
+            if (connectFailed != nullptr) *connectFailed = true;
             return false;
         }
     }
@@ -6721,6 +6837,7 @@ bool sendHttpResponse(
             authority.c_str(), port, static_cast<int>(WiFi.status()), WiFi.RSSI(),
             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
             heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        if (connectFailed != nullptr) *connectFailed = true;
         return false;
     }
     // Small control messages should not wait for Nagle/delayed ACK interaction.
@@ -6753,7 +6870,8 @@ bool sendHttpResponse(
             // The server closed the idle connection before reading this request.
             client.stop();
             return sendHttpResponse(
-                url, method, body, responseBody, token, responseTimeoutMs, keepAlive);
+                url, method, body, responseBody, token, responseTimeoutMs, keepAlive,
+                connectFailed);
         }
         Serial.printf("Remote HTTP status timeout: %s:%u\n", authority.c_str(), port);
         client.stop();
@@ -7104,6 +7222,7 @@ void remoteNetworkTask(void* context) {
         String responseBody;
         const uint32_t responseTimeoutMs = remote_network::responseTimeoutMs(
             worker.lane, request.textRequest);
+        bool connectFailed = false;
         const bool sent = sendHttpResponse(
             request.url,
             request.method,
@@ -7111,7 +7230,8 @@ void remoteNetworkTask(void* context) {
             responseBody,
             request.token[0] == '\0' ? nullptr : request.token,
             responseTimeoutMs,
-            request.textRequest ? &textConnection : nullptr);
+            request.textRequest ? &textConnection : nullptr,
+            &connectFailed);
         Serial.printf("Remote network lane=%u queue=%lu ms request=%lu ms -> %s\n",
             static_cast<unsigned>(worker.lane),
             static_cast<unsigned long>(startedAt - request.enqueuedAt),
@@ -7154,6 +7274,10 @@ void remoteNetworkTask(void* context) {
         result.logComputerIndex = request.logComputerIndex;
         result.logEntryId = request.logEntryId;
         result.sent = sent;
+        // Nothing reached the computer, so one direct BLE relay retry cannot duplicate it.
+        if (!sent && connectFailed && request.relayComputer != kNoRelayComputer) {
+            claimRelayRetrySlot(request.relayComputer, request.body, result.relaySlot);
+        }
         if (result.sent && !responseBody.isEmpty()) {
             JsonDocument response(&profileJsonAllocator);
             if (!deserializeJson(response, responseBody) && response["changed"].is<bool>()) {
@@ -7244,7 +7368,8 @@ bool queueRemoteNetworkRequest(
     const char* token,
     const RemoteControl& control,
     bool reportStatus,
-    const char* method = "POST") {
+    const char* method = "POST",
+    int relayComputer = kNoRelayComputer) {
     if (url.length() >= kRemoteRequestUrlBytes ||
         body.length() >= kRemoteRequestBodyBytes) {
         return false;
@@ -7262,6 +7387,7 @@ bool queueRemoteNetworkRequest(
     request.toggleOnBefore = control.toggleOn;
     request.playPause = isMacPlayPauseControl(control) || isModuleStateControl(control);
     request.profileRevision = remoteProfileRevision;
+    request.relayComputer = static_cast<int8_t>(relayComputer);
     return enqueueRemoteRequest(request);
 }
 
@@ -7318,6 +7444,11 @@ void pollRemoteNetworkResults() {
                 result.sent ? "ok" : "retrying");
             continue;
         }
+        const bool sentViaRelay = !result.sent && result.relaySlot >= 0 &&
+            retryRelaySlot(result.relaySlot);
+        if (sentViaRelay) {
+            result.sent = true;
+        }
         Serial.printf("Remote action %s -> %s\n",
             result.actionType, result.sent ? "ok" : "failed");
         if (result.profileRevision != remoteProfileRevision) {
@@ -7354,7 +7485,7 @@ void pollRemoteNetworkResults() {
             }
         }
         if (result.reportStatus) {
-            displayRemoteActionStatus(result.sent
+            displayRemoteActionStatus(sentViaRelay ? "Sent via Bluetooth" : result.sent
                 ? (result.changed ? "Sent" : "Already set")
                 : (strncmp(result.actionType, "wled", 4) == 0
                     ? "WLED unavailable"
@@ -8226,6 +8357,7 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
     String body;
     const char* token = nullptr;
     const char* method = "POST";
+    int relayComputerIndex = kNoRelayComputer;
     if (strncmp(action.type, "wled", 4) == 0) {
         if (action.host[0] == '\0') {
             Serial.printf("Remote action %s failed: WLED host is empty\n", action.type);
@@ -8317,28 +8449,25 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
         }
         url = "http://" + String(macHost) + ":" + macPort + "/action";
         token = macToken;
+        relayComputerIndex = remote_computer::indexFor(*remoteProfile, action.computerId);
         Serial.printf("Remote target control=%s command=%s computer=%s host=%s:%u\n",
             control.id, action.type, target->id[0] != '\0' ? target->id : "legacy",
             macHost, macPort);
-        document["type"] = action.type;
-        document["host"] = action.host;
-        document["text"] = action.text;
-        document["value"] = action.value;
-        if (strcmp(action.type, "netHomeTemperature") == 0 ||
-            strcmp(action.type, "openBuilds") == 0 ||
-            strcmp(action.type, "netHomeClimate") == 0) {
-            document["valueTenths"] = action.valueTenths;
-        }
-        JsonArray modifiers = document["modifiers"].to<JsonArray>();
-        for (uint8_t index = 0; index < action.modifierCount; ++index) {
-            modifiers.add(action.modifiers[index]);
-        }
+        writeRemoteActionPayload(document, action);
     }
     if (strcmp(action.type, "localHTTP") != 0 &&
         strcmp(action.type, "eWeLinkPower") != 0) {
         serializeJson(document, body);
     }
     if (WiFi.status() != WL_CONNECTED) {
+        if (relayComputerIndex != kNoRelayComputer &&
+            sendRelayAction(relayComputerIndex, false, body.c_str())) {
+            Serial.printf("Remote action %s sent via Bluetooth relay\n", action.type);
+            if (reportStatus && !control.slider) {
+                displayRemoteActionStatus("Sent via Bluetooth");
+            }
+            return true;
+        }
         if (queueIfOffline) {
             if (control.slider) {
                 for (size_t index = 0; index < pendingRemoteActionCount; ++index) {
@@ -8385,7 +8514,7 @@ __attribute__((noinline)) bool dispatchRemoteNetworkAction(
         return false;
     }
     const bool queued = queueRemoteNetworkRequest(
-        url, body, token, control, showActionStatus, method);
+        url, body, token, control, showActionStatus, method, relayComputerIndex);
     if (showActionStatus) {
         displayRemoteActionStatus(queued ? "Sending" : "Queue full");
     }
@@ -10397,6 +10526,782 @@ void displayCurrentFrame() {
     }
 }
 
+// ---- Device controls and BLE relay (protocol/device-protocol.md) ----
+
+struct DeviceControlPacket {
+    uint16_t handle;
+    uint16_t length;
+    uint8_t bytes[248];
+};
+
+struct RelayRetrySlot {
+    bool used;
+    int8_t computer;
+    char body[kRemoteRequestBodyBytes];
+};
+
+constexpr size_t kDeviceControlPacketCapacity = 6;
+constexpr size_t kDeviceControlJsonBytes = 1024;
+constexpr size_t kRelayRetrySlotCount = 3;
+constexpr uint16_t kDroppedPacketHandle = 0xFFFF;
+constexpr uint32_t kDeviceActionDelayMs = 300;
+constexpr uint32_t kDeviceStatusCheckMs = 60000;
+constexpr uint32_t kDeviceClimateSampleMs = 30000;
+
+portMUX_TYPE deviceControlLock = portMUX_INITIALIZER_UNLOCKED;
+DeviceControlPacket* deviceControlPackets = nullptr;
+size_t deviceControlPacketHead = 0;
+size_t deviceControlPacketCount = 0;
+RelayRetrySlot* relayRetrySlots = nullptr;
+char* deviceControlJson = nullptr;
+char* relayFrameJson = nullptr;
+struct DeviceControlState {
+    device_controls::RelayRegistry relays;
+    device_controls::HandleSet subscribers;
+    device_controls::RelaySequences sequences;
+};
+// Heap-allocated in setup: static DRAM has no headroom left on this board.
+DeviceControlState* deviceControlState = nullptr;
+bool relayFlushRequested = false;
+bool deviceSettingsRedrawPending = false;
+bool deviceWakeRemotePending = false;
+int8_t pendingDeviceAction = -1;
+uint32_t pendingDeviceActionAt = 0;
+float deviceTemperatureC = 0;
+float deviceHumidityPercent = 0;
+bool deviceClimateAvailable = false;
+bool deviceClimateSampled = false;
+uint32_t deviceClimateSampledAt = 0;
+uint32_t deviceStatusCheckedAt = 0;
+uint32_t deviceSnapshotHash = 0;
+
+void* allocateDeviceControlMemory(size_t bytes) {
+    void* memory = heap_caps_calloc(1, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return memory != nullptr ? memory : calloc(1, bytes);
+}
+
+void initDeviceControls() {
+    if (deviceControlState == nullptr) {
+        void* memory = allocateDeviceControlMemory(sizeof(DeviceControlState));
+        if (memory != nullptr) {
+            deviceControlState = new (memory) DeviceControlState();
+        }
+    }
+    if (deviceControlPackets == nullptr) {
+        deviceControlPackets = static_cast<DeviceControlPacket*>(allocateDeviceControlMemory(
+            sizeof(DeviceControlPacket) * kDeviceControlPacketCapacity));
+    }
+    if (relayRetrySlots == nullptr) {
+        relayRetrySlots = static_cast<RelayRetrySlot*>(allocateDeviceControlMemory(
+            sizeof(RelayRetrySlot) * kRelayRetrySlotCount));
+    }
+    if (deviceControlJson == nullptr) {
+        deviceControlJson = static_cast<char*>(allocateDeviceControlMemory(kDeviceControlJsonBytes));
+    }
+    if (relayFrameJson == nullptr) {
+        relayFrameJson = static_cast<char*>(allocateDeviceControlMemory(kDeviceControlJsonBytes));
+    }
+}
+
+bool enqueueDeviceControlPacket(uint16_t handle, const uint8_t* data, size_t length) {
+    if (deviceControlPackets == nullptr || length == 0 ||
+        length > sizeof(DeviceControlPacket::bytes)) {
+        return false;
+    }
+    bool queued = false;
+    portENTER_CRITICAL(&deviceControlLock);
+    if (deviceControlPacketCount < kDeviceControlPacketCapacity) {
+        DeviceControlPacket& packet = deviceControlPackets[
+            (deviceControlPacketHead + deviceControlPacketCount) % kDeviceControlPacketCapacity];
+        packet.handle = handle;
+        packet.length = static_cast<uint16_t>(length);
+        memcpy(packet.bytes, data, length);
+        ++deviceControlPacketCount;
+        queued = true;
+    }
+    portEXIT_CRITICAL(&deviceControlLock);
+    if (queued && loopWakeSemaphore != nullptr) {
+        xSemaphoreGive(loopWakeSemaphore);
+    }
+    return queued;
+}
+
+bool takeDeviceControlPacket(DeviceControlPacket& packet) {
+    bool taken = false;
+    portENTER_CRITICAL(&deviceControlLock);
+    if (deviceControlPackets != nullptr && deviceControlPacketCount > 0) {
+        packet = deviceControlPackets[deviceControlPacketHead];
+        deviceControlPacketHead = (deviceControlPacketHead + 1) % kDeviceControlPacketCapacity;
+        --deviceControlPacketCount;
+        taken = true;
+    }
+    portEXIT_CRITICAL(&deviceControlLock);
+    return taken;
+}
+
+void forgetDeviceControlHandle(uint16_t handle) {
+    portENTER_CRITICAL(&deviceControlLock);
+    deviceControlState->relays.removeHandle(handle);
+    deviceControlState->subscribers.remove(handle);
+    deviceControlState->sequences.removeHandle(handle);
+    // A queued registration must not outlive its connection.
+    for (size_t index = 0; deviceControlPackets != nullptr && index < deviceControlPacketCount; ++index) {
+        DeviceControlPacket& packet = deviceControlPackets[
+            (deviceControlPacketHead + index) % kDeviceControlPacketCapacity];
+        if (packet.handle == handle) {
+            packet.handle = kDroppedPacketHandle;
+        }
+    }
+    portEXIT_CRITICAL(&deviceControlLock);
+}
+
+void clearDeviceControlHandles() {
+    portENTER_CRITICAL(&deviceControlLock);
+    deviceControlState->relays.clear();
+    deviceControlState->subscribers.clear();
+    deviceControlPacketCount = 0;
+    portEXIT_CRITICAL(&deviceControlLock);
+}
+
+bool isRelayOnlyHandle(uint16_t handle) {
+    portENTER_CRITICAL(&deviceControlLock);
+    const bool relay = deviceControlState->relays.isRelay(handle);
+    portEXIT_CRITICAL(&deviceControlLock);
+    return relay;
+}
+
+uint16_t relayHandleFor(int computerIndex, bool directOnly) {
+    portENTER_CRITICAL(&deviceControlLock);
+    const uint16_t handle = deviceControlState->relays.find(computerIndex, directOnly);
+    portEXIT_CRITICAL(&deviceControlLock);
+    return handle;
+}
+
+bool notifyDevicePacket(uint16_t handle, const uint8_t* data, size_t length) {
+    for (uint8_t attempt = 0; attempt < 10; ++attempt) {
+        if (controlCharacteristic == nullptr || bluetoothServer == nullptr || !bluetoothActive) {
+            return false;
+        }
+        if (controlCharacteristic->notify(data, length, handle)) {
+            return true;
+        }
+        delay(5);
+    }
+    return false;
+}
+
+size_t devicePacketLimit(uint16_t handle) {
+    const uint16_t mtu = bluetoothServer != nullptr ? bluetoothServer->getPeerMTU(handle) : 23;
+    return device_controls::packetLimit(mtu);
+}
+
+bool sendFragmentedPacket(
+    uint16_t handle, const uint8_t* header, size_t headerLength, const char* data, size_t length) {
+    return device_controls::sendFragments(
+        header, headerLength, data, length, devicePacketLimit(handle),
+        [handle](const uint8_t* bytes, size_t byteCount) {
+            return notifyDevicePacket(handle, bytes, byteCount);
+        }) > 0;
+}
+
+void sampleDeviceClimate() {
+    if (deviceClimateSampled && millis() - deviceClimateSampledAt < kDeviceClimateSampleMs) {
+        return;
+    }
+    deviceClimateSampled = true;
+    deviceClimateSampledAt = millis();
+    float temperatureC;
+    float humidityPercent;
+    deviceClimateAvailable = readSht30(temperatureC, humidityPercent);
+    if (deviceClimateAvailable) {
+        deviceTemperatureC = temperatureC;
+        deviceHumidityPercent = humidityPercent;
+    }
+}
+
+uint32_t deviceDelayControlValue(uint32_t seconds) {
+    return static_cast<uint32_t>(device_controls::snap(
+        m5paper_controls::controls[m5paper_controls::sleepDelay],
+        constrain(seconds, m5paper_controls::minimumDelaySeconds,
+            m5paper_controls::maximumDelaySeconds)));
+}
+
+bool readDeviceControl(const device_controls::Control& control, device_controls::Value& value) {
+    const size_t index = static_cast<size_t>(&control - m5paper_controls::controls);
+    switch (index) {
+    case m5paper_controls::slideshow: value.boolean = slideshowEnabled; return true;
+    case m5paper_controls::screenSaver:
+        value.text = screensaverStyle == ScreensaverStyle::geometricSnake
+            ? m5paper_controls::screenSaverOptions[1].value
+            : m5paper_controls::screenSaverOptions[0].value;
+        return true;
+    case m5paper_controls::sleepDelay:
+        value.number = deviceDelayControlValue(screensaverDelaySeconds());
+        return true;
+    case m5paper_controls::slideshowInterval:
+        value.number = deviceDelayControlValue(slideshowIntervalSeconds());
+        return true;
+    case m5paper_controls::slideshowSleep: value.boolean = slideshowDeepSleep; return true;
+    case m5paper_controls::batteryStillImages: value.boolean = imagesOnlyOnBattery; return true;
+    case m5paper_controls::remoteSleep: value.boolean = !remoteSleepNever; return true;
+    case m5paper_controls::lowPowerMode: value.boolean = lowPowerMode; return true;
+    case m5paper_controls::qualityRefresh: value.boolean = remoteQualityRefreshes; return true;
+    case m5paper_controls::battery: {
+        const int32_t level = M5.Power.getBatteryLevel();
+        if (level < 0) return false;
+        value.number = constrain(level, 0, 100);
+        return true;
+    }
+    case m5paper_controls::temperature:
+    case m5paper_controls::humidity: {
+        // Prefer the climate automation's own recent reading.
+        float temperatureC = climateTemperatureC;
+        float humidityPercent = climateHumidityPercent;
+        if (!climateReadingAvailable) {
+            sampleDeviceClimate();
+            if (!deviceClimateAvailable) return false;
+            temperatureC = deviceTemperatureC;
+            humidityPercent = deviceHumidityPercent;
+        }
+        value.number = index == m5paper_controls::temperature
+            ? roundf(constrain(temperatureC, -40.0f, 125.0f) * 10.0f) / 10.0
+            : roundf(constrain(humidityPercent, 0.0f, 100.0f));
+        return true;
+    }
+    case m5paper_controls::wifiSignal:
+        if (WiFi.status() != WL_CONNECTED) return false;
+        value.number = constrain(static_cast<int>(WiFi.RSSI()), -100, 0);
+        return true;
+    default:
+        return false;
+    }
+}
+
+size_t buildDeviceControlsJson(char* output, size_t capacity, bool okResponse) {
+    if (output == nullptr) {
+        return 0;
+    }
+    JsonDocument document(&profileJsonAllocator);
+    if (okResponse) {
+        document["ok"] = true;
+    }
+    device_controls::writeSnapshot(document["values"].to<JsonObject>(),
+        m5paper_controls::controls, m5paper_controls::count, readDeviceControl);
+    if (measureJson(document) + 1 > capacity) {
+        return 0;
+    }
+    return serializeJson(document, output, capacity);
+}
+
+uint32_t deviceSnapshotFingerprint(const char* json, size_t length) {
+    uint32_t hash = 2166136261u;
+    for (size_t index = 0; index < length; ++index) {
+        hash = (hash ^ static_cast<uint8_t>(json[index])) * 16777619u;
+    }
+    return hash;
+}
+
+// Sends the current snapshot to `requester` (if any) and every subscriber.
+void sendDeviceSnapshot(uint16_t requester, bool subscribers) {
+    const size_t length = buildDeviceControlsJson(deviceControlJson, kDeviceControlJsonBytes, false);
+    if (length == 0) {
+        return;
+    }
+    deviceSnapshotHash = deviceSnapshotFingerprint(deviceControlJson, length);
+    uint16_t handles[device_controls::HandleSet::capacity + 1];
+    size_t handleCount = 0;
+    if (requester != UINT16_MAX) {
+        handles[handleCount++] = requester;
+    }
+    if (subscribers) {
+        portENTER_CRITICAL(&deviceControlLock);
+        for (size_t index = 0; index < deviceControlState->subscribers.size(); ++index) {
+            if (deviceControlState->subscribers.at(index) != requester) {
+                handles[handleCount++] = deviceControlState->subscribers.at(index);
+            }
+        }
+        portEXIT_CRITICAL(&deviceControlLock);
+    }
+    const uint8_t header[] = {device_controls::snapshotFragment};
+    for (size_t index = 0; index < handleCount; ++index) {
+        sendFragmentedPacket(handles[index], header, sizeof(header), deviceControlJson, length);
+    }
+}
+
+bool hasSnapshotSubscribers() {
+    portENTER_CRITICAL(&deviceControlLock);
+    const bool any = deviceControlState->subscribers.size() > 0;
+    portEXIT_CRITICAL(&deviceControlLock);
+    return any;
+}
+
+void setDelayControl(uint32_t seconds, uint8_t& index, uint16_t& customSeconds) {
+    for (size_t candidate = 0; candidate < kSlideshowIntervalCount; ++candidate) {
+        if (kSlideshowIntervalsSeconds[candidate] == seconds) {
+            index = static_cast<uint8_t>(candidate);
+            return;
+        }
+    }
+    index = kCustomSecondsIndex;
+    customSeconds = static_cast<uint16_t>(seconds);
+}
+
+void restartScreensaverPlayback() {
+    nextSnakeFrameAt = millis();
+    stillFrameDisplayed = false;
+    displayedFrames = 0;
+    previousFrameValid = false;
+    nextFrameAt = millis();
+    nextSlideshowAt = millis() + slideshowIntervalMs();
+}
+
+device_controls::Status applyDeviceControl(
+    const device_controls::Control& control, const device_controls::Value& value) {
+    using device_controls::Status;
+    if (upload.active || remoteProfileUpload.active) {
+        return Status::busy;
+    }
+    const size_t index = static_cast<size_t>(&control - m5paper_controls::controls);
+    if (control.kind == device_controls::Kind::action) {
+        if (pendingDeviceAction >= 0) {
+            return Status::busy;
+        }
+        if (index == m5paper_controls::showRemote &&
+            (remoteProfile == nullptr || !remoteProfile->configured || wifiModeVisible)) {
+            return Status::busy;
+        }
+        pendingDeviceAction = static_cast<int8_t>(index);
+        pendingDeviceActionAt = millis() + kDeviceActionDelayMs;
+        return Status::ok;
+    }
+    switch (index) {
+    case m5paper_controls::slideshow:
+        if (slideshowEnabled == value.boolean) break;
+        slideshowEnabled = value.boolean;
+        if (!slideshowEnabled) {
+            slideshowSleepPending = false;
+            // Leaving an endless screen saver up would never reach remote sleep.
+            deviceWakeRemotePending = screensaverActive;
+        }
+        persistSettings();
+        break;
+    case m5paper_controls::screenSaver: {
+        const ScreensaverStyle style = strcmp(value.text, "geometricSnake") == 0
+            ? ScreensaverStyle::geometricSnake : ScreensaverStyle::media;
+        if (style == screensaverStyle) break;
+        screensaverStyle = style;
+        slideshowSleepPending = false;
+        if (screensaverActive) restartScreensaverPlayback();
+        persistSettings();
+        break;
+    }
+    case m5paper_controls::sleepDelay:
+        setDelayControl(static_cast<uint32_t>(value.number), screensaverDelayIndex,
+            customScreensaverDelaySeconds);
+        persistSettings();
+        break;
+    case m5paper_controls::slideshowInterval:
+        setDelayControl(static_cast<uint32_t>(value.number), slideshowIntervalIndex,
+            customSlideshowIntervalSeconds);
+        if (screensaverActive) nextSlideshowAt = millis() + slideshowIntervalMs();
+        persistSettings();
+        break;
+    case m5paper_controls::slideshowSleep:
+        if (slideshowDeepSleep == value.boolean) break;
+        slideshowDeepSleep = value.boolean;
+        if (!slideshowDeepSleep) slideshowSleepPending = false;
+        persistSettings();
+        break;
+    case m5paper_controls::batteryStillImages:
+        if (imagesOnlyOnBattery == value.boolean) break;
+        imagesOnlyOnBattery = value.boolean;
+        batteryPolicySampled = false;
+        updateScreensaverBatteryPolicy();
+        persistSettings();
+        break;
+    case m5paper_controls::remoteSleep:
+        if (remoteSleepNever == !value.boolean) break;
+        remoteSleepNever = !value.boolean;
+        persistSettings();
+        break;
+    case m5paper_controls::qualityRefresh:
+        if (remoteQualityRefreshes == value.boolean) break;
+        remoteQualityRefreshes = value.boolean;
+        persistSettings();
+        break;
+    default:
+        return Status::readOnly;
+    }
+    deviceSettingsRedrawPending = true;
+    return Status::ok;
+}
+
+void sendDeviceControlsHttpError(device_controls::Status status, const char* error = nullptr) {
+    JsonDocument document(&profileJsonAllocator);
+    device_controls::writeError(document, error != nullptr ? error : device_controls::errorName(status));
+    String response;
+    serializeJson(document, response);
+    wifiServer.send(error != nullptr ? 401 : device_controls::httpStatus(status),
+        "application/json", response);
+}
+
+void sendDeviceControlsHttpSnapshot(bool okResponse) {
+    const size_t length = buildDeviceControlsJson(deviceControlJson, kDeviceControlJsonBytes, okResponse);
+    if (length == 0) {
+        sendDeviceControlsHttpError(device_controls::Status::busy);
+        return;
+    }
+    wifiServer.send(200, "application/json", deviceControlJson);
+}
+
+void handleDeviceControlsGet() {
+    if (!wifiRequestAuthorized()) {
+        sendDeviceControlsHttpError(device_controls::Status::ok, "unauthorized");
+        return;
+    }
+    sendDeviceControlsHttpSnapshot(false);
+}
+
+void handleDeviceControlsPost() {
+    if (!wifiRequestAuthorized()) {
+        sendDeviceControlsHttpError(device_controls::Status::ok, "unauthorized");
+        return;
+    }
+    const String body = wifiServer.arg("plain");
+    const device_controls::Control* control = nullptr;
+    device_controls::Value value;
+    device_controls::Status status = device_controls::parseSetRequest(
+        body.c_str(), body.length(), m5paper_controls::controls, m5paper_controls::count,
+        control, value);
+    if (status == device_controls::Status::ok) {
+        status = applyDeviceControl(*control, value);
+    }
+    if (status != device_controls::Status::ok) {
+        sendDeviceControlsHttpError(status);
+        return;
+    }
+    lastRemoteActivityAt = millis();
+    sendDeviceControlsHttpSnapshot(true);
+}
+
+void releaseActiveControllerForRelay(uint16_t handle) {
+    if (bluetoothConnectionHandle != handle || iPhoneControllerHandle == handle ||
+        upload.active || remoteProfileUpload.active || bluetoothServer == nullptr) {
+        return;
+    }
+    uint16_t replacement = UINT16_MAX;
+    for (const uint16_t peer : bluetoothServer->getPeerDevices()) {
+        if (peer != handle && !isRelayOnlyHandle(peer)) {
+            replacement = peer;
+            break;
+        }
+    }
+    bluetoothConnectionHandle = replacement;
+}
+
+void handleRelayRegistration(uint16_t handle, const uint8_t* data, size_t length) {
+    uint8_t response[2 + sizeof(RemoteComputer::id)] = {device_controls::relayRegistered, 1};
+    size_t responseLength = 2;
+    if (length >= 3 && data[1] <= 1 && remoteProfile != nullptr) {
+        const int computer = device_controls::tokenComputerIndex(
+            reinterpret_cast<const char*>(data + 2), length - 2, remoteProfile->macToken,
+            remoteProfile->computerCount,
+            [](size_t index) { return static_cast<const char*>(remoteProfile->computers[index].token); });
+        bool added = false;
+        if (computer != remote_computer::missing) {
+            portENTER_CRITICAL(&deviceControlLock);
+            added = deviceControlState->relays.add(handle, computer, static_cast<device_controls::RelayRole>(data[1]));
+            portEXIT_CRITICAL(&deviceControlLock);
+        }
+        if (added) {
+            response[1] = 0;
+            if (computer >= 0) {
+                const char* id = remoteProfile->computers[computer].id;
+                const size_t idLength = strnlen(id, sizeof(RemoteComputer::id));
+                memcpy(response + 2, id, idLength);
+                responseLength += idLength;
+            }
+            relayFlushRequested = true;
+            releaseActiveControllerForRelay(handle);
+            Serial.printf("BLE relay registered: handle=%u computer=%d role=%u\n",
+                handle, computer, data[1]);
+        }
+    }
+    notifyDevicePacket(handle, response, responseLength);
+}
+
+bool sendRelayAction(int computerIndex, bool directOnly, const char* body) {
+    if (remoteProfile == nullptr || relayFrameJson == nullptr || body == nullptr ||
+        controlCharacteristic == nullptr) {
+        return false;
+    }
+    const uint16_t handle = relayHandleFor(computerIndex, directOnly);
+    if (handle == device_controls::RelayRegistry::none) {
+        return false;
+    }
+    const char* computerId = computerIndex >= 0 &&
+        computerIndex < static_cast<int>(remoteProfile->computerCount)
+        ? remoteProfile->computers[computerIndex].id : "";
+    const size_t length = device_controls::writeRelayAction(
+        relayFrameJson, kDeviceControlJsonBytes, computerId, body);
+    if (length == 0) {
+        return false;
+    }
+    portENTER_CRITICAL(&deviceControlLock);
+    const uint8_t sequence = deviceControlState->sequences.next(handle);
+    portEXIT_CRITICAL(&deviceControlLock);
+    const uint8_t header[] = {device_controls::relayAction, sequence};
+    const bool sent = sendFragmentedPacket(handle, header, sizeof(header), relayFrameJson, length);
+    Serial.printf("BLE relay action seq=%u computer=%d -> %s\n",
+        sequence, computerIndex, sent ? "sent" : "failed");
+    return sent;
+}
+
+bool claimRelayRetrySlot(int computerIndex, const char* body, int8_t& slot) {
+    slot = -1;
+    if (relayRetrySlots == nullptr || body == nullptr) {
+        return false;
+    }
+    portENTER_CRITICAL(&deviceControlLock);
+    if (deviceControlState->relays.find(computerIndex, true) != device_controls::RelayRegistry::none) {
+        for (size_t index = 0; index < kRelayRetrySlotCount; ++index) {
+            if (!relayRetrySlots[index].used) {
+                relayRetrySlots[index].used = true;
+                relayRetrySlots[index].computer = static_cast<int8_t>(computerIndex);
+                slot = static_cast<int8_t>(index);
+                break;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&deviceControlLock);
+    if (slot < 0) {
+        return false;
+    }
+    strlcpy(relayRetrySlots[slot].body, body, sizeof(relayRetrySlots[slot].body));
+    return true;
+}
+
+bool retryRelaySlot(int8_t slot) {
+    if (relayRetrySlots == nullptr || slot < 0 || slot >= static_cast<int8_t>(kRelayRetrySlotCount)) {
+        return false;
+    }
+    RelayRetrySlot& retry = relayRetrySlots[slot];
+    const bool sent = sendRelayAction(retry.computer, true, retry.body);
+    portENTER_CRITICAL(&deviceControlLock);
+    retry.used = false;
+    portEXIT_CRITICAL(&deviceControlLock);
+    return sent;
+}
+
+bool isComputerRoutedAction(const RemoteAction& action) {
+    return strncmp(action.type, "wled", 4) != 0 && strcmp(action.type, "eWeLinkPower") != 0 &&
+        strcmp(action.type, "localHTTP") != 0 && strcmp(action.type, "page") != 0 &&
+        strcmp(action.type, "netHomeAuto") != 0;
+}
+
+// Sends one queued offline action per loop pass through a newly registered relay.
+void flushPendingActionsThroughRelay() {
+    if (!relayFlushRequested) {
+        return;
+    }
+    if (WiFi.status() == WL_CONNECTED || remoteProfile == nullptr || pendingRemoteActionCount == 0) {
+        relayFlushRequested = false;
+        return;
+    }
+    for (size_t index = 0; index < pendingRemoteActionCount; ++index) {
+        const PendingRemoteAction& pending = pendingRemoteActions[index];
+        if (!isComputerRoutedAction(pending.action) ||
+            relayHandleFor(remote_computer::indexFor(*remoteProfile, pending.action.computerId), false) ==
+                device_controls::RelayRegistry::none) {
+            continue;
+        }
+        pendingActionControl.action = pending.action;
+        strlcpy(pendingActionControl.id, pending.controlId, sizeof(pendingActionControl.id));
+        pendingActionControl.slider = pending.slider;
+        pendingActionControl.toggle = pending.toggle;
+        pendingActionControl.toggleOn = pending.toggleOn;
+        if (!dispatchRemoteAction(pendingActionControl, false, false)) {
+            // Keep it queued for Wi-Fi; retry the relay on its next registration.
+            relayFlushRequested = false;
+            return;
+        }
+        Serial.printf("Flushed queued remote action via Bluetooth: %s\n", pending.controlId);
+        for (size_t next = index + 1; next < pendingRemoteActionCount; ++next) {
+            pendingRemoteActions[next - 1] = pendingRemoteActions[next];
+        }
+        --pendingRemoteActionCount;
+        displayRemoteActionStatus("Sent via Bluetooth");
+        return;
+    }
+    relayFlushRequested = false;
+}
+
+void handleDeviceControlPacket(const DeviceControlPacket& packet) {
+    const uint8_t opcode = packet.bytes[0];
+    if (opcode == device_controls::snapshotRequest && packet.length == 1) {
+        portENTER_CRITICAL(&deviceControlLock);
+        deviceControlState->subscribers.add(packet.handle);
+        portEXIT_CRITICAL(&deviceControlLock);
+        sendDeviceSnapshot(packet.handle, false);
+    } else if (opcode == device_controls::setRequest) {
+        const device_controls::Control* control = nullptr;
+        device_controls::Value value;
+        device_controls::Status status = device_controls::parseSetRequest(
+            reinterpret_cast<const char*>(packet.bytes + 1), packet.length - 1u,
+            m5paper_controls::controls, m5paper_controls::count, control, value);
+        if (status == device_controls::Status::ok) {
+            status = applyDeviceControl(*control, value);
+        }
+        const uint8_t response[] = {device_controls::setResult, static_cast<uint8_t>(status)};
+        notifyDevicePacket(packet.handle, response, sizeof(response));
+        if (status == device_controls::Status::ok) {
+            sendDeviceSnapshot(packet.handle, true);
+            controlsDirty = false;
+        }
+    } else if (opcode == device_controls::relayRegister) {
+        handleRelayRegistration(packet.handle, packet.bytes, packet.length);
+    } else if (opcode == device_controls::relayResult && packet.length == 3) {
+        portENTER_CRITICAL(&deviceControlLock);
+        const bool known = deviceControlState->sequences.complete(packet.handle, packet.bytes[1]);
+        portEXIT_CRITICAL(&deviceControlLock);
+        if (known && packet.bytes[2] != 0) {
+            Serial.printf("BLE relay action seq=%u failed\n", packet.bytes[1]);
+            displayRemoteActionStatus("Bluetooth relay failed");
+        }
+    }
+}
+
+void runPendingDeviceAction() {
+    if (pendingDeviceAction < 0 || static_cast<int32_t>(millis() - pendingDeviceActionAt) < 0) {
+        return;
+    }
+    if (upload.active || remoteProfileUpload.active) {
+        pendingDeviceAction = -1;
+        return;
+    }
+    const int8_t action = pendingDeviceAction;
+    pendingDeviceAction = -1;
+    switch (action) {
+    case m5paper_controls::refreshDisplay:
+        if (remoteVisible) {
+            displayRemote();
+        } else if (settingsVisible) {
+            displaySettings();
+        } else if (slideshowMenuVisible) {
+            displaySlideshowMenu();
+        } else if (libraryVisible) {
+            displayLibrary();
+        } else if (wifiModeVisible) {
+            displayWifiMode();
+        } else if (screensaverActive && screensaverStyle == ScreensaverStyle::geometricSnake &&
+                   !batteryImagesOnly) {
+            nextSnakeFrameAt = millis();
+        } else if (animationReady) {
+            previousFrameValid = false;
+            stillFrameDisplayed = false;
+            displayedFrames = 0;
+            displayCurrentFrame();
+        } else {
+            splashPending = true;
+        }
+        break;
+    case m5paper_controls::showRemote:
+        if (remoteProfile != nullptr && remoteProfile->configured && !wifiModeVisible) {
+            screensaverActive = false;
+            settingsVisible = false;
+            slideshowMenuVisible = false;
+            libraryVisible = false;
+            lastRemoteActivityAt = millis();
+            displayRemote();
+        }
+        break;
+    case m5paper_controls::nextMedia:
+    case m5paper_controls::previousMedia: {
+        const int direction = action == m5paper_controls::nextMedia ? 1 : -1;
+        const bool overlayVisible = remoteVisible || settingsVisible || slideshowMenuVisible ||
+            libraryVisible || wifiModeVisible;
+        if (!overlayVisible) {
+            navigatePlayback(direction);
+            if (screensaverActive) nextSlideshowAt = millis() + slideshowIntervalMs();
+            break;
+        }
+        // Change the media shown later without drawing over the visible screen.
+        refreshLibrary();
+        if (libraryItemCount == 0) break;
+        const size_t current = activeLibraryIndex();
+        const size_t next = direction < 0
+            ? (current == 0 ? libraryItemCount - 1 : current - 1)
+            : (current + 1) % libraryItemCount;
+        char path[kMaximumPathBytes];
+        strlcpy(path, libraryItems[next].path, sizeof(path));
+        batteryPlaybackState = BatteryPlaybackState{};
+        if (loadAnimation(path)) {
+            persistActiveSelection();
+        }
+        break;
+    }
+    case m5paper_controls::sleepNow:
+        Serial.println("Sleeping by device control");
+        Serial.flush();
+        enterM5PaperDeepSleep(backgroundWakeIntervalUs(hasEnabledClimateAutomation()
+            ? kClimateWakeIntervalUs : M5.Power.sleep_no_timer));
+        break;
+    case m5paper_controls::restart:
+        Serial.println("Restarting by device control");
+        Serial.flush();
+        ESP.restart();
+        break;
+    default:
+        break;
+    }
+}
+
+void pollDeviceControls() {
+    DeviceControlPacket packet;
+    for (uint8_t processed = 0; processed < kDeviceControlPacketCapacity &&
+         takeDeviceControlPacket(packet); ++processed) {
+        if (packet.handle != kDroppedPacketHandle) {
+            handleDeviceControlPacket(packet);
+        }
+    }
+    flushPendingActionsThroughRelay();
+    if (deviceWakeRemotePending) {
+        deviceWakeRemotePending = false;
+        if (screensaverActive && !slideshowEnabled && remoteProfile != nullptr &&
+            remoteProfile->configured) {
+            screensaverActive = false;
+            lastRemoteActivityAt = millis();
+            displayRemote();
+            deviceSettingsRedrawPending = false;
+        }
+    }
+    if (deviceSettingsRedrawPending && !upload.active && !remoteProfileUpload.active) {
+        deviceSettingsRedrawPending = false;
+        if (slideshowMenuVisible) {
+            displaySlideshowMenu();
+        } else if (settingsVisible) {
+            displaySettings();
+        }
+    }
+    runPendingDeviceAction();
+    if (!hasSnapshotSubscribers() || !bluetoothActive) {
+        controlsDirty = false;
+        return;
+    }
+    if (controlsDirty) {
+        controlsDirty = false;
+        sendDeviceSnapshot(UINT16_MAX, true);
+        deviceStatusCheckedAt = millis();
+    } else if (millis() - deviceStatusCheckedAt >= kDeviceStatusCheckMs) {
+        // Sensor and battery changes are pushed at most once a minute.
+        deviceStatusCheckedAt = millis();
+        const size_t length = buildDeviceControlsJson(deviceControlJson, kDeviceControlJsonBytes, false);
+        if (length > 0 && deviceSnapshotFingerprint(deviceControlJson, length) != deviceSnapshotHash) {
+            sendDeviceSnapshot(UINT16_MAX, true);
+        }
+    }
+}
+
 }  // namespace
 
 void IRAM_ATTR wakeLoopFromIsr() {
@@ -10640,6 +11545,10 @@ void runBackgroundWake() {
 
 void setup() {
     Serial.begin(115200);
+    Serial.println(paper_board::m5paperFirmwareIdentity);
+    initDeviceControls();
+    deviceDescriptor = paper_board::descriptor(paper_board::m5paper(), PAPERGIF_FIRMWARE_VERSION,
+        m5paper_controls::controls, m5paper_controls::count);
     standbyPanel = nullptr;
     buttonTextureRuntime = nullptr;
     backgroundWake = false;
@@ -10674,12 +11583,9 @@ void setup() {
         static_cast<int>(esp_reset_reason()), static_cast<int>(wakeupCause),
         recoveredFromRenderCrash ? "yes" : "no");
 
-    auto config = M5.config();
-    config.output_power = false;
-    config.clear_display = false;
     render_diagnostics::start();
     render_diagnostics::mark(render_diagnostics::Stage::initializing);
-    M5.begin(config);
+    m5Board.begin();
     render_diagnostics::mark(render_diagnostics::Stage::idle);
     installStandbyPanel();
     localMediaStateQueue = xQueueCreate(1, sizeof(LocalMediaStateUpdate));
@@ -10853,6 +11759,7 @@ void setup() {
 }
 
 void loop() {
+    descriptorCallbacks.poll(millis());
     M5.update();
     if (backgroundWake) {
         updateScreensaverBatteryPolicy();
@@ -10919,6 +11826,7 @@ void loop() {
     sendDeferredFanSpeed();
     sendNextPendingRemoteAction();
     pollRemoteNetworkResults();
+    pollDeviceControls();
     flushRemoteControlPatchesIfDue();
     if (homeWifiStatusChanged) {
         homeWifiStatusChanged = false;
