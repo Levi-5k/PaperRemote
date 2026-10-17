@@ -8,6 +8,7 @@ struct PaperGIFDeviceControlsView: View {
     @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
     @ObservedObject var session: DeviceSession
     @StateObject private var model = DeviceControlsModel()
+    @State private var lastRefresh: Date?
 
     private struct ConfigurationKey: Equatable {
         let deviceID: String
@@ -27,25 +28,36 @@ struct PaperGIFDeviceControlsView: View {
                     .foregroundStyle(.orange)
                     .accessibilityLabel("Device controls error: \(error)")
             }
+            if routes.isEmpty, let status = bluetoothManager.descriptorStatus {
+                Text(status).font(.footnote).foregroundStyle(.secondary)
+            }
             Button {
-                Task { await model.refresh() }
+                if routes.isEmpty {
+                    bluetoothManager.connectSavedDevice(deviceID: descriptor.deviceID)
+                } else {
+                    Task { await refresh() }
+                }
             } label: {
                 Label("Refresh Controls", systemImage: "arrow.clockwise")
             }
-            .disabled(model.isLoading || routes.isEmpty)
+            .disabled(model.isLoading)
             .accessibilityHint("Reads the current values from \(descriptor.name)")
+            if let lastRefresh {
+                LabeledContent("Last Updated", value: lastRefresh.formatted(date: .omitted, time: .standard))
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
         } header: {
             Text("Device Controls")
         } footer: {
             if routes.isEmpty {
-                Text("Connect \(descriptor.name) to the same Wi-Fi network or over Bluetooth to change its settings.")
+                Text("Refresh Controls reconnects to \(descriptor.name) over Bluetooth when it is not already reachable. Keep the controller powered on and nearby.")
             }
         }
         .task(id: ConfigurationKey(deviceID: descriptor.deviceID, controls: controls, routes: routes)) {
             let routes = routes
             model.configure(controls: controls, transports: bluetoothManager.deviceControlTransports(for: routes))
             guard !routes.isEmpty else { return }
-            await model.refresh()
+            await refresh()
         }
         .onChange(of: bluetoothManager.pushedControlSnapshot) {
             guard let pushed = bluetoothManager.pushedControlSnapshot, routes.bluetooth else { return }
@@ -63,6 +75,11 @@ struct PaperGIFDeviceControlsView: View {
                 }
             }
         }
+    }
+
+    private func refresh() async {
+        await model.refresh()
+        if !Task.isCancelled, model.error == nil, model.activeTransport != nil { lastRefresh = Date() }
     }
 
     @ViewBuilder
@@ -83,7 +100,14 @@ struct PaperGIFDeviceControlsView: View {
     private var connectionText: String {
         if let transport = model.activeTransport { return "Via \(transport)" }
         if model.isLoading { return "Loading…" }
-        if routes.isEmpty { return "Not reachable" }
+        if routes.isEmpty {
+            switch bluetoothManager.connectionState {
+            case .connecting: return "Connecting over Bluetooth…"
+            case .searching: return "Looking for the selected controller…"
+            case .bluetoothUnavailable: return "Bluetooth unavailable"
+            case .connected: return "Not reachable"
+            }
+        }
         return routes.httpAddress != nil ? "Wi-Fi available" : "Bluetooth available"
     }
 

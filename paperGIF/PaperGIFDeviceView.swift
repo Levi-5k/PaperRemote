@@ -38,7 +38,7 @@ struct PaperGIFDeviceView: View {
                     NavigationLink {
                         PaperGIFDeviceSetupView(session: session, bluetooth: bluetoothManager, profile: $profile)
                     } label: {
-                        Label("Device Setup & Saved Controllers", systemImage: "rectangle.connected.to.line.below")
+                        Label("Device Setup, Wi-Fi & Saved Controllers", systemImage: "rectangle.connected.to.line.below")
                     }
                     if let descriptor = session.descriptor {
                         LabeledContent("Selected", value: descriptor.name)

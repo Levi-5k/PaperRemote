@@ -36,6 +36,30 @@ extension PaperGIFHardwareBinding {
 }
 
 extension PaperGIFRemoteProfile {
+    var deviceEnrollmentToken: String {
+        !macToken.isEmpty ? macToken : computers.first(where: { !$0.token.isEmpty })?.token ?? ""
+    }
+
+    mutating func prepareWiFiConfiguration(for descriptor: DeviceDescriptor) throws {
+        let ssid = wifiSSID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ssid.isEmpty, ssid.utf8.count <= 32 else {
+            throw DeviceContractError.invalid("enter a Wi-Fi name between 1 and 32 bytes")
+        }
+        let passwordBytes = wifiPassword.utf8.count
+        let hexKey = passwordBytes == 64 && wifiPassword.utf8.allSatisfy {
+            (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+        }
+        guard wifiPassword.isEmpty || (8...63).contains(passwordBytes) || hexKey else {
+            throw DeviceContractError.invalid("Wi-Fi passwords must be 8-63 bytes, a 64-digit hexadecimal key, or empty for an open network")
+        }
+        wifiSSID = ssid
+        if descriptor.requiresProfileEnrollmentToken, deviceEnrollmentToken.isEmpty {
+            macToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        }
+        _ = try negotiatedPayload(for: descriptor)
+        markUpdated()
+    }
+
     func negotiatedPayload(for descriptor: DeviceDescriptor) throws -> Data {
         try descriptor.validate()
         let capabilities = descriptor.capabilities

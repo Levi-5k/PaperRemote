@@ -44,6 +44,7 @@ private struct RemoteEditorView: View {
     @StateObject private var computerDiscovery = ComputerDiscovery()
     @StateObject private var deviceDiscovery = DeviceDiscovery()
     @StateObject private var bluetoothDevices = DeviceBluetoothScanner()
+    @State private var requestedBluetoothTag: String?
     @State private var inspectorTab = InspectorTab.catalog
     @State private var automaticallyLoadedDeviceAddress: String?
 
@@ -100,6 +101,12 @@ private struct RemoteEditorView: View {
             Task { await store.loadFromDevice() }
             Task { await updates.refreshDevice() }
         }
+        .onChange(of: bluetoothDevices.nearby) { _ in
+            guard let tag = requestedBluetoothTag, let device = bluetoothDevices.device(tag: tag),
+                  let descriptor = device.descriptor else { return }
+            requestedBluetoothTag = nil
+            Task { await store.useBluetoothDevice(descriptor) }
+        }
         .onChange(of: store.selectedPageID) { _ in
             store.selectedControlID = nil
             if inspectorTab == .control { inspectorTab = .catalog }
@@ -134,6 +141,7 @@ private struct RemoteEditorView: View {
                     .help(deviceDiscovery.scanMessage ?? bluetoothDevices.status ?? "Searching Bonjour, the local network and Bluetooth")
             } else {
                 Picker("Device", selection: deviceSelection) {
+                    Text("Choose a controller").tag("")
                     ForEach(deviceDiscovery.devices) { device in
                         Text(device.name).tag(device.address)
                     }
@@ -145,6 +153,10 @@ private struct RemoteEditorView: View {
                     }
                     ForEach(bluetoothOnlyDevices) { device in
                         Text("\(device.displayName) (Bluetooth)").tag(device.tag)
+                    }
+                    if let descriptor = devices.descriptor, store.deviceAddress.isEmpty,
+                       !bluetoothOnlyDevices.contains(where: { $0.descriptor?.deviceID == descriptor.deviceID }) {
+                        Text("\(descriptor.name) (Bluetooth)").tag("active-ble:\(descriptor.deviceID)")
                     }
                 }
                 .labelsHidden()
@@ -162,7 +174,7 @@ private struct RemoteEditorView: View {
                 }
             }
             .frame(width: 28)
-            .help("Scan the network for controller devices")
+            .help(bluetoothDevices.problem ?? "Scan Wi-Fi and Bluetooth for controller devices")
             .disabled(deviceDiscovery.isScanning)
             Button {
                 Task { await store.loadFromDevice() }
@@ -177,7 +189,8 @@ private struct RemoteEditorView: View {
                 Label("Send to Device", systemImage: "paperplane.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(devices.descriptor == nil || store.validationMessage != nil || store.sendState == .sending || store.sendState == .loading)
+            .disabled(devices.descriptor == nil || store.deviceAddress.isEmpty || store.validationMessage != nil ||
+                      store.sendState == .sending || store.sendState == .loading)
             Divider().frame(height: 22)
             UpdatesToolbarButton(updates: updates)
         }
@@ -205,20 +218,27 @@ private struct RemoteEditorView: View {
     private var deviceSelection: Binding<String> {
         Binding(
             get: {
-                if store.deviceAddress.isEmpty, let id = devices.selectedID,
-                   let device = bluetoothOnlyDevices.first(where: { $0.descriptor?.deviceID == id }) {
-                    return device.tag
+                if let requestedBluetoothTag { return requestedBluetoothTag }
+                if store.deviceAddress.isEmpty, let id = devices.selectedID {
+                    return bluetoothOnlyDevices.first(where: { $0.descriptor?.deviceID == id })?.tag ?? "active-ble:\(id)"
                 }
                 return selectedDevice?.address ?? (devices.descriptor != nil && devices.address == store.deviceAddress
                     ? store.deviceAddress : deviceDiscovery.devices.first?.address ?? "")
             },
             set: { address in
                 if let device = bluetoothDevices.device(tag: address) {
-                    guard let descriptor = device.descriptor else { return }
+                    guard let descriptor = device.descriptor else {
+                        requestedBluetoothTag = address
+                        bluetoothDevices.retry(device.id)
+                        return
+                    }
+                    requestedBluetoothTag = nil
                     automaticallyLoadedDeviceAddress = address
                     Task { await store.useBluetoothDevice(descriptor) }
                     return
                 }
+                guard !address.isEmpty, !address.hasPrefix("active-ble:") else { return }
+                requestedBluetoothTag = nil
                 guard store.deviceAddress != address else { return }
                 automaticallyLoadedDeviceAddress = address
                 store.deviceAddress = address
@@ -228,6 +248,16 @@ private struct RemoteEditorView: View {
     }
 
     @ViewBuilder private var sendStatus: some View {
+        if let tag = requestedBluetoothTag, let device = bluetoothDevices.device(tag: tag) {
+            if let problem = device.problem {
+                Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+            } else {
+                ProgressView().controlSize(.small)
+                Text("Reading \(device.displayName)…").font(.caption)
+            }
+        } else if let problem = bluetoothDevices.problem {
+            Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+        }
         switch store.sendState {
         case .idle:
             if let message = store.validationMessage {

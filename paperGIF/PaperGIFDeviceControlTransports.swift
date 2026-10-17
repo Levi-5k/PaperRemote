@@ -1,6 +1,59 @@
 import Foundation
 import PaperDeviceKit
 
+struct PaperGIFBluetoothAccess {
+    let descriptor: DeviceDescriptor?
+    let selectedDeviceID: String?
+
+    var matchesSelection: Bool {
+        guard let descriptor else { return false }
+        return selectedDeviceID == nil || selectedDeviceID == descriptor.deviceID
+    }
+
+    var legacy: Bool { matchesSelection && descriptor?.isM5Paper == true }
+    var nativeProfiles: Bool {
+        matchesSelection && descriptor?.isM5Paper == false &&
+            descriptor?.capabilities.supports(transport: "ble") == true &&
+            descriptor?.capabilities.profileVersions.contains(7) == true
+    }
+    var controls: Bool {
+        guard matchesSelection, let descriptor else { return false }
+        return !descriptor.controls.isEmpty && (descriptor.capabilities.transports?.contains("ble") ?? true)
+    }
+    var notifications: Bool { legacy || nativeProfiles || controls }
+}
+
+enum PaperGIFBluetoothTarget: Equatable {
+    case savedDevice(String)
+    case nearby(UUID)
+
+    func shouldInspect(_ peripheralID: UUID, knownDeviceID: String?) -> Bool {
+        switch self {
+        case .savedDevice(let id): knownDeviceID == nil || knownDeviceID == id
+        case .nearby(let id): peripheralID == id
+        }
+    }
+
+    func accepts(_ peripheralID: UUID, descriptor: DeviceDescriptor) -> Bool {
+        switch self {
+        case .savedDevice(let id): descriptor.deviceID == id
+        case .nearby(let id): peripheralID == id
+        }
+    }
+
+    /// Legacy M5Paper firmware has no BLE descriptor, so its Bluetooth identity is
+    /// borrowed from the saved M5Paper record being connected, selected, or previously mapped.
+    static func legacyM5PaperID(peripheralID: UUID, target: PaperGIFBluetoothTarget?, selectedID: String?,
+                                mappedID: String?, savedM5PaperIDs: Set<String>) -> String {
+        if case .savedDevice(let id) = target, savedM5PaperIDs.contains(id) { return id }
+        if target == nil || target == .nearby(peripheralID) {
+            if let selectedID, savedM5PaperIDs.contains(selectedID) { return selectedID }
+        }
+        if let mappedID, savedM5PaperIDs.contains(mappedID) { return mappedID }
+        return peripheralID.uuidString
+    }
+}
+
 /// Request/response state for device controls over the BLE control characteristic.
 /// Requests are serialized: one `0x50`/`0x52` exchange is in flight at a time.
 @MainActor

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
+using System.Text.Json;
 using PaperGIF.Windows.Core.Models;
 
 namespace PaperGIF.Windows.Host;
@@ -14,7 +15,38 @@ internal sealed class RemotePreviewPanel : Control
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public DeviceDescriptor? Descriptor { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public DeviceLayout? BoardLayout { get; set; }
+    public DeviceLayout? BoardLayout
+    {
+        get => boardLayout;
+        set
+        {
+            if (boardLayout?.ArtworkPNG != value?.ArtworkPNG)
+            {
+                boardArtwork?.Dispose();
+                boardArtwork = null;
+                artworkProblem = null;
+                try
+                {
+                    if (value?.DecodeArtwork() is { } data)
+                    {
+                        using var stream = new MemoryStream(data);
+                        using var image = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: true);
+                        boardArtwork = new Bitmap(image);
+                    }
+                }
+                catch (Exception exception) when (exception is JsonException or ArgumentException)
+                {
+                    artworkProblem = "Board artwork could not be displayed";
+                    DiagnosticLog.Error(artworkProblem, exception);
+                }
+            }
+            boardLayout = value;
+            Invalidate();
+        }
+    }
+    private DeviceLayout? boardLayout;
+    private Bitmap? boardArtwork;
+    private string? artworkProblem;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string? SelectedInputID { get; set; }
     public event EventHandler<string>? InputSelected;
@@ -39,6 +71,12 @@ internal sealed class RemotePreviewPanel : Control
         SetStyle(ControlStyles.SupportsTransparentBackColor | ControlStyles.ResizeRedraw, true);
         BackColor = Color.Transparent;
         Cursor = Cursors.Hand;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) boardArtwork?.Dispose();
+        base.Dispose(disposing);
     }
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -237,8 +275,17 @@ internal sealed class RemotePreviewPanel : Control
                 available.Left + (available.Width - (int)(layout.Width * scale)) / 2,
                 available.Top + (available.Height - (int)(layout.Height * scale)) / 2,
                 (int)(layout.Width * scale), (int)(layout.Height * scale));
-            using var boardBrush = new SolidBrush(EditorTheme.Layer);
-            EditorTheme.FillRoundedRectangle(graphics, boardBrush, board, 12);
+            if (boardArtwork is { } artwork)
+            {
+                graphics.DrawImage(artwork, board);
+            }
+            else
+            {
+                using var boardBrush = new SolidBrush(EditorTheme.Layer);
+                EditorTheme.FillRoundedRectangle(graphics, boardBrush, board, 12);
+                if (artworkProblem is not null)
+                    graphics.DrawString(artworkProblem, Font, Brushes.Red, board);
+            }
             Rectangle Map(double x, double y, double width, double height) =>
                 new(board.Left + (int)(x * scale), board.Top + (int)(y * scale),
                     Math.Max(1, (int)(width * scale)), Math.Max(1, (int)(height * scale)));
@@ -246,6 +293,17 @@ internal sealed class RemotePreviewPanel : Control
             {
                 var frame = Map(geometry.X, geometry.Y, geometry.Width, geometry.Height);
                 inputFrames[geometry.Id] = frame;
+                if (boardArtwork is not null)
+                {
+                    if (SelectedInputID == geometry.Id)
+                    {
+                        using var highlight = new SolidBrush(Color.FromArgb(80, EditorTheme.Forest));
+                        using var outline = new Pen(EditorTheme.Forest, 2);
+                        graphics.FillEllipse(highlight, frame);
+                        graphics.DrawEllipse(outline, frame);
+                    }
+                    continue;
+                }
                 using var brush = new SolidBrush(SelectedInputID == geometry.Id ? EditorTheme.Forest : EditorTheme.Paper);
                 EditorTheme.FillRoundedRectangle(graphics, brush, frame, 6);
                 using var font = new Font("Segoe UI", Math.Clamp(frame.Height / 5f, 7, 14));

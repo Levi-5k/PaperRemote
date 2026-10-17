@@ -101,12 +101,23 @@ struct PaperGIFDeviceSetupView: View {
                         .disabled(!bluetooth.canSyncSelectedProfile)
                     if let status = bluetooth.remoteSyncStatus { Text(status).font(.footnote) }
                 }
-                if !descriptor.isM5Paper {
-                    Section("Native Network Configuration") {
+                    Section("Wi-Fi Setup") {
+                        Text("Connect this controller to the same 2.4 GHz Wi-Fi network as your computers so they can discover it and send profiles.")
+                            .font(.footnote).foregroundStyle(.secondary)
                         TextField("Wi-Fi SSID", text: $profile.wifiSSID)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                         SecureField("Wi-Fi password", text: $profile.wifiPassword)
-                        if descriptor.boardID == "paperremote.esp32-screenless-reference" {
+                        if descriptor.isM5Paper {
+                            Button(bluetooth.isScanningWiFiNetworks ? "Scanning…" : "Scan Wi-Fi Networks") {
+                                bluetooth.scanForWiFiNetworks()
+                            }
+                            .disabled(bluetooth.isScanningWiFiNetworks || !bluetooth.legacyBLEPermitted)
+                            ForEach(bluetooth.nearbyWiFiNetworks) { network in
+                                Button(network.ssid) { profile.wifiSSID = network.ssid }
+                            }
+                            if let error = bluetooth.wifiScanError { Text(error).font(.footnote).foregroundStyle(.orange) }
+                        }
+                        if descriptor.requiresProfileEnrollmentToken {
                             SecureField("Device enrollment token", text: $profile.macToken)
                             Button("Generate Enrollment Token") {
                                 profile.macToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -116,7 +127,7 @@ struct PaperGIFDeviceSetupView: View {
                                 Text("A paired computer's token already provides enrollment. Generating a replacement would invalidate that computer's credentials.")
                                     .font(.footnote).foregroundStyle(.secondary)
                             }
-                            Text("First enrollment must be sent while connected to the reference board's own Wi-Fi access point. A nonempty enrollment or paired-computer token is required. The app retains the accepted token in Keychain for future edits.")
+                            Text("An enrollment token is generated automatically for initial Wi-Fi setup if no paired-computer token exists. The accepted token is retained securely on the phone.")
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
                         Button("Save Network Configuration Locally") {
@@ -127,10 +138,23 @@ struct PaperGIFDeviceSetupView: View {
                                 problem = nil
                             } catch { problem = error.localizedDescription }
                         }
-                        Text("Send the saved profile to apply Wi-Fi credentials. This does not invent BLE Wi-Fi setup support for other boards.")
+                        Button {
+                            configureWiFi(descriptor)
+                        } label: {
+                            Label(bluetooth.isTransferring ? "Sending Wi-Fi Settings…" : "Connect Device to Wi-Fi", systemImage: "wifi")
+                        }
+                        .disabled(profile.wifiSSID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                  !bluetooth.canSyncSelectedProfile || bluetooth.isTransferring)
+                        if let status = bluetooth.remoteSyncStatus { Text(status).font(.footnote) }
+                        Text(descriptor.isM5Paper || descriptor.capabilities.supports(transport: "ble")
+                             ? "Sends the saved profile and Wi-Fi settings over the connected Bluetooth or Wi-Fi link. No need to join the controller's setup access point. After sending, use Refresh Controls to check Wi-Fi connection status."
+                             : "This controller requires a verified network endpoint to receive Wi-Fi settings.")
                             .font(.footnote).foregroundStyle(.secondary)
+                        if !bluetooth.canSyncSelectedProfile {
+                            Text("Connect to this controller under Nearby Bluetooth Devices below, or verify its network address above.")
+                                .font(.footnote).foregroundStyle(.orange)
+                        }
                     }
-                }
                 Section("Board Layout") {
                     Text("Layouts change appearance only, never capabilities or input IDs.")
                         .font(.footnote).foregroundStyle(.secondary)
@@ -274,5 +298,15 @@ struct PaperGIFDeviceSetupView: View {
             } catch is CancellationError {
             } catch { problem = error.localizedDescription }
         }
+    }
+
+    private func configureWiFi(_ descriptor: DeviceDescriptor) {
+        do {
+            try profile.prepareWiFiConfiguration(for: descriptor)
+            try PaperGIFStorage.saveRemoteProfile(profile, deviceID: descriptor.deviceID)
+            try session.saveProfile(JSONEncoder().encode(profile))
+            problem = nil
+            bluetooth.syncRemoteProfile(profile)
+        } catch { problem = error.localizedDescription }
     }
 }

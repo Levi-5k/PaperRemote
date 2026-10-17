@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 public enum DeviceContractError: LocalizedError {
     case invalid(String)
@@ -57,16 +58,32 @@ public struct DeviceLayout: Codable, Equatable, Sendable {
     public var height: Double
     public var screen: DeviceRect?
     public var inputs: [DeviceInputPlacement]
+    public var artworkPNG: String?
 
     public init(width: Double, height: Double, screen: DeviceRect? = nil,
-                inputs: [DeviceInputPlacement] = []) {
+                inputs: [DeviceInputPlacement] = [], artworkPNG: String? = nil) {
         self.width = width
         self.height = height
         self.screen = screen
         self.inputs = inputs
+        self.artworkPNG = artworkPNG
     }
 
     public func validate(inputIDs: Set<String>, hasDisplay: Bool) throws {
+        if let artworkPNG {
+            guard artworkPNG.utf8.count <= 60_000,
+                  let data = Data(base64Encoded: artworkPNG),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  CGImageSourceGetType(source) as String? == "public.png",
+                  CGImageSourceGetCount(source) == 1,
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int,
+                  (1...2048).contains(pixelWidth), (1...2048).contains(pixelHeight),
+                  CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
+                throw DeviceContractError.invalid("board artwork must be a PNG up to 2048 pixels per side and 60,000 base64 characters")
+            }
+        }
         guard width.isFinite, height.isFinite, width > 0, height > 0,
               width <= 100_000, height <= 100_000,
               inputs.count <= 128, Set(inputs.map(\.id)).count == inputs.count else {
@@ -233,6 +250,9 @@ public struct DeviceDescriptor: Codable, Equatable, Identifiable, Sendable {
 
     public var id: String { deviceID }
     public var isM5Paper: Bool { boardID == "m5stack.m5paper" && hardwareRevision == "1.0" }
+    public var requiresProfileEnrollmentToken: Bool {
+        ["paperremote.esp32-screenless-reference", "paperremote.supermini-s3-mt6701"].contains(boardID)
+    }
     public var canUseLegacyMedia: Bool {
         isM5Paper && capabilities.media && display?.width == 540 &&
             display?.height == 960 && display?.pixelFormat == "gray4"

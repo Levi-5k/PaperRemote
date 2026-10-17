@@ -698,6 +698,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         moduleRuntimeHost.stop()
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showControlsEditor()
+        return true
+    }
+
     private var token: String {
         configuration.token
     }

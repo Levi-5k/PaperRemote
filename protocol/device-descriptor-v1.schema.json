@@ -293,6 +293,13 @@
         "screen": {
           "$ref": "#/$defs/rect"
         },
+        "artworkPNG": {
+          "description": "Optional single-frame PNG board artwork, base64-encoded, at most 2048 pixels per side. Stretched to the layout bounds; input rectangles remain selectable overlays.",
+          "type": "string",
+          "minLength": 44,
+          "maxLength": 60000,
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$"
+        },
         "inputs": {
           "type": "array",
           "maxItems": 128,

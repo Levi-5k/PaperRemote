@@ -9,6 +9,43 @@ private final class DeviceFixtureBundleToken: NSObject {}
 
 @MainActor
 struct PaperGIFDeviceSupportTests {
+    @Test(arguments: ["paperremote.esp32-screenless-reference", "paperremote.supermini-s3-mt6701"])
+    func wifiSetupEnrollsBothReferenceBoardsWithoutReplacingSavedCredentials(boardID: String) throws {
+        var descriptor = screenless()
+        descriptor.boardID = boardID
+        #expect(descriptor.requiresProfileEnrollmentToken)
+        var profile = PaperGIFRemoteProfile(version: 7, pages: [])
+        profile.wifiSSID = " Test Wi-Fi "
+        profile.wifiPassword = "test-password"
+        try profile.prepareWiFiConfiguration(for: descriptor)
+        #expect(profile.wifiSSID == "Test Wi-Fi")
+        #expect(profile.deviceEnrollmentToken.count == 32)
+        let firstToken = profile.macToken
+        try profile.prepareWiFiConfiguration(for: descriptor)
+        #expect(profile.macToken == firstToken)
+        profile.macToken = ""
+        profile.computers = [PaperGIFRemoteComputer(name: "Desk", host: "desk.local", token: "existing-paired-token")]
+        try profile.prepareWiFiConfiguration(for: descriptor)
+        #expect(profile.macToken.isEmpty)
+        #expect(profile.deviceEnrollmentToken == "existing-paired-token")
+        let payload = try profile.negotiatedPayload(for: descriptor)
+        let object = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+        #expect(object["wifiSSID"] as? String == "Test Wi-Fi")
+        #expect(object["wifiPassword"] as? String == "test-password")
+        #expect(object["version"] as? Int == 7)
+    }
+
+    @Test func invalidWiFiSettingsAreRejectedBeforeSending() {
+        var profile = PaperGIFRemoteProfile(version: 7, pages: [])
+        #expect(throws: (any Error).self) { try profile.prepareWiFiConfiguration(for: screenless()) }
+        profile.wifiSSID = String(repeating: "x", count: 33)
+        #expect(throws: (any Error).self) { try profile.prepareWiFiConfiguration(for: screenless()) }
+        profile.wifiSSID = "Test Wi-Fi"
+        profile.wifiPassword = "short"
+        #expect(throws: (any Error).self) { try profile.prepareWiFiConfiguration(for: screenless()) }
+        #expect(profile.macToken.isEmpty)
+    }
+
     @Test func sharedContractFixturesDecodeAndNegotiateOnIOS() throws {
         let bundle = Bundle(for: DeviceFixtureBundleToken.self)
         func fixture(_ name: String) throws -> Data {

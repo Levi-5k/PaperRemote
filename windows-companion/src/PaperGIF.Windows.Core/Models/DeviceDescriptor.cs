@@ -1,13 +1,50 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Buffers.Binary;
 
 namespace PaperGIF.Windows.Core.Models;
 
 public sealed record DeviceRect(double X, double Y, double Width, double Height);
 public sealed record DeviceInputGeometry(string Id, double X, double Y, double Width, double Height);
-public sealed record DeviceLayout(double Width, double Height, DeviceRect? Screen = null, List<DeviceInputGeometry> Inputs = null!)
+public sealed record DeviceLayout(double Width, double Height, DeviceRect? Screen = null, List<DeviceInputGeometry> Inputs = null!,
+    [property: JsonPropertyName("artworkPNG"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ArtworkPNG = null)
 {
+    public byte[]? DecodeArtwork()
+    {
+        if (ArtworkPNG is null) return null;
+        if (ArtworkPNG.Length > 60_000)
+            throw new JsonException("Board artwork exceeds 60,000 base64 characters.");
+        byte[] data;
+        try { data = Convert.FromBase64String(ArtworkPNG); }
+        catch (FormatException exception) { throw new JsonException("Board artwork is not base64 PNG data.", exception); }
+        if (Convert.ToBase64String(data) != ArtworkPNG ||
+            data.Length < 33 || !data.AsSpan(0, 8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) ||
+            BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(8, 4)) != 13 ||
+            !data.AsSpan(12, 4).SequenceEqual("IHDR"u8) ||
+            BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(16, 4)) is < 1 or > 2048 ||
+            BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(20, 4)) is < 1 or > 2048)
+            throw new JsonException("Board artwork must be a PNG up to 2048 pixels per side.");
+        var hasImageData = false;
+        for (var offset = 8; offset <= data.Length - 12;)
+        {
+            var length = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(offset, 4));
+            if (length > data.Length - offset - 12)
+                throw new JsonException("Board artwork has a truncated PNG chunk.");
+            var type = data.AsSpan(offset + 4, 4);
+            if (type.SequenceEqual("acTL"u8))
+                throw new JsonException("Board artwork must not be animated.");
+            hasImageData |= type.SequenceEqual("IDAT"u8) && length > 0;
+            offset += (int)length + 12;
+            if (type.SequenceEqual("IEND"u8))
+            {
+                if (length == 0 && hasImageData && offset == data.Length) return data;
+                break;
+            }
+        }
+        throw new JsonException("Board artwork is not a complete single-frame PNG.");
+    }
+
     public static DeviceLayout Generated(DeviceDisplay? display, IReadOnlyList<DeviceInput> inputs)
     {
         if (inputs.Count > 128 || inputs.Any(input => input is null) ||
@@ -143,6 +180,7 @@ public sealed record DeviceDescriptor(
             layout.Inputs.Select(input => input.Id).Distinct(StringComparer.Ordinal).Count() != Inputs.Count ||
             layout.Inputs.Any(input => !Inputs.Any(known => known.Id == input.Id)))
             throw new JsonException("Layout must describe exactly the device inputs.");
+        _ = layout.DecodeArtwork();
         bool Inside(double x, double y, double width, double height) =>
             double.IsFinite(x) && double.IsFinite(y) && x >= 0 && y >= 0 &&
             Positive(width) && Positive(height) && x + width <= layout.Width && y + height <= layout.Height;
@@ -164,7 +202,7 @@ public sealed record BoardPackage(int SchemaVersion,
 {
     public void ValidateFor(DeviceDescriptor device)
     {
-        if (SchemaVersion != 1 || Version != 1 || BoardID != device.BoardID ||
+        if (SchemaVersion != 1 || Version < 1 || BoardID != device.BoardID ||
             HardwareRevisions is null || !HardwareRevisions.Contains(device.HardwareRevision, StringComparer.Ordinal) ||
             string.IsNullOrWhiteSpace(Name) || Name.Length > 256)
             throw new JsonException("Board package does not match this exact board and revision.");

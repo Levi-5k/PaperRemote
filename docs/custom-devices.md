@@ -20,8 +20,23 @@ New controllers are discovered two ways:
   Controllers. In the Mac and Windows device pickers these boards appear as
   "Name (Bluetooth)", and selecting one reads its descriptor so the layout and
   device controls are available. Desktop editors can send profiles only after
-  the board joins Wi-Fi (set its network from the phone's Native Network
-  Configuration); until then, Send is blocked with an explanation.
+  the board joins Wi-Fi (set its network from the phone's **Device → Device
+  Setup, Wi-Fi & Saved Controllers → Wi-Fi Setup**); until then, Send is blocked
+  with an explanation.
+
+To join a SuperMini/reference controller to Wi-Fi, connect to it under Nearby
+Bluetooth Devices, enter the network name and password in Wi-Fi Setup, and tap
+**Connect Device to Wi-Fi**. The app sends its profile and network settings over
+Bluetooth; joining the board's setup access point is not required. First-time
+enrollment generates a token only if the profile has no existing enrollment or
+paired-computer token. Use **Refresh Controls** to read the board's Wi-Fi
+connection state afterward. Refresh reconnects to the selected controller if it
+has no reachable transport and shows a timestamp after a successful read.
+
+Selecting a saved controller reconnects by stable device ID, even if it was
+saved before Bluetooth peripheral mappings were introduced. Other nearby boards
+are not substituted for the requested controller. Desktop discovery requires an
+updated installed companion, not only updated source code.
 
 1. PaperRemote reads the controller's identity, display, physical inputs,
    capabilities, and basic layout.
@@ -40,10 +55,12 @@ fallback identity is tied to the saved network endpoint or BLE peripheral until
 firmware exposes a stable device ID. Firmware without a descriptor is recognized
 only through the known legacy protocol, not by guessing from a product name.
 
-On iPhone/iPad, native custom controllers currently need an HTTP endpoint for
-profile loading and upload. BLE can retrieve their descriptor, but native BLE
-profile transfer and phone-local action execution are unavailable. These paths
-are disabled rather than sending M5Paper-specific commands to another board.
+On iPhone/iPad, native controllers advertising BLE and profile version 7 can
+receive profiles (including Wi-Fi settings) over the negotiated `0x40` BLE
+transfer. Device controls use the shared BLE control protocol, independently of
+the M5Paper adapter. Loading a native profile still requires its HTTP endpoint.
+M5Paper-only media, image, Wi-Fi-scan, and phone-local action commands remain
+disabled for other boards.
 
 ## Screens and physical controls
 
@@ -94,6 +111,17 @@ Coordinates use an arbitrary consistent **physical board coordinate space**,
 separate from display pixels. Board width/height define its bounds. The screen
 rectangle and each stable input ID have positions within those bounds. Geometry
 is validated before use; a package cannot invent input IDs.
+
+Layouts can include optional `artworkPNG`: a base64-encoded, single-frame PNG,
+up to 2048 pixels per side and 60,000 encoded characters. It is drawn over the
+full layout bounds on iPhone/iPad, Mac, and Windows, with transparent selectable
+input regions above it. Keep its aspect ratio equal to the layout's width/height
+and position each input rectangle over the corresponding physical control.
+Artwork travels inside the digest-verified JSON package and is bundled/cached
+with it; no external image host or additional download is required. Keep the
+whole package below 64 KiB for all clients. The SuperMini MT6701 definition
+includes the knob enclosure artwork with its dial above the left/right buttons.
+Boards without artwork retain the generic control preview.
 
 When no catalog entry exists, retain the device's basic geometry. Firmware can
 generate simple geometry from its input list; no detailed artwork is required.

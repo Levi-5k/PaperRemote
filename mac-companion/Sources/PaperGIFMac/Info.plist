@@ -26,7 +26,7 @@
 	<key>NSAppleEventsUsageDescription</key>
 	<string>paperGIF Mac reads the current track from Music to show it on your paperGIF display.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>paperGIF Mac uses Bluetooth to find Matter devices you add to it, and to keep receiving your paperGIF device's actions when it loses Wi-Fi.</string>
+	<string>paperGIF Mac uses Bluetooth to discover and configure PaperRemote controllers and Matter devices, and to receive controller actions when Wi-Fi is unavailable.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_papergif._tcp</string>

@@ -285,6 +285,80 @@ struct PaperGIFDeviceControlsTests {
         )
     }
 
+    @Test func nativeBluetoothAccessDoesNotRequireTheM5PaperAdapter() {
+        let native = controlDescriptor(id: "supermini", transports: ["http", "ble"])
+        let access = PaperGIFBluetoothAccess(descriptor: native, selectedDeviceID: native.deviceID)
+        #expect(!access.legacy)
+        #expect(access.nativeProfiles)
+        #expect(access.controls)
+        #expect(access.notifications)
+        let other = PaperGIFBluetoothAccess(descriptor: native, selectedDeviceID: "m5")
+        #expect(!other.notifications)
+        #expect(!other.nativeProfiles)
+        let httpOnly = PaperGIFBluetoothAccess(
+            descriptor: controlDescriptor(id: "http", transports: ["http"]), selectedDeviceID: "http")
+        #expect(!httpOnly.notifications)
+        #expect(!httpOnly.nativeProfiles)
+        let m5 = PaperGIFBluetoothAccess(descriptor: .legacyM5Paper(deviceID: "m5"), selectedDeviceID: "m5")
+        #expect(m5.legacy)
+        #expect(m5.notifications)
+        #expect(!m5.nativeProfiles)
+        #expect(!PaperGIFBluetoothAccess(descriptor: nil, selectedDeviceID: nil).notifications)
+    }
+
+    @Test func savedDeviceWithoutPeripheralMappingFindsOnlyTheRequestedDescriptor() {
+        let m5ID = UUID(), knobID = UUID()
+        let target = PaperGIFBluetoothTarget.savedDevice("m5")
+        #expect(target.shouldInspect(m5ID, knownDeviceID: nil))
+        #expect(target.shouldInspect(m5ID, knownDeviceID: "m5"))
+        #expect(!target.shouldInspect(knobID, knownDeviceID: "knob"))
+        #expect(target.accepts(m5ID, descriptor: .legacyM5Paper(deviceID: "m5")))
+        #expect(!target.accepts(knobID, descriptor: controlDescriptor(id: "knob", transports: ["ble"])))
+        let nearby = PaperGIFBluetoothTarget.nearby(knobID)
+        #expect(nearby.shouldInspect(knobID, knownDeviceID: nil))
+        #expect(!nearby.shouldInspect(m5ID, knownDeviceID: nil))
+        #expect(nearby.accepts(knobID, descriptor: controlDescriptor(id: "knob", transports: ["ble"])))
+    }
+
+    @Test func legacyM5PaperBluetoothReusesSavedWiFiIdentity() {
+        let peripheral = UUID(), saved: Set = ["papergif-3c689a004f8c"]
+        #expect(PaperGIFBluetoothTarget.legacyM5PaperID(
+            peripheralID: peripheral, target: .savedDevice("papergif-3c689a004f8c"),
+            selectedID: "knob", mappedID: nil, savedM5PaperIDs: saved) == "papergif-3c689a004f8c")
+        #expect(PaperGIFBluetoothTarget.legacyM5PaperID(
+            peripheralID: peripheral, target: nil,
+            selectedID: "papergif-3c689a004f8c", mappedID: nil, savedM5PaperIDs: saved) == "papergif-3c689a004f8c")
+        #expect(PaperGIFBluetoothTarget.legacyM5PaperID(
+            peripheralID: peripheral, target: .savedDevice("knob"),
+            selectedID: "knob", mappedID: nil, savedM5PaperIDs: saved) == peripheral.uuidString)
+        #expect(PaperGIFBluetoothTarget.legacyM5PaperID(
+            peripheralID: peripheral, target: nil, selectedID: nil,
+            mappedID: nil, savedM5PaperIDs: []) == peripheral.uuidString)
+    }
+
+    @Test func nativeRefreshUsesBluetoothAndReceivesItsSnapshot() async throws {
+        let descriptor = controlDescriptor(id: "knob", transports: ["http", "ble"])
+        let access = PaperGIFBluetoothAccess(descriptor: descriptor, selectedDeviceID: descriptor.deviceID)
+        let routes = PaperGIFDeviceControlRoutes.resolve(
+            descriptor: descriptor, sessionSelectedID: descriptor.deviceID, sessionAddress: "",
+            sessionVerified: true, homeWiFiURL: nil, homeWiFiAuthorization: nil,
+            bluetoothDescriptor: descriptor, bluetoothReady: access.notifications)
+        #expect(routes.bluetooth)
+        let log = FrameLog()
+        let channel = channel(log: log)
+        let model = DeviceControlsModel()
+        model.configure(controls: descriptor.controls, transports: routes.transports(bluetoothChannel: channel))
+        let refresh = Task { await model.refresh() }
+        await waitUntil { log.frames.count == 1 }
+        #expect(log.frames == [Data([0x50])])
+        channel.receive(snapshotFrame(#"{"values":{"led":true}}"#))
+        await refresh.value
+        #expect(model.values["led"] == .bool(true))
+        #expect(model.activeTransport == "Bluetooth")
+        #expect(model.error == nil)
+        #expect(!model.isLoading)
+    }
+
     // MARK: Relay forwarding
 
     private func relayProfile() -> (PaperGIFRemoteProfile, PaperGIFRemoteComputer, PaperGIFRemoteComputer) {

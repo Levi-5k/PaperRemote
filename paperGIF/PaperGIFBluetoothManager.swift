@@ -209,7 +209,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     @Published private(set) var nearbyDevices: [NearbyDevice] = []
     @Published private(set) var isBrowsingNearby = false
     private var browseClients = 0
-    private var userSelectedPeripheral: UUID?
+    private var connectionTarget: PaperGIFBluetoothTarget?
+    private var rejectedPeripheralIDs = Set<UUID>()
     private var nearbyExpiry: Task<Void, Never>?
     private static let peripheralDeviceIDsKey = "bluetooth.peripheralDeviceIDs"
     weak var deviceSession: DeviceSession?
@@ -225,17 +226,21 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     private static let descriptorUUID = CBUUID(string: "7A230004-7D2A-4C7B-9C42-504749460001")
 
     var activeDescriptor: DeviceDescriptor? { deviceSession?.descriptor ?? bluetoothDescriptor }
+    private var bluetoothAccess: PaperGIFBluetoothAccess {
+        PaperGIFBluetoothAccess(descriptor: descriptorResolved ? bluetoothDescriptor : nil,
+                                selectedDeviceID: deviceSession?.selectedID)
+    }
     var legacyBLEPermitted: Bool {
-        guard descriptorResolved, let bluetoothDescriptor, bluetoothDescriptor.isM5Paper else { return false }
         if deviceSession?.isLoading == true, deviceSession?.selectedID == nil { return false }
-        return deviceSession == nil || deviceSession?.selectedID == bluetoothDescriptor.deviceID
+        return bluetoothAccess.legacy
     }
 
     var canSyncSelectedProfile: Bool {
         if let session = deviceSession, session.descriptor != nil, !session.address.isEmpty {
-            return session.isVerified
+            if session.isVerified { return true }
         }
-        return deviceSession?.selectedID != nil && legacyBLEPermitted && connectionState == .connected
+        return deviceSession?.selectedID != nil && (legacyBLEPermitted || bluetoothAccess.nativeProfiles) &&
+            connectionState == .connected
     }
 
     func selectedDeviceChanged() {
@@ -254,6 +259,10 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         pendingRemoteProfile = nil
         remoteProfileFromDevice = nil
         deviceRemoteProfile = nil
+        remoteSyncStatus = nil
+        homeWiFiDeviceURL = nil
+        homeWiFiAuthorization = nil
+        homeWiFiState = .notConfigured
         if !legacyBLEPermitted {
             localMediaStateSendTask?.cancel()
             pendingLocalMediaState = nil
@@ -265,9 +274,15 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             bluetoothTransferKind = nil
             isTransferring = false
             deviceMedia = []
-        } else if connectionState != .connected {
+        }
+        if let id = deviceSession?.selectedID, bluetoothDescriptor?.deviceID != id {
+            connectSavedDevice(deviceID: id)
+        } else {
             finishConnectingIfReady()
-            if peripheral == nil, centralManager.state == .poweredOn { reconnectOrScan() }
+            if legacyBLEPermitted, connectionState == .connected, let peripheral, let controlCharacteristic {
+                isAwaitingRemoteProfilePull = true
+                peripheral.writeValue(Data([0x37]), for: controlCharacteristic, type: .withResponse)
+            }
         }
     }
     @Published private(set) var wifiConnectionState = WiFiConnectionState.checking
@@ -802,9 +817,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             nativeProfileTask = Task { [weak self, weak session] in
                 guard let self, let session else { return }
                 do {
-                    let profileToken = !profile.macToken.isEmpty ? profile.macToken
-                        : profile.computers.first(where: { !$0.token.isEmpty })?.token ?? ""
-                    let isReference = descriptor.boardID == "paperremote.esp32-screenless-reference"
+                    let profileToken = profile.deviceEnrollmentToken
+                    let isReference = descriptor.requiresProfileEnrollmentToken
                     if isReference, profileToken.isEmpty {
                         throw DeviceContractError.invalid("reference firmware requires a device enrollment token in Device Setup or a paired computer token")
                     }
@@ -835,6 +849,19 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
                     remoteSyncStatus = error.localizedDescription
                 }
             }
+            return
+        }
+        if let descriptor = activeDescriptor, !descriptor.isM5Paper {
+            do {
+                let profileToken = profile.deviceEnrollmentToken
+                if descriptor.requiresProfileEnrollmentToken, profileToken.isEmpty {
+                    throw DeviceContractError.invalid("Set up Wi-Fi or generate an enrollment token in Device Setup before sending this controller's first profile.")
+                }
+                let payload = try profile.negotiatedPayload(for: descriptor)
+                if !sendNegotiatedProfileOverBluetooth(payload, profile: profile, deviceID: descriptor.deviceID) {
+                    remoteSyncStatus = "Connect to this controller over Bluetooth, or verify its Wi-Fi endpoint in Device Setup."
+                }
+            } catch { remoteSyncStatus = error.localizedDescription }
             return
         }
         guard legacyBLEPermitted, let descriptor = activeDescriptor else {
@@ -1032,9 +1059,12 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         command: Data,
         kind: BluetoothTransferKind
     ) {
-        guard legacyBLEPermitted else { return }
+        guard legacyBLEPermitted || (kind == .remoteProfile && bluetoothAccess.nativeProfiles) else {
+            failTransfer("This controller does not support the requested Bluetooth transfer.")
+            return
+        }
         guard let peripheral, let controlCharacteristic else {
-            failTransfer("Connect to the M5Paper over Bluetooth")
+            failTransfer("Connect to the selected controller over Bluetooth")
             return
         }
 
@@ -1053,7 +1083,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
                   let self,
                   self.isTransferring,
                   self.uploadOffset == 0 else { return }
-            self.failTransfer("The M5Paper did not respond")
+            self.failTransfer("The selected controller did not respond")
         }
         peripheral.writeValue(command, for: controlCharacteristic, type: .withResponse)
     }
@@ -1355,6 +1385,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     func forgetDevice() {
         connectionTimeout?.cancel()
+        connectionTarget = nil
+        rejectedPeripheralIDs.removeAll()
         UserDefaults.standard.removeObject(forKey: Self.savedPeripheralKey)
         if let peripheral {
             centralManager.cancelPeripheralConnection(peripheral)
@@ -1364,8 +1396,16 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     }
 
     private func reconnectOrScan() {
-        guard let identifierString = UserDefaults.standard.string(forKey: Self.savedPeripheralKey),
+        let identifierString: String?
+        switch connectionTarget {
+        case .nearby(let id): identifierString = id.uuidString
+        case .savedDevice(let deviceID):
+            identifierString = peripheralDeviceIDs.first(where: { $0.value == deviceID })?.key
+        case nil: identifierString = UserDefaults.standard.string(forKey: Self.savedPeripheralKey)
+        }
+        guard let identifierString,
               let identifier = UUID(uuidString: identifierString),
+              !rejectedPeripheralIDs.contains(identifier),
               let savedPeripheral = centralManager.retrievePeripherals(withIdentifiers: [identifier]).first else {
             beginScanning()
             return
@@ -1428,29 +1468,51 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     /// Switches the Bluetooth connection to a specific nearby device.
     func connectNearby(_ id: UUID) {
-        userSelectedPeripheral = id
-        if peripheral?.identifier == id, connectionState == .connected, let bluetoothDescriptor {
+        let alreadyConnecting = connectionTarget == .nearby(id) && connectionState == .connecting
+        connectionTarget = .nearby(id)
+        if peripheral?.identifier == id, peripheral?.state == .connected, let bluetoothDescriptor {
             rememberBluetoothDevice(bluetoothDescriptor)
+            finishConnectingIfReady()
             return
         }
-        connectionTimeout?.cancel()
+        if alreadyConnecting { return }
         UserDefaults.standard.set(id.uuidString, forKey: Self.savedPeripheralKey)
-        if let peripheral, peripheral.state != .disconnected {
-            centralManager.cancelPeripheralConnection(peripheral)
-        } else {
-            resetConnection()
-            reconnectOrScan()
-        }
+        reconnectToTarget()
     }
 
-    /// Connects over Bluetooth to a saved device that was previously identified over Bluetooth.
+    /// Resolves unmapped saved devices by their descriptor, not by whichever board advertises first.
     @discardableResult
     func connectSavedDevice(deviceID: String) -> Bool {
-        guard let id = peripheralDeviceIDs.first(where: { $0.value == deviceID })?.key,
-              let uuid = UUID(uuidString: id) else { return false }
-        if bluetoothDescriptor?.deviceID == deviceID, connectionState == .connected { return true }
-        connectNearby(uuid)
+        let alreadyConnecting = connectionTarget == .savedDevice(deviceID) &&
+            (connectionState == .connecting || connectionState == .searching)
+        connectionTarget = .savedDevice(deviceID)
+        if bluetoothDescriptor?.deviceID == deviceID, peripheral?.state == .connected {
+            finishConnectingIfReady()
+            return true
+        }
+        if alreadyConnecting { return true }
+        guard centralManager.state == .poweredOn else {
+            descriptorStatus = "Turn on Bluetooth and allow access to connect to this controller."
+            return false
+        }
+        reconnectToTarget()
         return true
+    }
+
+    private func reconnectToTarget() {
+        rejectedPeripheralIDs.removeAll()
+        let previous = peripheral
+        resetConnection()
+        if let previous, previous.state != .disconnected {
+            centralManager.cancelPeripheralConnection(previous)
+        }
+        descriptorStatus = "Looking for the selected controller…"
+        guard centralManager.state == .poweredOn else {
+            connectionState = .bluetoothUnavailable
+            descriptorStatus = "Bluetooth is unavailable. Turn it on and allow access in Settings."
+            return
+        }
+        reconnectOrScan()
     }
 
     private var peripheralDeviceIDs: [String: String] {
@@ -1487,9 +1549,12 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             nearbyDevices[index].deviceID = descriptor.deviceID
         }
         guard let deviceSession else { return }
-        try? deviceSession.remember(descriptor)
-        let requested = userSelectedPeripheral == peripheral.identifier
-        if requested { userSelectedPeripheral = nil }
+        do { try deviceSession.remember(descriptor) }
+        catch {
+            descriptorStatus = "Could not save this controller: \(error.localizedDescription)"
+            return
+        }
+        let requested = connectionTarget?.accepts(peripheral.identifier, descriptor: descriptor) == true
         if requested || deviceSession.selectedID == nil,
            deviceSession.selectedID != descriptor.deviceID {
             deviceSession.select(id: descriptor.deviceID)
@@ -1497,27 +1562,61 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     }
 
     private func finishConnectingIfReady() {
-        guard descriptorResolved, legacyBLEPermitted,
+        guard descriptorResolved, bluetoothAccess.notifications,
               controlCharacteristic != nil, dataCharacteristic != nil, let peripheral else { return }
         if let controlCharacteristic {
-            peripheral.setNotifyValue(true, for: controlCharacteristic)
+            if controlCharacteristic.isNotifying { completeBluetoothConnection() }
+            else { peripheral.setNotifyValue(true, for: controlCharacteristic) }
         }
     }
 
+    private func completeBluetoothConnection() {
+        guard connectionState != .connected, bluetoothAccess.notifications,
+              let peripheral, let controlCharacteristic, controlCharacteristic.isNotifying else { return }
+        connectionTimeout?.cancel()
+        connectionState = .connected
+        descriptorStatus = "\(bluetoothDescriptor?.name ?? "Controller") connected over Bluetooth."
+        remoteProfileFromDevice = nil
+        isAwaitingRemoteProfilePull = legacyBLEPermitted
+        wifiEnabled = false
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
+        registerRelayForwarder()
+        guard legacyBLEPermitted else { return }
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            peripheral.writeValue(Data([0x62]), for: controlCharacteristic, type: .withResponse)
+        }
+        peripheral.writeValue(Data([0x37]), for: controlCharacteristic, type: .withResponse)
+        refreshDeviceLibrary()
+        syncLocalMediaState(
+            pendingLocalMediaState ?? LocalMediaState(
+                title: "", isAvailable: false, isPlaying: false, volume: 1, elapsed: 0, duration: 0
+            ), immediately: true)
+    }
+
     private func resolveBluetoothDescriptor(_ descriptor: DeviceDescriptor) {
+        if let peripheral, let connectionTarget,
+           !connectionTarget.accepts(peripheral.identifier, descriptor: descriptor) {
+            var map = peripheralDeviceIDs
+            map[peripheral.identifier.uuidString] = descriptor.deviceID
+            peripheralDeviceIDs = map
+            rejectedPeripheralIDs.insert(peripheral.identifier)
+            descriptorStatus = "Found \(descriptor.name); still looking for the selected controller."
+            centralManager.cancelPeripheralConnection(peripheral)
+            return
+        }
         bluetoothDescriptor = descriptor
         descriptorResolved = true
         descriptorStatus = descriptor.isM5Paper
             ? "M5Paper protocol ready"
-            : "Native device identified. Add its HTTP endpoint in Device Setup to sync profiles."
+            : "Native device identified. Connecting Bluetooth controls…"
         connectionTimeout?.cancel()
         UserDefaults.standard.set(peripheral?.identifier.uuidString, forKey: Self.savedPeripheralKey)
         rememberBluetoothDevice(descriptor)
-        if descriptor.isM5Paper {
+        if bluetoothAccess.notifications {
             finishConnectingIfReady()
         } else {
             connectionState = .connected
-            isAwaitingRemoteProfilePull = false
+            descriptorStatus = "Device identified. Use its network endpoint to sync profiles."
         }
     }
 
@@ -1554,6 +1653,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             if forgetSavedDevice {
                 UserDefaults.standard.removeObject(forKey: Self.savedPeripheralKey)
             }
+            self.descriptorStatus = "The selected controller did not connect. Keep it powered on and nearby; searching again."
             self.centralManager.cancelPeripheralConnection(peripheral)
             self.resetConnection()
             self.beginScanning()
@@ -1663,10 +1763,19 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             isTransferring = false
             uploadData = nil
             bluetoothTransferKind = nil
-            deviceRemoteProfile = sendingRemoteProfile
+            let sentProfile = sendingRemoteProfile
+            deviceRemoteProfile = sentProfile
             sendingRemoteProfile = nil
             if let nativeBluetoothProfile, deviceSession?.selectedID == nativeBluetoothProfile.deviceID {
-                try? deviceSession?.saveProfile(nativeBluetoothProfile.payload)
+                do {
+                    try deviceSession?.saveProfile(nativeBluetoothProfile.payload)
+                    if activeDescriptor?.requiresProfileEnrollmentToken == true, let sentProfile {
+                        let token = sentProfile.deviceEnrollmentToken
+                        try PaperGIFDeviceCredentials.save(token, for: nativeBluetoothProfile.deviceID)
+                    }
+                } catch {
+                    remoteSyncStatus = "Controller accepted the profile, but saving it on the phone failed: \(error.localizedDescription)"
+                }
             }
             nativeBluetoothProfile = nil
             syncPendingRemoteProfile()
@@ -1688,7 +1797,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             if bluetoothTransferKind == .remoteControls {
                 finishControlUpdate(succeeded: false)
             } else if isTransferring {
-                failTransfer("The M5Paper rejected the transfer")
+                failTransfer("The selected controller rejected the transfer")
             } else if isScanningWiFiNetworks {
                 failWiFiScan("The M5Paper could not scan for networks")
             } else if consumeControlProtocolRejection() {
@@ -2142,6 +2251,10 @@ extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
         MainActor.assumeIsolated {
             noteNearby(peripheral, advertisementData: advertisementData, rssi: RSSI.intValue)
             guard connectionState == .searching, self.peripheral == nil else { return }
+            guard !rejectedPeripheralIDs.contains(peripheral.identifier),
+                  connectionTarget?.shouldInspect(
+                    peripheral.identifier, knownDeviceID: peripheralDeviceIDs[peripheral.identifier.uuidString]
+                  ) != false else { return }
             if !isBrowsingNearby { central.stopScan() }
             connectionState = .connecting
             self.peripheral = peripheral
@@ -2153,6 +2266,10 @@ extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
 
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         MainActor.assumeIsolated {
+            guard self.peripheral === peripheral else {
+                central.cancelPeripheralConnection(peripheral)
+                return
+            }
             startConnectionTimeout(for: peripheral, forgetSavedDevice: true)
             peripheral.discoverServices([Self.serviceUUID])
         }
@@ -2166,6 +2283,7 @@ extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
         MainActor.assumeIsolated {
             guard self.peripheral === peripheral else { return }
             connectionTimeout?.cancel()
+            descriptorStatus = error?.localizedDescription ?? "Could not connect to the selected controller; searching again."
             resetConnection()
             beginScanning()
         }
@@ -2196,6 +2314,7 @@ extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
 extension PaperGIFBluetoothManager: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         MainActor.assumeIsolated {
+            guard self.peripheral === peripheral else { return }
             guard error == nil, let services = peripheral.services else {
                 centralManager.cancelPeripheralConnection(peripheral)
                 return
@@ -2249,7 +2368,14 @@ extension PaperGIFBluetoothManager: CBPeripheralDelegate {
                 let name = peripheral.name?.lowercased() ?? ""
                 if name.contains("m5paper") || name.contains("papergif") || name.contains("paperremote") {
                     descriptorStatus = "Legacy M5Paper protocol"
-                    resolveBluetoothDescriptor(.legacyM5Paper(deviceID: peripheral.identifier.uuidString))
+                    let savedM5Papers = (deviceSession?.records ?? []).filter { $0.descriptor.isM5Paper }
+                    let deviceID = PaperGIFBluetoothTarget.legacyM5PaperID(
+                        peripheralID: peripheral.identifier, target: connectionTarget,
+                        selectedID: deviceSession?.selectedID,
+                        mappedID: peripheralDeviceIDs[peripheral.identifier.uuidString],
+                        savedM5PaperIDs: Set(savedM5Papers.map(\.id)))
+                    resolveBluetoothDescriptor(savedM5Papers.first { $0.id == deviceID }?.descriptor
+                        ?? .legacyM5Paper(deviceID: deviceID))
                 } else {
                     descriptorStatus = "Unsupported device: no descriptor or recognized legacy M5Paper identity."
                 }
@@ -2274,7 +2400,7 @@ extension PaperGIFBluetoothManager: CBPeripheralDelegate {
                 receiveDescriptorPage(value)
                 return
             }
-            guard legacyBLEPermitted else { return }
+            guard bluetoothAccess.notifications else { return }
             guard error == nil, characteristic.uuid == Self.controlUUID, let value = characteristic.value else { return }
             handleControlNotification(value)
         }
@@ -2286,35 +2412,13 @@ extension PaperGIFBluetoothManager: CBPeripheralDelegate {
         error: Error?
     ) {
         MainActor.assumeIsolated {
-            guard self.peripheral === peripheral, legacyBLEPermitted else { return }
+            guard self.peripheral === peripheral, bluetoothAccess.notifications else { return }
             guard characteristic.uuid == Self.controlUUID else { return }
             guard error == nil, characteristic.isNotifying else {
                 centralManager.cancelPeripheralConnection(peripheral)
                 return
             }
-            connectionTimeout?.cancel()
-            connectionState = .connected
-            remoteProfileFromDevice = nil
-            isAwaitingRemoteProfilePull = true
-            wifiEnabled = false
-            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
-            if UIDevice.current.userInterfaceIdiom == .phone {
-                peripheral.writeValue(Data([0x62]), for: characteristic, type: .withResponse)
-            }
-            peripheral.writeValue(Data([0x37]), for: characteristic, type: .withResponse)
-            registerRelayForwarder()
-            refreshDeviceLibrary()
-            syncLocalMediaState(
-                pendingLocalMediaState ?? LocalMediaState(
-                    title: "",
-                    isAvailable: false,
-                    isPlaying: false,
-                    volume: 1,
-                    elapsed: 0,
-                    duration: 0
-                ),
-                immediately: true
-            )
+            completeBluetoothConnection()
         }
     }
 
@@ -2335,6 +2439,7 @@ extension PaperGIFBluetoothManager: CBPeripheralDelegate {
                 return
             }
             if let error {
+                _ = deviceControlChannel.failPendingRequest(.transport(error.localizedDescription))
                 if isTransferring {
                     failTransfer(error.localizedDescription)
                 } else if isLoadingDeviceLibrary || deletingDeviceMediaIndex != nil {
@@ -2383,8 +2488,8 @@ extension PaperGIFBluetoothManager {
     }
 
     private var bluetoothControlReady: Bool {
-        connectionState == .connected && legacyBLEPermitted && controlCharacteristic != nil &&
-            bluetoothSupportsControlProtocol
+        connectionState == .connected && bluetoothAccess.notifications &&
+            controlCharacteristic?.isNotifying == true && bluetoothSupportsControlProtocol
     }
 
     fileprivate func writeControlFrame(_ frame: Data) -> Bool {
@@ -2482,7 +2587,8 @@ extension PaperGIFBluetoothManager {
         profile: PaperGIFRemoteProfile,
         deviceID: String
     ) -> Bool {
-        guard legacyBLEPermitted, connectionState == .connected, controlCharacteristic != nil,
+        guard legacyBLEPermitted || bluetoothAccess.nativeProfiles,
+              connectionState == .connected, controlCharacteristic?.isNotifying == true,
               bluetoothDescriptor?.deviceID == deviceID, deviceSession?.selectedID == deviceID else {
             return false
         }

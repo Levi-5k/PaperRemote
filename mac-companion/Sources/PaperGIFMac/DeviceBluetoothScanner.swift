@@ -1,6 +1,7 @@
 import CoreBluetooth
 import Foundation
 import PaperDeviceKit
+import OSLog
 
 /// Lists nearby PaperRemote devices over Bluetooth and reads each one's native
 /// descriptor, so boards that are not on the LAN still appear in the device picker.
@@ -20,6 +21,8 @@ final class DeviceBluetoothScanner: NSObject, ObservableObject {
 
     @Published private(set) var nearby: [Nearby] = []
     @Published private(set) var status: String?
+    @Published private(set) var problem: String?
+    private let logger = Logger(subsystem: "human-programs.paperGIFMac", category: "DeviceDiscovery")
 
     nonisolated static let serviceUUID = CBUUID(string: "7A230001-7D2A-4C7B-9C42-504749460001")
     nonisolated static let descriptorUUID = CBUUID(string: "7A230004-7D2A-4C7B-9C42-504749460001")
@@ -62,11 +65,24 @@ final class DeviceBluetoothScanner: NSObject, ObservableObject {
     }
 
     func refresh() {
+        if !isRunning { start() }
+        if central?.state == .poweredOn {
+            problem = nil
+            scan()
+        }
         failures.removeAll()
         for index in nearby.indices where nearby[index].descriptor == nil {
             nearby[index].problem = nil
             enqueue(nearby[index].id)
         }
+    }
+
+    func retry(_ id: UUID) {
+        failures[id] = nil
+        if let index = nearby.firstIndex(where: { $0.id == id }) {
+            nearby[index].problem = nil
+        }
+        enqueue(id)
     }
 
     func device(tag: String) -> Nearby? { nearby.first { $0.tag == tag } }
@@ -129,6 +145,8 @@ final class DeviceBluetoothScanner: NSObject, ObservableObject {
     }
 
     private func fail(_ peripheral: CBPeripheral, _ message: String) {
+        problem = "\(peripheral.name ?? "Controller"): \(message)"
+        logger.error("Bluetooth discovery failed: \(message, privacy: .public)")
         failures[peripheral.identifier] = Date()
         if let index = nearby.firstIndex(where: { $0.id == peripheral.identifier }) {
             nearby[index].problem = message
@@ -150,11 +168,14 @@ extension DeviceBluetoothScanner: CBCentralManagerDelegate {
         MainActor.assumeIsolated {
             switch central.state {
             case .poweredOn:
+                problem = nil
                 if isRunning { scan() }
             case .unauthorized:
                 status = "Bluetooth permission denied"
+                problem = "Allow Bluetooth for paperGIF Mac in System Settings → Privacy & Security → Bluetooth."
             case .poweredOff:
                 status = "Bluetooth is off"
+                problem = "Turn on Bluetooth to discover controllers that are not on Wi-Fi."
             default:
                 status = nil
             }
@@ -243,6 +264,7 @@ extension DeviceBluetoothScanner: CBPeripheralDelegate {
             }
             do {
                 if let descriptor = try reader.append(characteristic.value ?? Data()) {
+                    logger.notice("Discovered Bluetooth controller: \(descriptor.name, privacy: .public) [\(descriptor.deviceID, privacy: .public)]")
                     if let index = nearby.firstIndex(where: { $0.id == peripheral.identifier }) {
                         nearby[index].descriptor = descriptor
                         nearby[index].problem = nil

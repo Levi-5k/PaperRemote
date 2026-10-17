@@ -39,7 +39,7 @@ public sealed class BoardCatalog(HttpClient client, string cacheDirectory)
             if (indexStream is not null)
             {
                 var index = JsonSerializer.Deserialize<BoardIndex>(indexStream, DeviceDescriptor.JsonOptions);
-                var matches = index?.SchemaVersion == 1 ? index.Boards.Where(entry => entry.Version == 1 &&
+                var matches = index?.SchemaVersion == 1 ? index.Boards.Where(entry => entry.Version > 0 &&
                     entry.BoardID == device.BoardID && entry.HardwareRevisions.Contains(device.HardwareRevision, StringComparer.Ordinal)).ToArray() : [];
                 if (matches.Length == 1 && SafePath(matches[0].Path))
                 {
@@ -50,7 +50,7 @@ public sealed class BoardCatalog(HttpClient client, string cacheDirectory)
                         var json = reader.ReadToEnd();
                         var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
                         if (digest.Equals(matches[0].Sha256, StringComparison.OrdinalIgnoreCase))
-                            return new(ParsePackage(json, device).Layout, "Bundled board layout (refresh pending)", false);
+                            return new(ParsePackage(json, device, matches[0].Version).Layout, "Bundled board layout (refresh pending)", false);
                     }
                 }
             }
@@ -69,7 +69,7 @@ public sealed class BoardCatalog(HttpClient client, string cacheDirectory)
                 ?? throw new JsonException("Empty board index.");
             if (index.SchemaVersion != 1 || index.Boards is null || index.Boards.Count > 1024 ||
                 index.Boards.Any(entry => entry is null || string.IsNullOrWhiteSpace(entry.BoardID) ||
-                    entry.HardwareRevisions is not { Count: > 0 } || entry.Version != 1 ||
+                    entry.HardwareRevisions is not { Count: > 0 } || entry.Version < 1 ||
                     !SafePath(entry.Path) || !Regex.IsMatch(entry.Sha256 ?? "", "^[a-fA-F0-9]{64}$")))
                 throw new JsonException("Invalid board catalog index.");
             var matches = index.Boards.Where(entry => entry.BoardID == device.BoardID &&
@@ -84,7 +84,7 @@ public sealed class BoardCatalog(HttpClient client, string cacheDirectory)
             var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
             if (!digest.Equals(selected.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new JsonException("Board package digest mismatch.");
-            var package = ParsePackage(json, device);
+            var package = ParsePackage(json, device, selected.Version);
             Directory.CreateDirectory(cacheDirectory);
             var path = CachePath(device);
             var pending = path + "." + Guid.NewGuid().ToString("N") + ".pending";
@@ -105,11 +105,13 @@ public sealed class BoardCatalog(HttpClient client, string cacheDirectory)
         }
     }
 
-    private static BoardPackage ParsePackage(string json, DeviceDescriptor device)
+    private static BoardPackage ParsePackage(string json, DeviceDescriptor device, int? expectedVersion = null)
     {
         var package = JsonSerializer.Deserialize<BoardPackage>(json, DeviceDescriptor.JsonOptions)
             ?? throw new JsonException("Empty board package.");
         package.ValidateFor(device);
+        if (expectedVersion is { } version && package.Version != version)
+            throw new JsonException("Board package version does not match the catalog index.");
         return package;
     }
 
