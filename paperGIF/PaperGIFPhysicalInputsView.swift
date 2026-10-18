@@ -6,16 +6,33 @@ struct PaperGIFPhysicalInputsSection: View {
     let descriptor: DeviceDescriptor
     let layout: DeviceLayout
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
+    @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
     @State private var selectedInputID: String?
+    @StateObject private var liveControls = DeviceControlsModel()
+    @State private var unwrappedAngle: Double?
+    @State private var lastDialStreamAt = Date.distantPast
+
+    private var dialInputID: String? {
+        PaperGIFDialSettingsSection.isAvailable(for: descriptor) ? descriptor.inputs.first { $0.kind == "dial" }?.id : nil
+    }
+    private var liveAngles: [String: Double] {
+        guard let dialInputID, let unwrappedAngle else { return [:] }
+        return [dialInputID: unwrappedAngle]
+    }
+    private var routes: PaperGIFDeviceControlRoutes { bluetoothManager.deviceControlRoutes(for: descriptor) }
 
     var body: some View {
         Section("Physical Board") {
             if !descriptor.isM5Paper || !descriptor.inputs.isEmpty {
                 DeviceBoardPreview(
                     layout: layout, inputs: descriptor.inputs,
-                    selectedInputID: selectedInputID, onSelect: { selectedInputID = $0 }
+                    selectedInputID: selectedInputID, inputAngles: liveAngles,
+                    angleSmoothing: isStreamingDial ? 1.0 / 30 : 0.1,
+                    onSelect: { selectedInputID = $0 }
                 )
-                .frame(maxHeight: 360)
+                // A fixed height avoids the Form row first laying the preview out at its tiny ideal size.
+                .frame(maxWidth: .infinity)
+                .frame(height: min(360, max(180, 320 * layout.height / max(layout.width, 1))))
             }
             if descriptor.display == nil {
                 Text("Screenless controller — assign actions to the physical inputs below.")
@@ -29,7 +46,7 @@ struct PaperGIFPhysicalInputsSection: View {
                 NavigationLink {
                     PaperGIFPhysicalInputEditor(
                         profile: $profile, descriptor: descriptor, input: input,
-                        wledDiscovery: wledDiscovery
+                        wledDiscovery: wledDiscovery, bluetoothManager: bluetoothManager
                     )
                 } label: {
                     LabeledContent(input.name, value: input.kind)
@@ -42,11 +59,47 @@ struct PaperGIFPhysicalInputsSection: View {
                 NavigationLink("Configure \(input.name)") {
                     PaperGIFPhysicalInputEditor(
                         profile: $profile, descriptor: descriptor, input: input,
-                        wledDiscovery: wledDiscovery
+                        wledDiscovery: wledDiscovery, bluetoothManager: bluetoothManager
                     )
                 }
             }
         }
+        .task(id: dialInputID == nil ? nil : routes) {
+            // Only the knob artwork moves here; dial settings live in the knob's own editor.
+            guard dialInputID != nil else { return }
+            let routes = routes
+            liveControls.configure(controls: descriptor.controls,
+                                   transports: bluetoothManager.deviceControlTransports(for: routes))
+            guard !routes.isEmpty else { return }
+            await liveControls.refresh()
+            await liveControls.monitorDial()
+        }
+        .onChange(of: liveControls.values["dialAngle"]?.numberValue) { _, angle in
+            // Snapshots lag the low-latency stream; use them only once it has stopped.
+            guard !isStreamingDial else { return }
+            follow(angle)
+        }
+        .onChange(of: bluetoothManager.liveDial) { _, dial in
+            guard dialInputID != nil, routes.bluetooth, let dial else { return }
+            lastDialStreamAt = Date()
+            follow(dial.angle)
+        }
+        .onChange(of: bluetoothManager.pushedControlSnapshot) {
+            guard dialInputID != nil, let pushed = bluetoothManager.pushedControlSnapshot, routes.bluetooth else { return }
+            liveControls.receive(pushed.snapshot, via: "Bluetooth")
+        }
+    }
+}
+
+extension PaperGIFPhysicalInputsSection {
+    private var isStreamingDial: Bool { Date().timeIntervalSince(lastDialStreamAt) < 1 }
+
+    /// Takes the shortest way round so crossing 0° doesn't animate a full reverse turn.
+    private func follow(_ angle: Double?) {
+        guard let angle else { unwrappedAngle = nil; return }
+        guard let previous = unwrappedAngle else { unwrappedAngle = angle; return }
+        let delta = (angle - previous).truncatingRemainder(dividingBy: 360)
+        unwrappedAngle = previous + (delta > 180 ? delta - 360 : delta < -180 ? delta + 360 : delta)
     }
 }
 
@@ -55,6 +108,7 @@ private struct PaperGIFPhysicalInputEditor: View {
     let descriptor: DeviceDescriptor
     let input: DeviceInput
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
+    @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
     @State private var event = ""
     @State private var direction = "both"
 
@@ -68,6 +122,9 @@ private struct PaperGIFPhysicalInputEditor: View {
 
     var body: some View {
         Form {
+            if input.kind == "dial", PaperGIFDialSettingsSection.isAvailable(for: descriptor) {
+                PaperGIFDialSettingsSection(descriptor: descriptor, bluetoothManager: bluetoothManager)
+            }
             Section("Input") {
                 LabeledContent("Stable ID", value: input.id)
                 LabeledContent("Kind", value: input.kind)

@@ -6,6 +6,8 @@
 #include <NimBLEDevice.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
+#include <Preferences.h>
 #include "device_descriptor.h"
 #include "firmware_identity.h"
 #include "local_http_policy.h"
@@ -17,6 +19,8 @@
 #include "remote_computer.h"
 #include "remote_network_queue.h"
 #include "reference_lifecycle.h"
+#include "wifi_setup.h"
+#include "dial_stream.h"
 
 #ifndef PAPERGIF_FIRMWARE_VERSION
 #define PAPERGIF_FIRMWARE_VERSION "0.0.0"
@@ -68,6 +72,72 @@ bool stationConnectPending = false;
 constexpr int noRelayComputer = -3;
 constexpr uint32_t restartDelayMs = 300;
 constexpr uint32_t snapshotCheckMs = 2000;
+#ifndef PAPERGIF_WIFI_TX_POWER
+#define PAPERGIF_WIFI_TX_POWER WIFI_POWER_8_5dBm
+#endif
+// Wi-Fi joined from the phone's network picker; takes precedence over the profile's wifiSSID.
+Preferences wifiPreferences;
+bool wifiStorageReady = false;
+wifi_setup::Credentials setupCredentials;
+wifi_setup::JoinTracker wifiJoin;
+volatile uint16_t lastDisconnectReason = 0;
+uint16_t wifiScanRequester = UINT16_MAX;
+bool wifiScanResume = false;
+constexpr size_t maxScanNetworks = 20;
+struct ScannedNetwork { char ssid[wifi_setup::maxSSID + 1]; int8_t rssi; bool secure; };
+ScannedNetwork scannedNetworks[maxScanNetworks];
+size_t scannedNetworkCount = 0;
+#if defined(PAPERGIF_SUPERMINI_S3)
+constexpr uint32_t dialSnapshotCheckMs = 100;
+Preferences dialPreferences;
+bool dialStorageReady = false;
+
+String dialConfigurationJSON(const DialConfiguration& settings) {
+    JsonDocument json;
+    json["mode"] = int(settings.mode);
+    json["start"] = settings.start;
+    json["sweep"] = settings.sweep;
+    json["turns"] = settings.turns;
+    json["step"] = settings.step;
+    json["jitter"] = settings.jitter;
+    json["lowLatency"] = settings.lowLatency;
+    json["rate"] = settings.rate;
+    String result;
+    serializeJson(json, result);
+    return result;
+}
+void loadDialConfiguration() {
+    dialStorageReady = dialPreferences.begin("papergif-dial", false);
+    if (!dialStorageReady) { Serial.println("Dial settings storage unavailable"); return; }
+    const String stored = dialPreferences.getString("settings", "");
+    if (stored.isEmpty()) return;
+    JsonDocument json;
+    if (deserializeJson(json, stored)) { Serial.println("Invalid saved dial settings JSON"); return; }
+    DialConfiguration candidate;
+    const int mode = json["mode"] | -1;
+    if (mode < 0 || mode > 2 || !json["start"].is<double>() ||
+        !json["sweep"].is<double>() || !json["turns"].is<double>() ||
+        !json["step"].is<double>() || !json["jitter"].is<double>()) {
+        Serial.println("Invalid saved dial settings fields");
+        return;
+    }
+    candidate.mode = static_cast<DialMode>(mode);
+    candidate.start = json["start"];
+    candidate.sweep = json["sweep"];
+    candidate.turns = json["turns"];
+    candidate.step = json["step"];
+    candidate.jitter = json["jitter"];
+    // Fields added later default when absent from older saved settings.
+    candidate.lowLatency = json["lowLatency"] | false;
+    candidate.rate = json["rate"] | dial_stream::defaultRate;
+    // Older firmware stored a separate reverse flag; fold it into the end stop side.
+    if (json["reversed"] | false) {
+        candidate.sweep = -candidate.sweep;
+        candidate.turns = -candidate.turns;
+    }
+    if (!board.configureDial(candidate)) Serial.println("Invalid saved dial settings range");
+}
+#endif
 // Relay and snapshot state is touched by NimBLE callbacks and the loop task.
 portMUX_TYPE deviceControlLock = portMUX_INITIALIZER_UNLOCKED;
 device_controls::RelayRegistry relays;
@@ -133,6 +203,24 @@ bool sendRelayAction(int computer, bool directOnly, const char* body) {
     return sent;
 }
 
+// Dial/slider values relayed over Bluetooth are coalesced: only the newest value is
+// sent, at most every relaySliderIntervalMs, so a fast-turning knob cannot flood the link.
+constexpr uint32_t relaySliderIntervalMs = 40;
+struct PendingRelaySlider {
+    bool active = false;
+    int computer = 0;
+    char controlId[sizeof(Request::controlId)] = "";
+    String body;
+} pendingRelaySlider;
+uint32_t relaySliderSentAt = 0;
+void flushRelaySlider(bool force) {
+    if (!pendingRelaySlider.active) return;
+    if (!force && millis() - relaySliderSentAt < relaySliderIntervalMs) return;
+    pendingRelaySlider.active = false;
+    relaySliderSentAt = millis();
+    sendRelayAction(pendingRelaySlider.computer, false, pendingRelaySlider.body.c_str());
+}
+
 bool localAuthority(const char* raw, String& authority) {
     authority = raw;
     if (authority.startsWith("http://")) authority.remove(0, 7);
@@ -160,6 +248,80 @@ JsonObjectConst targetComputer(const NativeAction& action) {
     }
     return JsonObjectConst{};
 }
+#if defined(PAPERGIF_SUPERMINI_S3)
+// Low latency dial stream: change-only values, paced to the configured rate. Computers get
+// UDP datagrams on their action port; the phone gets compact Bluetooth notifications.
+struct DialStreamTarget {
+    IPAddress address;
+    uint16_t port = 0;
+    String token, body;
+};
+WiFiUDP dialUdp;
+uint32_t dialStreamBoot = 0, dialStreamSeq = 0;
+DialStreamTarget dialStreamTarget;
+dial_stream::Pacer dialStreamPacer, livePacer, iPhonePacer;
+uint8_t iPhoneStreamPacket[3]{};
+String cachedStreamHost;
+IPAddress cachedStreamAddress;
+
+bool lowLatencyDial(const HardwareBinding& binding, bool safety) {
+    return !safety && binding.state.mode != BindingMode::action &&
+        board.dialTracker().configuration().lowLatency && !std::strcmp(binding.inputID, "dial-1");
+}
+bool resolveStreamHost(const String& host, IPAddress& address) {
+    if (address.fromString(host)) return true;
+    if (host == cachedStreamHost) { address = cachedStreamAddress; return true; }
+    // Hostnames are resolved once; the stream must not block on DNS for every value.
+    if (!WiFi.hostByName(host.c_str(), address)) return false;
+    cachedStreamHost = host;
+    cachedStreamAddress = address;
+    return true;
+}
+void sendDialDatagram() {
+    char datagram[sizeof(Request::body) + sizeof(Request::token) + 96];
+    const size_t length = dial_stream::writeDatagram(datagram, sizeof(datagram), dialStreamBoot,
+        ++dialStreamSeq, dialStreamTarget.token.c_str(), dialStreamTarget.body.c_str());
+    if (!length || !dialUdp.beginPacket(dialStreamTarget.address, dialStreamTarget.port)) return;
+    dialUdp.write(reinterpret_cast<const uint8_t*>(datagram), length);
+    dialUdp.endPacket();
+}
+bool streamDialDatagram(const String& host, int port, const char* token, const String& body) {
+    IPAddress address;
+    if (WiFi.status() != WL_CONNECTED || !resolveStreamHost(host, address)) return false;
+    // A different target must not lose the previous target's final value.
+    if (dialStreamPacer.active() && (address != dialStreamTarget.address || port != dialStreamTarget.port))
+        sendDialDatagram();
+    dialStreamTarget.address = address;
+    dialStreamTarget.port = uint16_t(port);
+    dialStreamTarget.token = token;
+    dialStreamTarget.body = body;
+    dialStreamPacer.offer();
+    return true;
+}
+void notifyLiveDial() {
+    uint8_t packet[7];
+    const size_t length = dial_stream::encodeLiveDial(packet, board.dialTracker().shaftAngle(),
+        board.dialTracker().positionDegrees());
+    uint16_t handles[device_controls::HandleSet::capacity];
+    size_t count = 0;
+    portENTER_CRITICAL(&deviceControlLock);
+    for (size_t i = 0; i < snapshotSubscribers.size(); ++i) handles[count++] = snapshotSubscribers.at(i);
+    portEXIT_CRITICAL(&deviceControlLock);
+    for (size_t i = 0; i < count; ++i) control->notify(packet, length, handles[i]);
+}
+void pollDialStream() {
+    const auto& settings = board.dialTracker().configuration();
+    dialStreamPacer.setRate(settings.rate);
+    livePacer.setRate(settings.rate);
+    iPhonePacer.setRate(settings.rate);
+    const uint32_t now = micros();
+    if (dialStreamPacer.poll(now) != dial_stream::Pacer::Send::none) sendDialDatagram();
+    if (livePacer.poll(now) != dial_stream::Pacer::Send::none && control) notifyLiveDial();
+    if (iPhonePacer.poll(now) != dial_stream::Pacer::Send::none && control &&
+        iPhoneController != UINT16_MAX)
+        control->notify(iPhoneStreamPacket, sizeof(iPhoneStreamPacket), iPhoneController);
+}
+#endif
 bool dispatchAction(const HardwareBinding& binding, const NativeAction& action, bool safety = false) {
     if (!std::strcmp(action.type, "iPhoneMedia")) {
         if (iPhoneController == UINT16_MAX || !control) return false;
@@ -168,6 +330,13 @@ bool dispatchAction(const HardwareBinding& binding, const NativeAction& action, 
         for (uint8_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
             if (std::strcmp(action.text, commands[i])) continue;
             const uint8_t response[] = {0x60, uint8_t(i + 1), uint8_t(constrain(action.value, 0, 255))};
+#if defined(PAPERGIF_SUPERMINI_S3)
+            if (lowLatencyDial(binding, safety)) {
+                std::memcpy(iPhoneStreamPacket, response, sizeof(response));
+                iPhonePacer.offer();
+                return true;
+            }
+#endif
             return control->notify(response, sizeof(response), iPhoneController);
         }
         return false;
@@ -177,6 +346,8 @@ bool dispatchAction(const HardwareBinding& binding, const NativeAction& action, 
     const char* token = "";
     const char* method = "POST";
     int relayComputer = noRelayComputer;
+    String streamHost;
+    int streamPort = 0;
     if (!std::strcmp(action.type, "localHTTP")) {
         if (!localAuthority(action.host, authority) || !local_http::isAllowedPath(action.text) ||
             !local_http::isAllowedMethod(action.httpMethod)) return false;
@@ -206,15 +377,32 @@ bool dispatchAction(const HardwareBinding& binding, const NativeAction& action, 
         // Companion host fields are hostnames, not authorities with embedded ports.
         if (authority.indexOf(':') >= 0) return false;
         url = "http://" + authority + ":" + String(port) + "/action";
+        streamHost = authority;
+        streamPort = port;
         writeRemoteActionPayload(json, action);
         relayComputer = computerIndexFor(action);
     }
     if (body.isEmpty() && std::strcmp(action.type, "localHTTP")) serializeJson(json, body);
+#if defined(PAPERGIF_SUPERMINI_S3)
+    if (relayComputer != noRelayComputer && streamPort && lowLatencyDial(binding, safety) &&
+        streamDialDatagram(streamHost, streamPort, token, body)) return true;
+#endif
     // Without Wi-Fi, a companion that registered as a Bluetooth relay forwards the action.
     if (relayComputer != noRelayComputer && WiFi.status() != WL_CONNECTED &&
-        sendRelayAction(relayComputer, false, body.c_str())) {
-        Serial.println("Sent via Bluetooth");
-        return true;
+        relayHandleFor(relayComputer, false) != device_controls::RelayRegistry::none) {
+        const bool slider = binding.state.mode != BindingMode::action && !safety;
+        if (pendingRelaySlider.active &&
+            (!slider || std::strcmp(pendingRelaySlider.controlId, binding.inputID) ||
+             pendingRelaySlider.computer != relayComputer)) flushRelaySlider(true);
+        if (slider) {
+            pendingRelaySlider.active = true;
+            pendingRelaySlider.computer = relayComputer;
+            strlcpy(pendingRelaySlider.controlId, binding.inputID, sizeof(pendingRelaySlider.controlId));
+            pendingRelaySlider.body = body;
+            flushRelaySlider(false);
+            return true;
+        }
+        if (sendRelayAction(relayComputer, false, body.c_str())) return true;
     }
     Request request;
     if (url.length() >= sizeof(request.url) || body.length() >= sizeof(request.body) ||
@@ -343,6 +531,11 @@ bool installProfile(const String& payload, bool persist) {
     delete parsed;
     ++profileRevision;
     configured = true;
+    // A profile that names a network replaces credentials set from the network picker.
+    if (persist && *(profileJSON["wifiSSID"] | "") && setupCredentials.ssid[0]) {
+        setupCredentials = wifi_setup::Credentials{};
+        if (wifiStorageReady) wifiPreferences.clear();
+    }
     stationConnectPending = true;
     return true;
 }
@@ -413,6 +606,28 @@ bool readControl(const device_controls::Control& item, device_controls::Value& v
         if (!online) return false;
         value.number = constrain(WiFi.RSSI(), -100, 0);
         return true;
+#if defined(PAPERGIF_SUPERMINI_S3)
+    case reference_controls::dialPresent: value.boolean = board.dialPresent(); return true;
+    case reference_controls::dialPosition:
+        if (!board.dialPresent() || !board.dialTracker().ready()) return false;
+        value.number = std::round(board.dialTracker().positionDegrees() * 100) / 100; return true;
+    case reference_controls::dialAngle:
+        if (!board.dialPresent() || !board.dialTracker().ready()) return false;
+        value.number = std::round(board.dialTracker().shaftAngle() * 100) / 100; return true;
+    case reference_controls::dialOutput:
+        if (!board.dialPresent() || !board.dialTracker().ready()) return false;
+        value.number = board.dialTracker().outputPercent(); return true;
+    case reference_controls::dialMode:
+        value.text = reference_controls::dialModes[int(board.dialTracker().configuration().mode)].value;
+        return true;
+    case reference_controls::dialStart: value.number = board.dialTracker().configuration().start; return true;
+    case reference_controls::dialSweep: value.number = board.dialTracker().configuration().sweep; return true;
+    case reference_controls::dialTurns: value.number = board.dialTracker().configuration().turns; return true;
+    case reference_controls::dialStep: value.number = board.dialTracker().configuration().step; return true;
+    case reference_controls::dialJitter: value.number = board.dialTracker().configuration().jitter; return true;
+    case reference_controls::dialLowLatency: value.boolean = board.dialTracker().configuration().lowLatency; return true;
+    case reference_controls::dialRate: value.number = board.dialTracker().configuration().rate; return true;
+#endif
     default: return false;
     }
 }
@@ -425,7 +640,51 @@ String controlsJSON(bool okResponse) {
     serializeJson(json, result);
     return result;
 }
-device_controls::Status applyControl(const device_controls::Control& item) {
+device_controls::Status applyControl(const device_controls::Control& item, const device_controls::Value& value) {
+#if defined(PAPERGIF_SUPERMINI_S3)
+    const auto index = &item - reference_controls::controls;
+    if (index >= reference_controls::dialMode && index <= reference_controls::dialZero) {
+        if (upload.owner != UINT16_MAX) return device_controls::Status::busy;
+        if (index == reference_controls::dialZero) {
+            if (!board.dialPresent()) return device_controls::Status::busy;
+            auto origin = board.dialTracker().configuration();
+            origin.start = std::min(359.9, board.dialTracker().shaftAngle());
+            const String settings = dialConfigurationJSON(origin);
+            if (!dialStorageReady || dialPreferences.putString("settings", settings) != settings.length()) {
+                Serial.println("Could not persist dial zero");
+                return device_controls::Status::busy;
+            }
+            board.configureDial(origin);
+            board.dialTracker().zero();
+            return device_controls::Status::ok;
+        }
+        auto candidate = board.dialTracker().configuration();
+        switch (index) {
+        case reference_controls::dialMode:
+            for (int i = 0; i < 3; ++i)
+                if (!std::strcmp(value.text, reference_controls::dialModes[i].value))
+                    candidate.mode = static_cast<DialMode>(i);
+            break;
+        case reference_controls::dialStart: candidate.start = value.number; break;
+        case reference_controls::dialSweep: candidate.sweep = value.number; break;
+        case reference_controls::dialTurns: candidate.turns = value.number; break;
+        case reference_controls::dialStep: candidate.step = value.number; break;
+        case reference_controls::dialJitter: candidate.jitter = value.number; break;
+        case reference_controls::dialLowLatency: candidate.lowLatency = value.boolean; break;
+        case reference_controls::dialRate: candidate.rate = value.number; break;
+        }
+        if (!candidate.valid()) return device_controls::Status::invalidValue;
+        const String settings = dialConfigurationJSON(candidate);
+        if (!dialStorageReady || dialPreferences.putString("settings", settings) != settings.length()) {
+            Serial.println("Could not persist dial settings");
+            return device_controls::Status::busy;
+        }
+        board.configureDial(candidate);
+        return device_controls::Status::ok;
+    }
+#else
+    (void)value;
+#endif
     if (&item - reference_controls::controls != reference_controls::restart) return device_controls::Status::readOnly;
     if (restartPending || upload.owner != UINT16_MAX) return device_controls::Status::busy;
     restartPending = true;
@@ -485,7 +744,7 @@ bool processDeviceControlPacket(const uint8_t* bytes, size_t length, uint16_t ha
         device_controls::Status status = device_controls::parseSetRequest(
             reinterpret_cast<const char*>(bytes + 1), length - 1, reference_controls::controls,
             reference_controls::count, item, value);
-        if (status == device_controls::Status::ok) status = applyControl(*item);
+        if (status == device_controls::Status::ok) status = applyControl(*item, value);
         const uint8_t response[] = {device_controls::setResult, uint8_t(status)};
         notifyPacket(handle, response, sizeof(response));
         if (status == device_controls::Status::ok) sendSnapshot(handle, true);
@@ -513,7 +772,13 @@ void pollDeviceControls() {
         Serial.flush();
         ESP.restart();
     }
-    if (millis() - snapshotCheckedAt < snapshotCheckMs) return;
+    const uint32_t interval =
+#if defined(PAPERGIF_SUPERMINI_S3)
+        dialSnapshotCheckMs;
+#else
+        snapshotCheckMs;
+#endif
+    if (millis() - snapshotCheckedAt < interval) return;
     snapshotCheckedAt = millis();
     portENTER_CRITICAL(&deviceControlLock);
     const bool subscribed = snapshotSubscribers.size() > 0;
@@ -530,11 +795,144 @@ void sendControlsError(int status, const char* error) {
 void pollBLEUploadTimeout() {
     expireIdleUpload(upload, millis(), [](uint16_t owner) { notify(0x7f, owner); });
 }
+const char* stationSSID() {
+    return setupCredentials.ssid[0] ? setupCredentials.ssid : (profileJSON["wifiSSID"] | "");
+}
+const char* stationPassword() {
+    return setupCredentials.ssid[0] ? setupCredentials.password : (profileJSON["wifiPassword"] | "");
+}
+void startStation() {
+    const char* ssid = stationSSID();
+    if (!*ssid) {
+        wifiJoin.notConfigured();
+        Serial.println("Wi-Fi not configured; choose a network in the phone's Device Setup");
+        return;
+    }
+    Serial.printf("Wi-Fi joining \"%s\"\n", ssid);
+    lastDisconnectReason = 0;
+    wifiJoin.begin(millis());
+    WiFi.begin(ssid, stationPassword());
+#if defined(PAPERGIF_SUPERMINI_S3)
+    // The SuperMini's chip antenna can't associate at full power; begin() resets the limit, so set it after.
+    WiFi.setTxPower(PAPERGIF_WIFI_TX_POWER);
+#endif
+}
+// Pushes to every subscriber when `handle` is UINT16_MAX.
+void sendWiFiStatus(uint16_t handle) {
+    if (!control) return;
+    uint8_t frame[wifi_setup::maxStatusBytes];
+    const IPAddress address = WiFi.localIP();
+    const uint8_t ip[] = {address[0], address[1], address[2], address[3]};
+    const size_t length = wifi_setup::encodeStatus(frame, wifiJoin.state(), wifiJoin.why(), ip, stationSSID());
+    if (handle == UINT16_MAX) control->notify(frame, length);
+    else notifyPacket(handle, frame, length);
+}
+void finishWiFiScan() {
+    const int16_t found = WiFi.scanComplete();
+    if (wifiScanRequester == UINT16_MAX || found == WIFI_SCAN_RUNNING) return;
+    scannedNetworkCount = 0;
+    for (int16_t i = 0; i < found; ++i) {
+        const String ssid = WiFi.SSID(i);
+        Serial.printf("Wi-Fi scan: \"%s\" rssi=%d ch=%d\n", ssid.c_str(), WiFi.RSSI(i), WiFi.channel(i));
+        if (ssid.isEmpty() || ssid.length() > wifi_setup::maxSSID) continue;
+        const int8_t rssi = static_cast<int8_t>(constrain(WiFi.RSSI(i), -127, 0));
+        size_t slot = scannedNetworkCount;
+        for (size_t known = 0; known < scannedNetworkCount; ++known)
+            if (ssid == scannedNetworks[known].ssid) { slot = known; break; }
+        if (slot < scannedNetworkCount) {
+            if (rssi > scannedNetworks[slot].rssi) scannedNetworks[slot].rssi = rssi;
+            continue;
+        }
+        if (scannedNetworkCount == maxScanNetworks) {
+            // Keep the strongest networks.
+            size_t weakest = 0;
+            for (size_t known = 1; known < maxScanNetworks; ++known)
+                if (scannedNetworks[known].rssi < scannedNetworks[weakest].rssi) weakest = known;
+            if (scannedNetworks[weakest].rssi >= rssi) continue;
+            slot = weakest;
+        } else ++scannedNetworkCount;
+        std::strncpy(scannedNetworks[slot].ssid, ssid.c_str(), wifi_setup::maxSSID);
+        scannedNetworks[slot].ssid[wifi_setup::maxSSID] = 0;
+        scannedNetworks[slot].rssi = rssi;
+        scannedNetworks[slot].secure = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+    }
+    if (found >= 0) WiFi.scanDelete();
+    std::sort(scannedNetworks, scannedNetworks + scannedNetworkCount,
+              [](const ScannedNetwork& a, const ScannedNetwork& b) { return a.rssi > b.rssi; });
+    Serial.printf("Wi-Fi scan found %u networks\n", unsigned(scannedNetworkCount));
+    const uint8_t reply[] = {wifi_setup::networkCount, uint8_t(scannedNetworkCount)};
+    notifyPacket(wifiScanRequester, reply, sizeof(reply));
+    wifiScanRequester = UINT16_MAX;
+    if (wifiScanResume) { wifiScanResume = false; startStation(); }
+}
+bool wifiSetupAllowed(uint16_t handle) {
+    if (!configured) return true;
+    portENTER_CRITICAL(&deviceControlLock);
+    const bool relay = relays.isRelay(handle);
+    portEXIT_CRITICAL(&deviceControlLock);
+    return relay;
+}
+bool processWiFiSetupPacket(const uint8_t* bytes, size_t length, uint16_t handle) {
+    switch (bytes[0]) {
+    case wifi_setup::scanRequest: {
+        if (length != 1) return false;
+        if (wifiScanRequester != UINT16_MAX) { wifiScanRequester = handle; return true; }
+        // The radio cannot scan while it is still trying to join; pause the attempt.
+        wifiScanResume = WiFi.status() != WL_CONNECTED && *stationSSID();
+        if (wifiScanResume) WiFi.disconnect(false, false);
+        if (WiFi.scanNetworks(true, false) == WIFI_SCAN_FAILED) {
+            const uint8_t reply[] = {wifi_setup::networkCount, 0};
+            notifyPacket(handle, reply, sizeof(reply));
+            if (wifiScanResume) { wifiScanResume = false; startStation(); }
+            return true;
+        }
+        wifiScanRequester = handle;
+        return true;
+    }
+    case wifi_setup::networkRead: {
+        if (length != 2 || bytes[1] >= scannedNetworkCount) { notify(wifi_setup::failed, handle); return true; }
+        const ScannedNetwork& network = scannedNetworks[bytes[1]];
+        uint8_t reply[wifi_setup::maxNetworkBytes];
+        notifyPacket(handle, reply, wifi_setup::encodeNetwork(reply, bytes[1], network.rssi, network.secure, network.ssid));
+        return true;
+    }
+    case wifi_setup::statusRequest:
+        if (length != 1) return false;
+        sendWiFiStatus(handle);
+        return true;
+    case wifi_setup::joinRequest: {
+        wifi_setup::Credentials credentials;
+        uint16_t rejected = wifi_setup::reason::none;
+        if (!wifi_setup::parseJoin(bytes, length, credentials)) rejected = wifi_setup::reason::invalidRequest;
+        else if (!wifiSetupAllowed(handle)) rejected = wifi_setup::reason::unauthorized;
+        else if (wifiStorageReady && (!wifiPreferences.putString("ssid", credentials.ssid) ||
+                 wifiPreferences.putString("password", credentials.password) != std::strlen(credentials.password)))
+            rejected = wifi_setup::reason::storageFailed;
+        if (rejected) {
+            // Report the rejected request without changing the tracked connection.
+            uint8_t frame[wifi_setup::maxStatusBytes];
+            const uint8_t none[4] = {};
+            notifyPacket(handle, frame, wifi_setup::encodeStatus(frame, wifi_setup::State::failed, rejected, none,
+                                                                 credentials.ssid));
+            return true;
+        }
+        setupCredentials = credentials;
+        wifiScanResume = false;
+        WiFi.disconnect(false, false);
+        startStation();
+        sendWiFiStatus(UINT16_MAX);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
 void processBLE() {
     BLEWrite packet;
     while (xQueueReceive(bleWrites, &packet, 0) == pdTRUE) {
         if (packet.command) {
             if (packet.length > 0 && processDeviceControlPacket(packet.bytes, packet.length, packet.handle)) continue;
+            if (packet.length > 0 && processWiFiSetupPacket(packet.bytes, packet.length, packet.handle)) continue;
             if (packet.length == 1 && packet.bytes[0] == 0x62) {
                 iPhoneController = packet.handle;
                 continue;
@@ -580,6 +978,10 @@ void processBLE() {
 void setup() {
     Serial.begin(115200);
     Serial.println(deviceFirmwareIdentity);
+#if defined(PAPERGIF_SUPERMINI_S3)
+    dialStreamBoot = esp_random();
+    loadDialConfiguration();
+#endif
     board.begin();
 #if defined(PAPERGIF_SUPERMINI_S3)
     {
@@ -610,6 +1012,14 @@ void setup() {
             if (file) file.close();
         }
     }
+    wifiStorageReady = wifiPreferences.begin("papergif-wifi", false);
+    if (wifiStorageReady) {
+        wifiPreferences.getString("ssid", setupCredentials.ssid, sizeof(setupCredentials.ssid));
+        wifiPreferences.getString("password", setupCredentials.password, sizeof(setupCredentials.password));
+    }
+    WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+        lastDisconnectReason = info.wifi_sta_disconnected.reason;
+    }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     WiFi.persistent(false);
     WiFi.mode(WIFI_AP_STA);
     char name[32];
@@ -673,7 +1083,7 @@ void setup() {
         device_controls::Value value;
         device_controls::Status status = device_controls::parseSetRequest(body.c_str(), body.length(),
             reference_controls::controls, reference_controls::count, item, value);
-        if (status == device_controls::Status::ok) status = applyControl(*item);
+        if (status == device_controls::Status::ok) status = applyControl(*item, value);
         if (status != device_controls::Status::ok) {
             sendControlsError(device_controls::httpStatus(status), device_controls::errorName(status));
             return;
@@ -713,25 +1123,49 @@ void loop() {
     }
     if (stationConnectPending) {
         stationConnectPending = false;
-        const char* ssid = profileJSON["wifiSSID"] | "";
-        if (*ssid) WiFi.begin(ssid, profileJSON["wifiPassword"] | "");
+        // Re-installing a profile must not drop a working connection to the same network.
+        if (!(WiFi.status() == WL_CONNECTED && WiFi.SSID() == stationSSID()) && wifiScanRequester == UINT16_MAX)
+            startStation();
     }
+    finishWiFiScan();
     static bool connected = false;
-    const bool nowConnected = WiFi.status() == WL_CONNECTED;
+    static wl_status_t lastStatus = WL_IDLE_STATUS;
+    const wl_status_t status = WiFi.status();
+    const bool nowConnected = status == WL_CONNECTED;
+    if (status != lastStatus) {
+        if (nowConnected) Serial.printf("Wi-Fi connected: %s\n", WiFi.localIP().toString().c_str());
+        else if (lastStatus == WL_CONNECTED) Serial.println("Wi-Fi lost; using Bluetooth");
+        lastStatus = status;
+    }
+    if (wifiScanRequester == UINT16_MAX && !wifiScanResume &&
+        wifiJoin.update(nowConnected, lastDisconnectReason, millis())) {
+        if (wifiJoin.state() == wifi_setup::State::failed)
+            Serial.printf("Wi-Fi join failed (reason %u)%s\n", wifiJoin.why(),
+                          wifiJoin.why() == wifi_setup::reason::noAccessPoint ? ": network not found; the ESP32-S3 needs 2.4 GHz"
+                          : wifi_setup::definitiveFailure(wifiJoin.why()) ? ": check the password" : "");
+        sendWiFiStatus(UINT16_MAX);
+    }
     if (connected && !nowConnected) releaseInputs();
     connected = nowConnected;
     server.handleClient();
     processBLE();
     pollDeviceControls();
+    flushRelaySlider(false);
     InputEvent event;
     for (int i = 0; i < 8 && board.inputs()->poll(event); ++i) {
 #if defined(PAPERGIF_SUPERMINI_S3)
         lastSuperminiInput = event;
         hasLastSuperminiInput = true;
-        Serial.printf("Input %s %s value=%.0f seq=%lu\n", event.inputID, event.event,
+        const bool streamed = board.dialTracker().configuration().lowLatency && !std::strcmp(event.inputID, "dial-1");
+        // At stream rates the serial log would block the loop; log only discrete inputs.
+        if (!streamed) Serial.printf("Input %s %s value=%.0f seq=%lu\n", event.inputID, event.event,
                       event.value, static_cast<unsigned long>(event.sequence));
+        else livePacer.offer();
 #endif
         handleInput(event);
     }
+#if defined(PAPERGIF_SUPERMINI_S3)
+    pollDialStream();
+#endif
     delay(1);
 }

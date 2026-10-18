@@ -89,6 +89,7 @@ private struct RemoteEditorView: View {
             store.saveImmediately()
         }
         .onChange(of: deviceDiscovery.devices) { devices in
+            Task { await store.adoptDiscoveredAddresses(devices.map(\.address)) }
             if self.devices.descriptor != nil &&
                 !devices.contains(where: { $0.address == store.deviceAddress }) {
                 return
@@ -556,11 +557,7 @@ private struct RemoteEditorView: View {
                             "Saved device",
                             selection: Binding(
                                 get: { devices.selectedID ?? "" },
-                                set: { id in
-                                    guard let record = devices.records.first(where: { $0.id == id }) else { return }
-                                    store.deviceAddress = record.address
-                                    Task { await store.loadFromDevice() }
-                                }
+                                set: { id in Task { await store.selectSavedDevice(id: id) } }
                             )
                         ) {
                             Text("Choose device").tag("")
@@ -569,7 +566,8 @@ private struct RemoteEditorView: View {
                     }
                     TextField("Hostname or IP:port", text: $store.deviceAddress)
                     Button("Connect / read device info") { Task { await store.loadFromDevice() } }
-                        .disabled(devices.isLoading)
+                        .disabled(devices.isLoading
+                            || store.deviceAddress.trimmingCharacters(in: .whitespaces).isEmpty)
                     if devices.isLoading { ProgressView().controlSize(.small) }
                     if let message = devices.message { Text(message).font(.caption).textSelection(.enabled) }
                     if let descriptor = devices.descriptor {

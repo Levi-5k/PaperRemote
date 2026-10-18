@@ -24,14 +24,21 @@ New controllers are discovered two ways:
   Setup, Wi-Fi & Saved Controllers → Wi-Fi Setup**); until then, Send is blocked
   with an explanation.
 
-To join a SuperMini/reference controller to Wi-Fi, connect to it under Nearby
-Bluetooth Devices, enter the network name and password in Wi-Fi Setup, and tap
-**Connect Device to Wi-Fi**. The app sends its profile and network settings over
-Bluetooth; joining the board's setup access point is not required. First-time
+To join a SuperMini/reference controller to Wi-Fi, select it in Device Setup
+(or connect to it under Nearby Bluetooth Devices). The **Wi-Fi** section asks
+the board to scan with its own radio and lists the networks it can reach, with
+signal strength and a lock for secured networks. Tap a network, enter only its
+password, and tap **Join**; use **Other Network…** for hidden networks. The
+board saves the network, reconnects automatically after restarts, and the
+section shows live status: joining, connected with its IP address, or why it
+failed (wrong password, network not found / not 2.4 GHz). Joining the board's
+setup access point is not required. A board that already has a profile accepts
+a new network only from a phone holding that profile's token (the phone
+registers automatically); otherwise use **Send Saved Profile** first. The
+network is also saved in the phone's profile for the board, and a profile that
+names a different network replaces the one chosen from the list. First-time
 enrollment generates a token only if the profile has no existing enrollment or
-paired-computer token. Use **Refresh Controls** to read the board's Wi-Fi
-connection state afterward. Refresh reconnects to the selected controller if it
-has no reachable transport and shows a timestamp after a successful read.
+paired-computer token. The M5Paper keeps its existing Wi-Fi Setup flow.
 
 Selecting a saved controller reconnects by stable device ID, even if it was
 saved before Bluetooth peripheral mappings were introduced. Other nearby boards
@@ -87,6 +94,75 @@ push button because a catalog picture contains one. Value bindings have explicit
 minimum, maximum, and step settings. Only actions that actually accept values
 may use relative/absolute modes. For example, use volume, brightness, or target
 temperature, not “next track,” as an adjustable value.
+
+### SuperMini MT6701 live dial
+
+Updated SuperMini firmware exposes a **Live dial** surface on iPhone/iPad, Mac,
+and Windows. Reconnect/refresh discovery after flashing so the
+apps read the new descriptor. The needle shows the sensor's shaft angle; the
+position and revolution readouts show the tracked, filtered travel. BLE pushes
+changed snapshots at most 10 times per second; visible Wi-Fi views poll every
+200 ms, without polling BLE at that rate.
+
+- **Bounded single turn:** choose a start angle and 1–360 degrees of travel.
+  Drag the green Start and orange End handles, or enter exact numeric values.
+  Drag End past Start to put the end stop on the other side: the end stop is
+  stored as a signed value (negative = counterclockwise), so turning toward the
+  End stop always increases the output.
+  Crossing the sensor's 359-to-0-degree boundary does not jump the output.
+- **Bounded multi-turn:** choose 0.1–100 revolutions from minimum to maximum;
+  a negative revolution count puts the end stop counterclockwise of Start.
+  The progress indicator shows travel between the stops; adjust the revolutions
+  field/slider to move the end stop.
+- **Continuous relative:** clockwise/counterclockwise movement increments or
+  decrements the existing value binding. Revolutions per output range sets
+  sensitivity; there are no angular stops. The assigned action's own minimum
+  and maximum still apply.
+- **Precision:** Output resolution is 0.01–10% of the assigned output range.
+  The binding's existing Step is the final output-unit increment (for example,
+  volume percentage points). Sub-step relative movements accumulate rather than
+  being discarded. Jitter filter is 0–5 degrees of angular hysteresis; slow
+  deliberate movement is retained. Older firmware's "reverse direction" setting
+  is migrated to a negative end stop.
+- **Set current position to start** calibrates the origin to the current shaft
+  angle. Configuration is stored on the device and survives restart. Changing
+  modes, origin, or direction reinitializes travel; changing precision, filter,
+  or the end limit preserves it (clipping to a shortened range when necessary).
+
+On the phone, the dial settings appear only in the knob's own settings: on the
+Remote page, tap the knob (or its row) and open **Configure Dial**. The knob on
+the Remote page's board preview turns with the live shaft angle. The Mac and
+Windows apps show the settings view in the device's Controls.
+
+When the knob has no Wi-Fi, actions are relayed over Bluetooth. The firmware
+coalesces relayed slider/volume values (latest value wins, at most every 40 ms)
+so the computer never falls behind; the Mac sets volume directly via CoreAudio
+rather than spawning a script per tick. The Mac connects straight to a
+Bluetooth-only knob (no IP address required) once the knob's profile includes
+that computer.
+
+**Low latency mode** (Configure Dial) sends only dial *changes* at a fixed
+rate of 15–500 per second (default 75). The sensor is sampled at least that
+often; the newest value always wins, and one repeat is sent after the dial
+stops so a dropped final packet cannot leave the target stale.
+
+- Computers on Wi-Fi receive the dial as UDP datagrams on their action port
+  (default 43821) instead of one HTTP request per change. Stale or reordered
+  datagrams are discarded. Releases, safety events, and button actions still
+  use HTTP. Without Wi-Fi the knob falls back to the Bluetooth relay.
+- The phone receives compact 7-byte live-dial notifications at the same rate,
+  so the preview and iPhone media actions follow the dial closely.
+- Higher rates use more radio time and battery; 75 per second is smooth for
+  volume and similar controls.
+
+These are **software end stops**, not motorized/haptic stops. Excess rotation
+at a limit is discarded so reversing responds immediately. The MT6701 is a
+single-turn absolute sensor: multi-turn travel is retained while running, even
+across BLE/Wi-Fi disconnects, but cannot be reconstructed after power loss or
+while the sensor is disconnected. Multi-turn and continuous tracking restart
+at zero after reboot; re-zero as needed. A missing I2C sensor is reported as an
+error rather than displayed as a valid zero position. Rotation beyond half a
+turn between sensor samples cannot be unwrapped reliably.
 
 Device capabilities and app/runtime limits are validated before upload.
 “Any size” does not mean unlimited memory: descriptor v1 limits either dimension

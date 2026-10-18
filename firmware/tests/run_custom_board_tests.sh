@@ -7,7 +7,7 @@ if [ ! -d "$json_headers" ]; then
     echo "Build m5paper-v1 once with PlatformIO to restore ArduinoJson headers." >&2
     exit 1
 fi
-for test in custom_board remote_network_queue remote_computer reference_lifecycle device_controls; do
+for test in custom_board remote_network_queue remote_computer reference_lifecycle device_controls dial_tracker wifi_setup dial_stream; do
     "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
         -I"$json_headers" "tests/${test}_test.cpp" -o ".pio/host-tests/${test}_test"
     if [ "$test" = custom_board ]; then
@@ -20,6 +20,11 @@ for test in custom_board remote_network_queue remote_computer reference_lifecycl
         ".pio/host-tests/${test}_test"
     fi
 done
+mkdir -p .pio/host-tests/supermini
+"${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    -DPAPERGIF_SUPERMINI_S3=1 -I"$json_headers" tests/device_controls_test.cpp \
+    -o .pio/host-tests/supermini_controls_test
+.pio/host-tests/supermini_controls_test .pio/host-tests/supermini
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
     -Itests/stubs tests/reference_inputs_test.cpp -o .pio/host-tests/reference_inputs_test
 .pio/host-tests/reference_inputs_test
@@ -29,6 +34,7 @@ done
 python="../.venv/bin/python"
 if [ -x "$python" ] && "$python" -c "import jsonschema" 2>/dev/null; then
     "$python" tests/validate_firmware_descriptors.py .pio/host-tests
+    "$python" tests/validate_firmware_descriptors.py .pio/host-tests/supermini
 else
     echo "Skipping descriptor schema validation: ../.venv with jsonschema not found." >&2
 fi

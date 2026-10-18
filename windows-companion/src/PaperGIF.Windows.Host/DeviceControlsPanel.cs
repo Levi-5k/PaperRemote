@@ -87,6 +87,7 @@ internal sealed class DeviceControlsPanel : Panel
     private int pending;
     private bool applying;
     private DateTime lastPoll = DateTime.MinValue;
+    private DialPositionControl? dial;
 
     public DeviceControlsPanel(RemoteEditorStore store)
     {
@@ -101,7 +102,7 @@ internal sealed class DeviceControlsPanel : Panel
         Controls.Add(rows);
         Controls.Add(header);
         rows.Resize += (_, _) => ResizeRows();
-        pollTimer.Interval = 1000;
+        pollTimer.Interval = 100;
         pollTimer.Tick += (_, _) => Poll();
         pollTimer.Start();
         VisibleChanged += (_, _) =>
@@ -127,6 +128,7 @@ internal sealed class DeviceControlsPanel : Panel
         ReleaseSession();
         snapshot = DeviceControlSnapshot.Empty;
         updaters.Clear();
+        dial = null;
         rows.SuspendLayout();
         foreach (Control control in rows.Controls.Cast<Control>().ToArray()) control.Dispose();
         rows.Controls.Clear();
@@ -191,7 +193,8 @@ internal sealed class DeviceControlsPanel : Panel
     private void Poll()
     {
         if (session is null || !Visible || pending > 0) return;
-        var interval = session.IsOnBluetooth ? BluetoothPollInterval : WifiPollInterval;
+        var interval = session.IsOnBluetooth ? BluetoothPollInterval
+            : dial is not null ? TimeSpan.FromMilliseconds(200) : WifiPollInterval;
         if (DateTime.UtcNow - lastPoll < interval) return;
         _ = LoadSnapshotAsync(manual: false);
     }
@@ -280,6 +283,7 @@ internal sealed class DeviceControlsPanel : Panel
         applying = true;
         try
         {
+            dial?.UpdateSnapshot(values);
             foreach (var (id, update) in updaters)
                 update(values.Values.TryGetValue(id, out var value) ? value : null);
         }
@@ -294,6 +298,24 @@ internal sealed class DeviceControlsPanel : Panel
 
     private void BuildRows(IReadOnlyList<DeviceControl> controls)
     {
+        if (DialPositionControl.Supports(controls))
+        {
+            dial = new DialPositionControl();
+            dial.LimitChanged += (id, value) =>
+            {
+                var control = controls.First(item => item.Id == id);
+                _ = SetAsync(control, DeviceControlJson.Value(value));
+            };
+            rows.Controls.Add(dial);
+            rows.Controls.Add(new Label
+            {
+                Text = "Soft stops limit output, not physical rotation. Drag Start/End or enter exact values below; "
+                    + "drag End past Start (or enter a negative end stop) to count counterclockwise. "
+                    + "Multi-turn starts at zero after reboot. Continuous mode has no stops; revolutions set sensitivity. "
+                    + "Output resolution is a percent of the assigned range; binding Step sets final output units.",
+                Height = 90, ForeColor = EditorTheme.Muted, Font = EditorTheme.BodyFont,
+            });
+        }
         var groups = controls.GroupBy(control => control.Group ?? string.Empty).ToList();
         foreach (var group in groups)
         {

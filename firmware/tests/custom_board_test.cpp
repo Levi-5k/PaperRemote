@@ -137,12 +137,19 @@ static void bindingTests() {
     InputEvent event;
     while (board.input.poll(event)) dispatchHardwareInput(profile, board.info(), event, dispatch);
     assert(actions.size() == 7);
-    assert(actions[0].value == 65 && actions[1].value == 55);
-    assert(actions[2].value == 100 && actions[3].value == 0);
+    // Media volume percent (65, 55, 100, 0) is sent on the 0-255 media wire scale.
+    assert(actions[0].value == 166 && actions[1].value == 140);
+    assert(actions[2].value == 255 && actions[3].value == 0);
+    assert(actions[0].valueTenths == 650);
     assert(actions[4].value == 50 && actions[5].value == 90 && actions[6].value == 10);
     for (uint32_t i = 9; i < 10009; ++i)
         dispatchHardwareInput(profile, board.info(), {"encoder-1","rotate",i % 2 ? 1.0 : -1.0,i}, dispatch);
-    assert(actions.back().value >= 0 && actions.back().value <= 100);
+    assert(actions.back().value >= 0 && actions.back().value <= 255);
+    NativeAction media{};
+    std::strcpy(media.type, "iPhoneMedia"); std::strcpy(media.text, "volume");
+    assert(mediaWireValue(media, 100) == 255 && mediaWireValue(media, 0) == 0);
+    std::strcpy(media.type, "wledBrightness");
+    assert(mediaWireValue(media, 100) == 100);
     const auto before = actions.size();
     bool pressed[] = {true,false,false};
     releaseHardwareInputs(profile, board.info(), pressed, dispatch);

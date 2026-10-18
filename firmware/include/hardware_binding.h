@@ -13,6 +13,7 @@ struct BindingState {
     uint32_t sequence = 0;
     bool seen = false;
     bool pressed = false;
+    double remainder = 0;
 };
 inline bool validBinding(const BindingState& b) {
     return std::isfinite(b.minimum) && std::isfinite(b.maximum) &&
@@ -43,11 +44,18 @@ inline bool applyInput(BindingState& state, const InputInfo& input, const InputE
         next += delta * state.step;
     } else if (state.mode == BindingMode::absolute) {
         if (std::strcmp(event.event, "change") != 0 || input.maximum <= input.minimum) return false;
-        const double raw = std::fmax(input.minimum, std::fmin(input.maximum, event.value));
-        next = state.minimum + (raw - input.minimum) / (input.maximum - input.minimum) *
-            (state.maximum - state.minimum);
+        if (event.relative) {
+            next += state.remainder + event.value / (input.maximum - input.minimum) *
+                (state.maximum - state.minimum);
+        } else {
+            const double raw = std::fmax(input.minimum, std::fmin(input.maximum, event.value));
+            next = state.minimum + (raw - input.minimum) / (input.maximum - input.minimum) *
+                (state.maximum - state.minimum);
+        }
     }
     state.value = boundValue(next, state);
+    state.remainder = event.relative
+        ? std::fmax(state.minimum, std::fmin(state.maximum, next)) - state.value : 0;
     value = state.value;
     return true;
 }

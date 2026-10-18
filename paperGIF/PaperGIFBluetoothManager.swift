@@ -98,6 +98,71 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         }
     }
 
+    /// Wi-Fi state reported by native boards over Bluetooth (opcode 0x3A).
+    /// A low-latency live dial reading (opcode 0x62): shaft angle and output position in degrees.
+    struct LiveDial: Equatable, Sendable {
+        let angle: Double
+        let position: Double
+
+        init(angle: Double, position: Double) {
+            self.angle = angle
+            self.position = position
+        }
+
+        init?(frame: Data) {
+            let bytes = [UInt8](frame)
+            guard bytes.count >= 7, bytes[0] == 0x62 else { return nil }
+            let angle = UInt16(bytes[1]) | UInt16(bytes[2]) << 8
+            let position = Int32(bitPattern: UInt32(bytes[3]) | UInt32(bytes[4]) << 8 |
+                UInt32(bytes[5]) << 16 | UInt32(bytes[6]) << 24)
+            self.angle = Double(angle) / 100
+            self.position = Double(position) / 100
+        }
+    }
+
+    struct DeviceWiFiStatus: Equatable, Sendable {
+        enum State: Equatable, Sendable {
+            case notConfigured
+            case connecting
+            case connected(ipAddress: String)
+            case failed(String)
+        }
+
+        var state: State
+        var ssid: String
+
+        init(state: State, ssid: String) {
+            self.state = state
+            self.ssid = ssid
+        }
+
+        static func failureMessage(reason: UInt16) -> String {
+            switch reason {
+            case 201: "Network not found. The device needs a 2.4 GHz network in range."
+            case 15, 202, 204: "Incorrect password."
+            case 203: "The network refused the connection."
+            case 0xFF01: "This phone isn't paired with the device yet. Use Send Saved Profile first, then try again."
+            case 0xFF02: "Wi-Fi passwords must be 8–63 characters."
+            case 0xFF03: "The device couldn't save the network."
+            default: "Couldn't connect to the network."
+            }
+        }
+
+        /// Parses `[0x3A, state, reasonLo, reasonHi, ip0...ip3, ssid...]`.
+        init?(frame data: Data) {
+            let bytes = [UInt8](data)
+            guard bytes.count >= 8, bytes[0] == 0x3A else { return nil }
+            ssid = String(decoding: bytes[8...], as: UTF8.self)
+            switch bytes[1] {
+            case 0: state = .notConfigured
+            case 1: state = .connecting
+            case 2: state = .connected(ipAddress: bytes[4..<8].map(String.init).joined(separator: "."))
+            case 3: state = .failed(Self.failureMessage(reason: UInt16(bytes[2]) | UInt16(bytes[3]) << 8))
+            default: return nil
+            }
+        }
+    }
+
     enum HomeWiFiState: Equatable {
         case notConfigured
         case connecting
@@ -299,6 +364,9 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     @Published private(set) var nearbyWiFiNetworks: [WiFiNetwork] = []
     @Published private(set) var isScanningWiFiNetworks = false
     @Published private(set) var wifiScanError: String?
+    @Published private(set) var deviceWiFiStatus: DeviceWiFiStatus?
+    @Published private(set) var isJoiningDeviceWiFi = false
+    private var awaitingDeviceWiFiStatus = false
     @Published private(set) var remoteSyncStatus: String?
     @Published private(set) var remoteProfileFromDevice: PaperGIFRemoteProfile?
     @Published private(set) var localMediaCommandEvent: LocalMediaCommandEvent?
@@ -375,6 +443,10 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     /// The latest snapshot the device pushed over Bluetooth without a request.
     @Published private(set) var pushedControlSnapshot: PushedControlSnapshot?
+    /// Low-latency dial stream, coalesced to the display rate.
+    @Published private(set) var liveDial: LiveDial?
+    private var pendingLiveDial: LiveDial?
+    private var liveDialPublishScheduled = false
 
     override init() {
         super.init()
@@ -484,12 +556,17 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         peripheral.writeValue(packet, for: controlCharacteristic, type: .withResponse)
     }
 
+    /// Whether the connected board can scan and join Wi-Fi over Bluetooth.
+    var canSetUpDeviceWiFi: Bool {
+        (legacyBLEPermitted || bluetoothAccess.notifications) && connectionState == .connected
+    }
+
     func scanForWiFiNetworks() {
-        guard legacyBLEPermitted, connectionState == .connected,
+        guard canSetUpDeviceWiFi,
               !isTransferring,
               let peripheral,
               let controlCharacteristic else {
-            wifiScanError = "Connect to the M5Paper over Bluetooth to scan."
+            wifiScanError = "Connect to the device over Bluetooth to scan."
             return
         }
         nearbyWiFiNetworks = []
@@ -498,6 +575,35 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         isScanningWiFiNetworks = true
         peripheral.writeValue(Data([0x33]), for: controlCharacteristic, type: .withResponse)
         startWiFiScanTimeout(seconds: .seconds(20))
+    }
+
+    /// Sends a network chosen from the device's scan; the device stores it and reports progress with 0x3A.
+    func joinDeviceWiFi(ssid: String, password: String, profile: PaperGIFRemoteProfile) {
+        guard !legacyBLEPermitted, canSetUpDeviceWiFi, let peripheral, let controlCharacteristic else {
+            deviceWiFiStatus = DeviceWiFiStatus(state: .failed("Connect to the device over Bluetooth first."), ssid: ssid)
+            return
+        }
+        let ssidBytes = Array(ssid.utf8), passwordBytes = Array(password.utf8)
+        guard (1...32).contains(ssidBytes.count) else {
+            deviceWiFiStatus = DeviceWiFiStatus(state: .failed("Network names are limited to 32 bytes."), ssid: ssid)
+            return
+        }
+        guard passwordBytes.isEmpty || (8...63).contains(passwordBytes.count) else {
+            deviceWiFiStatus = DeviceWiFiStatus(state: .failed(DeviceWiFiStatus.failureMessage(reason: 0xFF02)), ssid: ssid)
+            return
+        }
+        // A configured device accepts new networks only from a registered relay.
+        updateRelayProfile(profile)
+        isJoiningDeviceWiFi = true
+        deviceWiFiStatus = DeviceWiFiStatus(state: .connecting, ssid: ssid)
+        peripheral.writeValue(Data([0x39, UInt8(ssidBytes.count)] + ssidBytes + passwordBytes),
+                              for: controlCharacteristic, type: .withResponse)
+    }
+
+    func requestDeviceWiFiStatus() {
+        guard !legacyBLEPermitted, canSetUpDeviceWiFi, let peripheral, let controlCharacteristic else { return }
+        awaitingDeviceWiFiStatus = true
+        peripheral.writeValue(Data([0x37]), for: controlCharacteristic, type: .withResponse)
     }
 
     func monitorWiFiConnection() async {
@@ -1581,7 +1687,10 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         wifiEnabled = false
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedPeripheralKey)
         registerRelayForwarder()
-        guard legacyBLEPermitted else { return }
+        guard legacyBLEPermitted else {
+            requestDeviceWiFiStatus()
+            return
+        }
         if UIDevice.current.userInterfaceIdiom == .phone {
             peripheral.writeValue(Data([0x62]), for: controlCharacteristic, type: .withResponse)
         }
@@ -1799,7 +1908,10 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             } else if isTransferring {
                 failTransfer("The selected controller rejected the transfer")
             } else if isScanningWiFiNetworks {
-                failWiFiScan("The M5Paper could not scan for networks")
+                failWiFiScan(legacyBLEPermitted ? "The M5Paper could not scan for networks"
+                             : "This device's firmware can't scan for Wi-Fi. Update it to set up Wi-Fi from here.")
+            } else if awaitingDeviceWiFiStatus {
+                awaitingDeviceWiFiStatus = false
             } else if consumeControlProtocolRejection() {
                 break
             } else {
@@ -1836,6 +1948,22 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             handleWiFiNetwork(data)
         case 0x36:
             handleHomeWiFiStatus(data)
+        case 0x3A:
+            awaitingDeviceWiFiStatus = false
+            guard let status = DeviceWiFiStatus(frame: data) else { break }
+            deviceWiFiStatus = status
+            if status.state != .connecting { isJoiningDeviceWiFi = false }
+        case 0x62:
+            guard let dial = LiveDial(frame: data) else { break }
+            pendingLiveDial = dial
+            // The device can stream hundreds of readings a second; redraw at most per frame.
+            guard !liveDialPublishScheduled else { break }
+            liveDialPublishScheduled = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) { [weak self] in
+                guard let self else { return }
+                liveDialPublishScheduled = false
+                liveDial = pendingLiveDial
+            }
         case 0x60:
             handleLocalMediaCommand(data)
         case 0x61:
@@ -2198,6 +2326,9 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         pendingDeviceMedia = []
         isScanningWiFiNetworks = false
         expectedWiFiNetworkCount = 0
+        deviceWiFiStatus = nil
+        isJoiningDeviceWiFi = false
+        awaitingDeviceWiFiStatus = false
     }
 }
 

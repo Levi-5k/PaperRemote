@@ -94,7 +94,7 @@ struct PaperGIFRemoteView: View {
                             PaperGIFPhysicalInputsSection(
                                 profile: $profile, descriptor: descriptor,
                                 layout: deviceSession.layout ?? descriptor.layout,
-                                wledDiscovery: wledDiscovery
+                                wledDiscovery: wledDiscovery, bluetoothManager: bluetoothManager
                             )
                         }
                         if deviceSession.descriptor?.display != nil || deviceSession.descriptor == nil {

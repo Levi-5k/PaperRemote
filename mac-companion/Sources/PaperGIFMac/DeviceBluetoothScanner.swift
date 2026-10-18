@@ -265,6 +265,7 @@ extension DeviceBluetoothScanner: CBPeripheralDelegate {
             do {
                 if let descriptor = try reader.append(characteristic.value ?? Data()) {
                     logger.notice("Discovered Bluetooth controller: \(descriptor.name, privacy: .public) [\(descriptor.deviceID, privacy: .public)]")
+                    DeviceBluetoothRelay.rememberPeripheral(peripheral.identifier, deviceID: descriptor.deviceID)
                     if let index = nearby.firstIndex(where: { $0.id == peripheral.identifier }) {
                         nearby[index].descriptor = descriptor
                         nearby[index].problem = nil

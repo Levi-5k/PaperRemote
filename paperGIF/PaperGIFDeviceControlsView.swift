@@ -64,7 +64,8 @@ struct PaperGIFDeviceControlsView: View {
             model.receive(pushed.snapshot, via: "Bluetooth")
         }
 
-        ForEach(model.groups, id: \.name) { group in
+        // Dial settings live in the knob's own editor on the Remote page.
+        ForEach(model.groups.filter { !DeviceDialView.isSupported(by: controls) || $0.name != "Dial" }, id: \.name) { group in
             Section(group.name) {
                 ForEach(group.controls) { control in
                     PaperGIFDeviceControlRow(
@@ -116,6 +117,58 @@ struct PaperGIFDeviceControlsView: View {
         case "Wi-Fi": "wifi"
         case "Bluetooth": "antenna.radiowaves.left.and.right"
         default: routes.isEmpty ? "wifi.slash" : "dot.radiowaves.left.and.right"
+        }
+    }
+}
+
+/// Live dial position, end stops and precision settings, shown only in the knob's own input
+/// editor. Uses the same Wi-Fi/Bluetooth routes as Device Controls.
+struct PaperGIFDialSettingsSection: View {
+    let descriptor: DeviceDescriptor
+    @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
+    @StateObject private var model = DeviceControlsModel()
+
+    static func isAvailable(for descriptor: DeviceDescriptor) -> Bool {
+        DeviceDialView.isSupported(by: descriptor.controls)
+    }
+
+    private var routes: PaperGIFDeviceControlRoutes { bluetoothManager.deviceControlRoutes(for: descriptor) }
+
+    var body: some View {
+        Section {
+            if routes.isEmpty {
+                Text("Connect to \(descriptor.name) to see the live dial and change its end stops.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                Button("Connect Over Bluetooth") {
+                    bluetoothManager.connectSavedDevice(deviceID: descriptor.deviceID)
+                }
+            }
+            if let error = model.error {
+                Label(error, systemImage: "exclamationmark.triangle").font(.footnote).foregroundStyle(.orange)
+            }
+            DeviceDialView(model: model)
+        } header: {
+            Text("Dial Settings")
+        }
+        .task(id: routes) {
+            let routes = routes
+            model.configure(controls: descriptor.controls,
+                            transports: bluetoothManager.deviceControlTransports(for: routes))
+            guard !routes.isEmpty else { return }
+            await model.refresh()
+            await model.monitorDial()
+        }
+        .onChange(of: bluetoothManager.pushedControlSnapshot) {
+            guard let pushed = bluetoothManager.pushedControlSnapshot, routes.bluetooth else { return }
+            model.receive(pushed.snapshot, via: "Bluetooth")
+        }
+        .onChange(of: bluetoothManager.liveDial) { _, dial in
+            // Low latency mode streams the dial between the slower full snapshots.
+            guard let dial, routes.bluetooth, model.values["dialAngle"] != nil else { return }
+            var values = model.values
+            values["dialAngle"] = .number(dial.angle)
+            values["dialPosition"] = .number(dial.position)
+            model.receive(DeviceControlSnapshot(values: values), via: "Bluetooth")
         }
     }
 }

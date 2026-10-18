@@ -162,8 +162,32 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
     }
 
     struct Target: Equatable {
+        /// Empty for Bluetooth-only devices, which relay immediately instead of probing Wi-Fi.
         var address: String
         var token: String
+        var deviceID: String? = nil
+    }
+
+    /// Peripheral UUID → descriptor deviceID, written by the Bluetooth scanner so the
+    /// relay connects to the selected controller rather than any paperGIF peripheral.
+    static let peripheralDeviceIDsKey = "BluetoothPeripheralDeviceIDs"
+
+    static func rememberPeripheral(_ peripheral: UUID, deviceID: String) {
+        var map = UserDefaults.standard.dictionary(forKey: peripheralDeviceIDsKey) as? [String: String] ?? [:]
+        guard map[peripheral.uuidString] != deviceID else { return }
+        map[peripheral.uuidString] = deviceID
+        UserDefaults.standard.set(map, forKey: peripheralDeviceIDsKey)
+    }
+
+    private var peripheralDeviceIDs: [String: String] {
+        UserDefaults.standard.dictionary(forKey: Self.peripheralDeviceIDsKey) as? [String: String] ?? [:]
+    }
+
+    /// False only when the peripheral is known to belong to a different controller.
+    private func mayBeTarget(_ peripheral: UUID) -> Bool {
+        if let owner = Self.claimed[peripheral], owner != ObjectIdentifier(self) { return false }
+        guard let deviceID = target?.deviceID, let known = peripheralDeviceIDs[peripheral.uuidString] else { return true }
+        return known == deviceID
     }
 
     @Published private(set) var state: State = .idle
@@ -174,6 +198,9 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
 
     private static let serviceUUID = CBUUID(string: "7A230001-7D2A-4C7B-9C42-504749460001")
     private static let controlUUID = CBUUID(string: "7A230002-7D2A-4C7B-9C42-504749460001")
+    private static let descriptorUUID = CBUUID(string: "7A230004-7D2A-4C7B-9C42-504749460001")
+    /// Peripherals currently held by a relay, so relays for different controllers don't share one.
+    private static var claimed: [UUID: ObjectIdentifier] = [:]
     private static let peripheralKey = "BluetoothRelayPeripheral"
 
     private let probe: @Sendable (String) async -> Bool
@@ -181,6 +208,7 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var rejected: Set<UUID> = []
+    private var identifying: (descriptor: CBCharacteristic, control: CBCharacteristic, reader: DeviceBLEDescriptorReader)?
     private var monitor: Task<Void, Never>?
     private var scanTimeout: Task<Void, Never>?
     private var connectTimeout: Task<Void, Never>?
@@ -207,8 +235,14 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
         disconnect()
         monitor?.cancel()
         monitor = nil
-        guard let target, !target.address.isEmpty, !target.token.isEmpty else {
+        guard let target, !target.token.isEmpty else {
             state = .idle
+            return
+        }
+        if target.address.isEmpty {
+            unreachableCount = 2
+            lanReachable = false
+            startSearching()
             return
         }
         monitor = Task { [weak self] in
@@ -252,10 +286,13 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
             state = .unavailable(Self.describe(central.state))
             return
         }
-        if !skipSavedPeripheral,
-           let saved = UserDefaults.standard.string(forKey: Self.peripheralKey).flatMap(UUID.init(uuidString:)),
-           !rejected.contains(saved),
-           let known = central.retrievePeripherals(withIdentifiers: [saved]).first {
+        let mapped = target?.deviceID.flatMap { id in
+            peripheralDeviceIDs.first { $0.value == id }.flatMap { UUID(uuidString: $0.key) }
+        }
+        let saved = UserDefaults.standard.string(forKey: Self.peripheralKey).flatMap(UUID.init(uuidString:))
+        if !skipSavedPeripheral, let candidate = (mapped ?? saved).flatMap({ mayBeTarget($0) ? $0 : nil }),
+           !rejected.contains(candidate),
+           let known = central.retrievePeripherals(withIdentifiers: [candidate]).first {
             connect(known)
             return
         }
@@ -266,6 +303,10 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
             guard let self, !Task.isCancelled, self.peripheral == nil else { return }
             self.central?.stopScan()
             self.state = .unavailable("Device not found over Bluetooth")
+            // Keep looking: the controller may be off, out of range or held by another app.
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled, !self.lanReachable, self.peripheral == nil else { return }
+            self.startSearching()
         }
     }
 
@@ -273,6 +314,7 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
         scanTimeout?.cancel()
         central?.stopScan()
         self.peripheral = peripheral
+        Self.claimed[peripheral.identifier] = ObjectIdentifier(self)
         peripheral.delegate = self
         central?.connect(peripheral)
         connectTimeout?.cancel()
@@ -293,8 +335,18 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
         central?.stopScan()
         channel.close()
         controlTransport = nil
-        if let peripheral { central?.cancelPeripheralConnection(peripheral) }
+        identifying = nil
+        if let peripheral {
+            release(peripheral)
+            central?.cancelPeripheralConnection(peripheral)
+        }
         peripheral = nil
+    }
+
+    private func release(_ peripheral: CBPeripheral) {
+        if Self.claimed[peripheral.identifier] == ObjectIdentifier(self) {
+            Self.claimed[peripheral.identifier] = nil
+        }
     }
 
     private func registered(_ accepted: Bool) {
@@ -342,7 +394,8 @@ extension DeviceBluetoothRelay: CBCentralManagerDelegate, CBPeripheralDelegate {
         rssi RSSI: NSNumber
     ) {
         MainActor.assumeIsolated {
-            guard self.peripheral == nil, !rejected.contains(peripheral.identifier) else { return }
+            guard self.peripheral == nil, !rejected.contains(peripheral.identifier),
+                  mayBeTarget(peripheral.identifier) else { return }
             connect(peripheral)
         }
     }
@@ -377,7 +430,7 @@ extension DeviceBluetoothRelay: CBCentralManagerDelegate, CBPeripheralDelegate {
                 if self.peripheral === peripheral { reject(peripheral) }
                 return
             }
-            peripheral.discoverCharacteristics([Self.controlUUID], for: service)
+            peripheral.discoverCharacteristics([Self.controlUUID, Self.descriptorUUID], for: service)
         }
     }
 
@@ -392,7 +445,49 @@ extension DeviceBluetoothRelay: CBCentralManagerDelegate, CBPeripheralDelegate {
                 if self.peripheral === peripheral { reject(peripheral) }
                 return
             }
+            // An unrecognised peripheral may be another paperGIF controller; confirm its
+            // deviceID before registering so actions and controls reach the right device.
+            if target?.deviceID != nil, peripheralDeviceIDs[peripheral.identifier.uuidString] == nil,
+               let descriptor = service.characteristics?.first(where: { $0.uuid == Self.descriptorUUID }) {
+                identifying = (descriptor, control, DeviceBLEDescriptorReader())
+                peripheral.writeValue(DeviceBLEDescriptorReader.offsetRequest(0), for: descriptor, type: .withResponse)
+                return
+            }
             peripheral.setNotifyValue(true, for: control)
+        }
+    }
+
+    nonisolated func peripheral(
+        _ peripheral: CBPeripheral,
+        didWriteValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        MainActor.assumeIsolated {
+            guard self.peripheral === peripheral, characteristic.uuid == Self.descriptorUUID,
+                  identifying != nil else { return }
+            if error != nil { reject(peripheral); return }
+            peripheral.readValue(for: characteristic)
+        }
+    }
+
+    private func continueIdentifying(_ peripheral: CBPeripheral, value: Data) {
+        guard var identity = identifying else { return }
+        do {
+            guard let descriptor = try identity.reader.append(value) else {
+                identifying = identity
+                peripheral.writeValue(DeviceBLEDescriptorReader.offsetRequest(identity.reader.nextOffset),
+                                      for: identity.descriptor, type: .withResponse)
+                return
+            }
+            identifying = nil
+            Self.rememberPeripheral(peripheral.identifier, deviceID: descriptor.deviceID)
+            guard descriptor.deviceID == target?.deviceID else {
+                reject(peripheral)
+                return
+            }
+            peripheral.setNotifyValue(true, for: identity.control)
+        } catch {
+            reject(peripheral)
         }
     }
 
@@ -424,8 +519,12 @@ extension DeviceBluetoothRelay: CBCentralManagerDelegate, CBPeripheralDelegate {
         error: Error?
     ) {
         MainActor.assumeIsolated {
-            guard self.peripheral === peripheral, error == nil,
-                  characteristic.uuid == Self.controlUUID, let value = characteristic.value else { return }
+            guard self.peripheral === peripheral else { return }
+            if characteristic.uuid == Self.descriptorUUID, identifying != nil {
+                if error != nil { reject(peripheral) } else { continueIdentifying(peripheral, value: characteristic.value ?? Data()) }
+                return
+            }
+            guard error == nil, characteristic.uuid == Self.controlUUID, let value = characteristic.value else { return }
             channel.receive(value)
         }
     }
@@ -440,6 +539,8 @@ extension DeviceBluetoothRelay: CBCentralManagerDelegate, CBPeripheralDelegate {
         guard self.peripheral === peripheral else { return }
         channel.close()
         controlTransport = nil
+        identifying = nil
+        release(peripheral)
         self.peripheral = nil
         guard !lanReachable else { return }
         state = .searching

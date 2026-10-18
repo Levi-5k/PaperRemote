@@ -69,6 +69,7 @@ internal static class Program
         builder.Services.AddSingleton<BleNearbyDeviceService>();
         builder.Services.AddSingleton<RemoteEditorStore>();
         builder.Services.AddHostedService<BleRelayService>();
+        builder.Services.AddHostedService<DialStreamService>();
         builder.Services.AddSingleton<NetworkDiscoveryService>();
         builder.Services.AddSingleton<ModuleCatalogService>();
         builder.Services.AddSingleton<HomeAccessoryCatalog>();

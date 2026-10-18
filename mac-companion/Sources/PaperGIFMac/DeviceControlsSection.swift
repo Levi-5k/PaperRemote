@@ -39,7 +39,10 @@ struct DeviceControlsSection: View {
             if let error = model.error {
                 Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
-            ForEach(model.groups, id: \.name) { group in
+            if DeviceDialView.isSupported(by: descriptor.controls) {
+                DeviceDialView(model: model)
+            }
+            ForEach(model.groups.filter { !DeviceDialView.isSupported(by: descriptor.controls) || $0.name != "Dial" }, id: \.name) { group in
                 Text(group.name).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                 ForEach(group.controls) { control in
                     row(for: control)
@@ -50,6 +53,7 @@ struct DeviceControlsSection: View {
         .task(id: configurationKey) {
             configure()
             await model.refresh()
+            await model.monitorDial()
         }
         .confirmationDialog(
             confirming.map { "Run “\($0.name)” on \(descriptor.name)?" } ?? "",

@@ -93,6 +93,10 @@ struct InputEvent {
     const char* event;
     double value;
     uint32_t sequence;
+    bool relative;
+    InputEvent(const char* id = "", const char* name = "", double position = 0,
+               uint32_t serial = 0, bool relativeValue = false)
+        : inputID(id), event(name), value(position), sequence(serial), relative(relativeValue) {}
 };
 class DisplayDriver {
 public:

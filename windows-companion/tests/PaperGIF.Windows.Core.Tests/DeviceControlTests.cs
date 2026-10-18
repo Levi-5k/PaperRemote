@@ -26,6 +26,39 @@ public sealed class DeviceControlTests
     private static DeviceControl Range(double minimum, double maximum, double step) =>
         new("level", "Level", DeviceControl.Range, Minimum: minimum, Maximum: maximum, Step: step);
 
+    [Fact]
+    public void SuperminiDialContractIncludesLivePositionAllModesAndPrecision()
+    {
+        var descriptor = DeviceDescriptor.Parse(Fixture("device-descriptor-v1-supermini-dial.json"));
+        var controls = descriptor.DeviceControls.ToDictionary(control => control.Id);
+        Assert.Equal(["single", "multi", "continuous"], controls["dialMode"].Options!.Select(option => option.Value));
+        Assert.True(controls["dialPosition"].IsReadOnly);
+        Assert.True(controls["dialAngle"].IsReadOnly);
+        Assert.Equal(0.13, controls["dialStep"].Snap(0.125), 6);
+        Assert.Equal(100, controls["dialTurns"].Maximum);
+        Assert.Equal(-100, controls["dialTurns"].Minimum);
+        Assert.Equal(360, controls["dialSweep"].Maximum);
+        Assert.Equal(-360, controls["dialSweep"].Minimum);
+        Assert.True(controls["dialSweep"].Accepts(DeviceControlJson.Value(-90d)));
+        Assert.False(controls.ContainsKey("dialReversed"));
+        Assert.Equal(["http", "ble"], descriptor.EffectiveTransports());
+        foreach (var mode in new[] { "single", "multi", "continuous" })
+            Assert.True(controls["dialMode"].Accepts(DeviceControlJson.Value(mode)));
+        Assert.True(controls["dialPosition"].Accepts(DeviceControlJson.Value(-720d)));
+    }
+
+    [Theory]
+    [InlineData(90, 0, 45, 90)]
+    [InlineData(350, 0, 5, -10)]
+    [InlineData(20, 0, -5, 20)]
+    [InlineData(300, 30, -60, -90)]
+    [InlineData(10, 0, 350, 360)]
+    [InlineData(350, 0, -350, -360)]
+    [InlineData(0.2, 0, 3, 1)]
+    [InlineData(359.8, 0, -3, -1)]
+    public void DialEndStopCanBeDraggedToEitherSideOfStart(double drag, double start, double previous, double expected) =>
+        Assert.Equal(expected, PaperGIF.Windows.Core.DialGeometry.SignedTravel(drag, start, previous), 6);
+
     // Descriptor parsing and validation
 
     [Fact]

@@ -447,11 +447,11 @@ public final class DeviceControlsModel: ObservableObject {
         isLoading = false
     }
 
-    public func refresh() async {
+    public func refresh(showLoading: Bool = true) async {
         guard !controls.isEmpty else { return }
         let operation = generation
-        isLoading = true
-        defer { if operation == generation { isLoading = false } }
+        if showLoading { isLoading = true }
+        defer { if showLoading, operation == generation { isLoading = false } }
         do {
             let (snapshot, transport) = try await run { try await $0.snapshot() }
             guard operation == generation else { return }
@@ -459,6 +459,19 @@ public final class DeviceControlsModel: ObservableObject {
         } catch {
             guard operation == generation, !(error is CancellationError) else { return }
             self.error = error.localizedDescription
+        }
+    }
+
+    /// BLE subscribers receive 10 Hz pushes; Wi-Fi views poll only while visible.
+    public func monitorDial() async {
+        guard DeviceDialView.isSupported(by: controls) else { return }
+        let operation = generation
+        while !Task.isCancelled, operation == generation {
+            do { try await Task.sleep(for: .milliseconds(200)) }
+            catch { return }
+            guard operation == generation else { return }
+            if activeTransport == "Bluetooth" || isLoading || !pendingIDs.isEmpty { continue }
+            await refresh(showLoading: false)
         }
     }
 

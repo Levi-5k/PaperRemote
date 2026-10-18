@@ -41,7 +41,7 @@ private func routedIPv4Address() -> String? {
     return nil
 }
 
-private struct RemoteRequest: Decodable {
+struct RemoteRequest: Decodable {
     let type: String
     let host: String?
     let text: String
@@ -632,6 +632,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateMenuItem: NSMenuItem!
     private var updateService: UpdateService?
     private var server: CompanionServer?
+    private var dialStream: DialStreamReceiver?
     private let netHomeService = NetHomeService()
     private let openBuildsService = OpenBuildsControlService()
     private let moduleRuntimeHost = ModuleRuntimeHost()
@@ -639,6 +640,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var editorStore: RemoteEditorStore?
     private var bluetoothRelay: DeviceBluetoothRelay?
     private var bluetoothRelayObservation: AnyCancellable?
+    /// Relays for saved Bluetooth controllers other than the one selected in the editor,
+    /// so every controller (e.g. an M5Paper and a dial) can reach this Mac at once.
+    private var backgroundRelays: [String: DeviceBluetoothRelay] = [:]
+    private var backgroundRelayObservation: AnyCancellable?
+    private var backgroundDeviceDiscovery: DeviceDiscovery?
+    private var backgroundDiscoveryObservation: AnyCancellable?
     private var moduleCatalog: ModuleCatalog?
     private var matterDevices: MatterDeviceManager?
     private var editorWindowController: RemoteEditorWindowController?
@@ -652,6 +659,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     /// moduleStateQueue only. Unreachable devices are skipped for a while so presses aren't stuck behind reads.
     private var moduleStateRetryAfter: [String: Date] = [:]
     private let moduleStateQueue = DispatchQueue(label: "paperGIF.companion.module-state", qos: .utility)
+    /// Serial so rapid relayed values (e.g. dial volume) are applied in the order the device sent them.
+    private let relayActionQueue = DispatchQueue(label: "paperGIF.companion.relay-actions", qos: .userInitiated)
     private var nowPlayingNotificationObservers: [NSObjectProtocol] = []
     private var distributedNowPlayingObservers: [NSObjectProtocol] = []
     private var mediaRemoteRegistrationHandle: UnsafeMutableRawPointer?
@@ -797,6 +806,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     ?? TextSourceBatchResponse(items: [])
             }
         )
+        dialStream?.stop()
+        dialStream = DialStreamReceiver(port: port, token: token) { [weak self] request in
+            _ = self?.perform(request)
+        }
+        do {
+            try dialStream?.start()
+        } catch {
+            DiagnosticLog.error("Dial stream listener failed to start", error: error)
+        }
         do {
             try server?.start()
             statusMenuItem.title = "Ready on \(ProcessInfo.processInfo.hostName):\(port)"
@@ -923,14 +941,49 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             .combineLatest(devices.$address)
             .receive(on: RunLoop.main)
             .sink { [weak relay] descriptor, address in
-                // Legacy M5Paper descriptors predate `transports` but always have BLE.
-                let hasBluetooth = descriptor.map {
-                    $0.capabilities.transports == nil ? $0.isM5Paper : $0.capabilities.supports(transport: "ble")
-                } ?? false
-                relay?.watch(hasBluetooth && !address.isEmpty
-                    ? DeviceBluetoothRelay.Target(address: address, token: relayToken) : nil)
+                // Bluetooth-only controllers have no address and relay over Bluetooth right away.
+                relay?.watch(descriptor.flatMap { Self.supportsBluetooth($0) ? DeviceBluetoothRelay.Target(
+                    address: address, token: relayToken, deviceID: $0.deviceID) : nil })
             }
+        backgroundRelayObservation = devices.$records
+            .combineLatest(devices.$descriptor)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] records, selected in
+                self?.updateBackgroundRelays(records: records, selectedID: selected?.deviceID, token: relayToken)
+            }
+        // Keeps saved addresses current without the editor window open, so a board that joins
+        // Wi-Fi later is used over the network and its Bluetooth relay goes idle.
+        let discovery = DeviceDiscovery()
+        backgroundDeviceDiscovery = discovery
+        backgroundDiscoveryObservation = discovery.$devices
+            .receive(on: RunLoop.main)
+            .sink { [weak store] found in
+                guard let store else { return }
+                Task { await store.adoptDiscoveredAddresses(found.map(\.address)) }
+            }
+        discovery.start(preferredAddress: store.deviceAddress)
         return store
+    }
+
+    // Legacy M5Paper descriptors predate `transports` but always have BLE.
+    private static func supportsBluetooth(_ descriptor: DeviceDescriptor) -> Bool {
+        descriptor.capabilities.transports == nil ? descriptor.isM5Paper : descriptor.capabilities.supports(transport: "ble")
+    }
+
+    @MainActor private func updateBackgroundRelays(records: [SavedDevice], selectedID: String?, token: String) {
+        let wanted = Dictionary(records.filter { $0.id != selectedID && Self.supportsBluetooth($0.descriptor) }
+            .map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for (id, relay) in backgroundRelays where wanted[id] == nil {
+            relay.watch(nil)
+            backgroundRelays[id] = nil
+        }
+        for (id, record) in wanted {
+            let relay = backgroundRelays[id] ?? DeviceBluetoothRelay(actionHandler: { [weak self] body in
+                await self?.performRelayedAction(body) ?? false
+            })
+            backgroundRelays[id] = relay
+            relay.watch(.init(address: record.address, token: token, deviceID: id))
+        }
     }
 
     @MainActor private func matterDeviceManager() -> MatterDeviceManager {
@@ -1086,9 +1139,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Runs an action the device delivered over the Bluetooth relay instead of HTTP.
     @MainActor private func performRelayedAction(_ body: Data) async -> Bool {
         guard let request = try? JSONDecoder().decode(RemoteRequest.self, from: body) else { return false }
-        DiagnosticLog.info("Bluetooth relay action: \(request.type)")
+        // Continuous adjustments arrive many times per second; don't log each one to disk.
+        if !(request.type == "macMedia" && request.text == "volume") {
+            DiagnosticLog.info("Bluetooth relay action: \(request.type)")
+        }
         return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            relayActionQueue.async { [weak self] in
                 continuation.resume(returning: self?.perform(request).succeeded ?? false)
             }
         }
@@ -1692,6 +1748,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return device
     }
 
+    private func setOutputVolumeScalar(_ scalar: Float32) -> Bool {
+        let device = defaultOutputDevice()
+        guard device != AudioObjectID(kAudioObjectUnknown) else { return false }
+        func set(_ element: AudioObjectPropertyElement) -> Bool {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element
+            )
+            var settable: DarwinBoolean = false
+            guard AudioObjectHasProperty(device, &address),
+                  AudioObjectIsPropertySettable(device, &address, &settable) == noErr, settable.boolValue else {
+                return false
+            }
+            var value = min(max(scalar, 0), 1)
+            return AudioObjectSetPropertyData(
+                device, &address, 0, nil, UInt32(MemoryLayout.size(ofValue: value)), &value
+            ) == noErr
+        }
+        if set(kAudioObjectPropertyElementMain) { return true }
+        let left = set(1), right = set(2)
+        return left || right
+    }
+
     private func outputVolumeValue() -> Int? {
         let device = defaultOutputDevice()
         guard device != AudioObjectID(kAudioObjectUnknown) else { return nil }
@@ -1988,6 +2068,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setOutputVolume(_ value: Int) -> Bool {
+        // CoreAudio is in-process and immediate; launching osascript per knob tick
+        // took ~150 ms and let rapid updates finish out of order.
+        if setOutputVolumeScalar(Float32(value.clamped(to: 0...255)) / 255) { return true }
         let percentage = Int((Double(value.clamped(to: 0...255)) / 255 * 100).rounded())
         do {
             let result = try BoundedProcessRunner.run(

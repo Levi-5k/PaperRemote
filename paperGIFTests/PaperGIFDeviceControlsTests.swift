@@ -472,3 +472,45 @@ struct PaperGIFDeviceControlsTests {
         #expect(PaperGIFDeviceControlRow.format(nil, for: mode) == "—")
     }
 }
+
+@MainActor
+struct PaperGIFDeviceWiFiStatusTests {
+    typealias Status = PaperGIFBluetoothManager.DeviceWiFiStatus
+
+    @Test func parsesConnectedFrame() {
+        let frame = Data([0x3A, 2, 0, 0, 192, 168, 50, 77] + Array("Home".utf8))
+        #expect(Status(frame: frame) == Status(state: .connected(ipAddress: "192.168.50.77"), ssid: "Home"))
+    }
+
+    @Test func mapsFailureReasons() {
+        #expect(Status(frame: Data([0x3A, 3, 202, 0, 0, 0, 0, 0]))?.state == .failed("Incorrect password."))
+        #expect(Status(frame: Data([0x3A, 3, 201, 0, 0, 0, 0, 0]))?.state ==
+                .failed(Status.failureMessage(reason: 201)))
+        #expect(Status(frame: Data([0x3A, 3, 0x01, 0xFF, 0, 0, 0, 0]))?.state ==
+                .failed(Status.failureMessage(reason: 0xFF01)))
+        #expect(Status(frame: Data([0x3A, 0, 0, 0, 0, 0, 0, 0]))?.state == .notConfigured)
+    }
+
+    @Test func rejectsMalformedFrames() {
+        #expect(Status(frame: Data([0x3A, 2, 0])) == nil)
+        #expect(Status(frame: Data([0x3A, 9, 0, 0, 0, 0, 0, 0])) == nil)
+        #expect(Status(frame: Data([0x36, 2, 0, 0, 0, 0, 0, 0])) == nil)
+    }
+}
+
+struct PaperGIFLiveDialTests {
+    typealias LiveDial = PaperGIFBluetoothManager.LiveDial
+
+    @Test func parsesAngleAndSignedPosition() {
+        // 123.45° shaft angle, -720.50° position (firmware dial_stream::encodeLiveDial layout).
+        let position = UInt32(bitPattern: -72050)
+        let frame = Data([0x62, 0x39, 0x30, UInt8(position & 0xFF), UInt8(position >> 8 & 0xFF),
+                          UInt8(position >> 16 & 0xFF), UInt8(position >> 24)])
+        #expect(LiveDial(frame: frame) == LiveDial(angle: 123.45, position: -720.5))
+    }
+
+    @Test func rejectsShortOrForeignFrames() {
+        #expect(LiveDial(frame: Data([0x62, 0, 0])) == nil)
+        #expect(LiveDial(frame: Data([0x60, 0, 0, 0, 0, 0, 0])) == nil)
+    }
+}

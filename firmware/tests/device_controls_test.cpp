@@ -260,6 +260,23 @@ static void descriptorTests(const std::string& directory) {
     assert(supermini["inputs"][2]["kind"] == "dial");
     assert(supermini["inputs"][2]["minimum"] == 0);
     assert(supermini["inputs"][2]["maximum"] == 16383);
+#if defined(PAPERGIF_SUPERMINI_S3)
+    assert(reference_controls::count == 16);
+    assert(supermini["controls"][reference_controls::dialLowLatency]["kind"] == "toggle");
+    assert(supermini["controls"][reference_controls::dialRate]["minimum"] == 15);
+    assert(supermini["controls"][reference_controls::dialRate]["maximum"] == 500);
+    assert(std::string(supermini["controls"][reference_controls::dialZero]["id"] | "") == "dialZero");
+    assert(supermini["controls"][reference_controls::dialMode]["options"].size() == 3);
+    assert(supermini["controls"][reference_controls::dialPosition]["readOnly"] == true);
+    assert(supermini["controls"][reference_controls::dialTurns]["maximum"] == 100);
+    assert(supermini["controls"][reference_controls::dialStep]["minimum"] == 0.01);
+    const Control* selected = nullptr;
+    Value selectedValue;
+    const std::string mode = R"({"id":"dialMode","value":"continuous"})";
+    assert(parseSetRequest(mode.c_str(), mode.size(), reference_controls::controls,
+        reference_controls::count, selected, selectedValue) == Status::ok);
+    assert(!std::strcmp(selectedValue.text, "continuous"));
+#endif
     JsonDocument plain;
     writeDeviceDescriptor(plain, m5paper(), "papergif-000000000003", "test");
     assert(plain["controls"].isUnbound() && plain["capabilities"]["transports"].size() == 2);

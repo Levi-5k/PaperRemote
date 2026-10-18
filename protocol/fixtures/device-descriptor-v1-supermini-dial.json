@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "deviceID": "fixture-supermini-dial",
+  "name": "ESP32-S3 SuperMini with MT6701",
+  "manufacturer": "PaperGIF",
+  "boardID": "paperremote.supermini-s3-mt6701",
+  "hardwareRevision": "1",
+  "firmwareVersion": "test",
+  "display": null,
+  "inputs": [
+    {"id": "button-1", "name": "Button 1", "kind": "button", "events": ["press", "hold", "release"]},
+    {"id": "button-2", "name": "Button 2", "kind": "button", "events": ["press", "hold", "release"]},
+    {"id": "dial-1", "name": "MT6701 dial", "kind": "dial", "events": ["change"], "minimum": 0, "maximum": 16383}
+  ],
+  "layout": {
+    "width": 320, "height": 160,
+    "inputs": [
+      {"id": "button-1", "x": 48, "y": 88, "width": 48, "height": 48},
+      {"id": "button-2", "x": 224, "y": 88, "width": 48, "height": 48},
+      {"id": "dial-1", "x": 112, "y": 32, "width": 96, "height": 96}
+    ]
+  },
+  "capabilities": {
+    "profileVersions": [6, 7], "media": false, "firmwareUpdate": false,
+    "maxProfileBytes": 32768, "maxControls": 24, "maxPages": 8, "transports": ["http", "ble"]
+  },
+  "controls": [
+    {"id": "wifiConnected", "name": "Wi-Fi connected", "kind": "toggle", "group": "Status", "readOnly": true},
+    {"id": "wifiSignal", "name": "Wi-Fi signal", "kind": "range", "group": "Status", "minimum": -100, "maximum": 0, "step": 1, "unit": "dBm", "readOnly": true},
+    {"id": "restart", "name": "Restart", "kind": "action", "group": "Device", "confirm": true},
+    {"id": "dialPresent", "name": "Dial sensor connected", "kind": "toggle", "group": "Dial", "readOnly": true},
+    {"id": "dialPosition", "name": "Live position", "kind": "range", "group": "Dial", "minimum": -1000000000000, "maximum": 1000000000000, "step": 0.01, "unit": "deg", "readOnly": true},
+    {"id": "dialAngle", "name": "Shaft angle", "kind": "range", "group": "Dial", "minimum": 0, "maximum": 360, "step": 0.01, "unit": "deg", "readOnly": true},
+    {"id": "dialOutput", "name": "Dial output", "kind": "range", "group": "Dial", "minimum": -1000000000000, "maximum": 1000000000000, "step": 0.01, "unit": "%", "readOnly": true},
+    {"id": "dialMode", "name": "Rotation mode", "kind": "select", "group": "Dial", "options": [
+      {"value": "single", "name": "Bounded single turn"},
+      {"value": "multi", "name": "Bounded multi-turn"},
+      {"value": "continuous", "name": "Continuous relative"}
+    ]},
+    {"id": "dialStart", "name": "Start angle", "kind": "range", "group": "Dial", "minimum": 0, "maximum": 359.9, "step": 0.1, "unit": "deg"},
+    {"id": "dialSweep", "name": "Single-turn end stop", "kind": "range", "group": "Dial", "minimum": -360, "maximum": 360, "step": 0.1, "unit": "deg"},
+    {"id": "dialTurns", "name": "Multi-turn end stop", "kind": "range", "group": "Dial", "minimum": -100, "maximum": 100, "step": 0.1, "unit": "rev"},
+    {"id": "dialStep", "name": "Output resolution", "kind": "range", "group": "Dial", "minimum": 0.01, "maximum": 10, "step": 0.01, "unit": "%"},
+    {"id": "dialJitter", "name": "Jitter filter", "kind": "range", "group": "Dial", "minimum": 0, "maximum": 5, "step": 0.01, "unit": "deg"},
+    {"id": "dialZero", "name": "Set current position to start", "kind": "action", "group": "Dial"}
+  ]
+}

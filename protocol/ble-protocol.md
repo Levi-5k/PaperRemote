@@ -102,6 +102,28 @@ installation until every expected byte is present.
 | `0x36` | Device to client | Home Wi-Fi status |
 | `0x37` | Client to device | Request home Wi-Fi status |
 | `0x38` | Client to device | Prepare home-Wi-Fi upload |
+| `0x39` | Client to device | Native boards: join network |
+| `0x3A` | Device to client | Native boards: station status |
+
+Native (non-M5Paper) boards scan with `0x33` and reply `[0x34, count]`
+once the asynchronous scan finishes (strongest first, up to 20, hidden networks
+omitted). `[0x35, index]` returns `[0x35, index, rssi int8, secure 0|1, ssid…]`;
+an invalid index returns `0x7F`.
+
+`[0x39, ssidLength, ssid…, password…]` stores the network on the device and
+joins it. SSIDs are 1–32 bytes; the password is empty (open network) or 8–63
+bytes. A device with a profile accepts this only from a connection registered
+as a relay with one of the profile's tokens (`0x70`).
+
+`[0x3A, state, reasonLo, reasonHi, ip0…ip3, ssid…]` reports station state:
+`0` not configured, `1` connecting, `2` connected (IP valid), `3` failed. It is
+pushed to every subscriber on change and in reply to `0x37`/`0x39`. Reasons are
+ESP-IDF disconnect codes (`15`/`202`/`204` wrong password, `201` network not
+found, `203` association refused) or request errors (`0xFF01` unauthorized,
+`0xFF02` invalid request, `0xFF03` storage failure). Rejected join requests are
+reported only to the sender and do not change the tracked state. Networks
+chosen this way take precedence over a profile's `wifiSSID` until a profile
+naming a network is installed.
 
 ## iPhone Media Commands
 
@@ -126,6 +148,34 @@ offset  size  value
 
 The client sends state after connection and playback changes, and periodically
 while progress changes. Firmware advances the timeline locally between packets.
+
+## Live Dial Stream
+
+When a dial's low latency mode is enabled, native boards notify subscribed
+clients on the control characteristic at the configured rate (15–500/s,
+default 75), sending only changes plus one repeat after motion stops:
+
+```text
+offset  size  value
+0       1     0x62
+1       2     shaft angle, unsigned little-endian centidegrees (0–35999)
+3       4     tracked position, signed little-endian centidegrees
+```
+
+Full control snapshots continue at their normal rate; clients prefer the
+stream for live displays while it is arriving.
+
+Computers on the same Wi-Fi receive streamed dial actions as UDP datagrams on
+their companion action port:
+
+```json
+{"type":"paperGIF.dialStream","version":1,"boot":123,"seq":42,"token":"…","action":{…}}
+```
+
+`boot` is random per device boot and `seq` increments per datagram; receivers
+drop datagrams older than the newest seen for that sender and boot, and verify
+`token` like an HTTP action. `action` is the same JSON as an HTTP remote
+action. Datagrams are at most 2048 bytes.
 
 ## State-Machine Requirements
 

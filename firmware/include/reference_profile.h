@@ -142,6 +142,14 @@ inline bool parseNativeProfile(JsonDocument& json, NativeProfile& output, const 
     }
     return true;
 }
+// Bindings express media volume/seek as 0-100 percent, but computers and phones receive
+// those actions on the M5Paper slider's 0-255 scale.
+inline double mediaWireValue(const NativeAction& action, double percent) {
+    const bool media = !std::strcmp(action.type, "macMedia") || !std::strcmp(action.type, "iPhoneMedia");
+    const bool scaled = !std::strcmp(action.text, "volume") || !std::strcmp(action.text, "seek");
+    return media && scaled ? std::fmax(0.0, std::fmin(255.0, percent * 255 / 100)) : percent;
+}
+
 template <typename Dispatch>
 void dispatchHardwareInput(NativeProfile& profile, const BoardInfo& board, const InputEvent& event,
                            Dispatch dispatch) {
@@ -156,8 +164,12 @@ void dispatchHardwareInput(NativeProfile& profile, const BoardInfo& board, const
         if (!input || !applyInput(next, *input, event, value)) continue;
         NativeAction action = binding.action;
         if (next.mode != BindingMode::action) {
-            action.value = static_cast<int32_t>(std::round(value));
+            action.value = static_cast<int32_t>(std::round(mediaWireValue(action, value)));
             action.valueTenths = static_cast<int32_t>(std::fmax(INT32_MIN, std::fmin(INT32_MAX, value * 10)));
+            if (next.value == binding.state.value) {
+                binding.state = next;
+                continue;
+            }
         }
         if (dispatch(binding, action)) binding.state = next;
     }

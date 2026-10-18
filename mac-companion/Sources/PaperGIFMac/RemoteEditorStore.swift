@@ -60,6 +60,7 @@ final class RemoteEditorStore: ObservableObject {
     @Published private(set) var netHomeError: String?
     let localComputer: RemoteComputer
     let bluetoothRelay: DeviceBluetoothRelay
+    private var probedDiscoveryAddresses: Set<String> = []
     let devices = DeviceSession(storageURL: FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("paperGIF Mac/devices.json"))
@@ -683,6 +684,48 @@ final class RemoteEditorStore: ObservableObject {
             return false
         }
         return true
+    }
+
+    /// Records the network address of saved devices found by discovery, matched by stable
+    /// device ID, so a board that joined Wi-Fi after being saved over Bluetooth is reachable.
+    func adoptDiscoveredAddresses(_ addresses: [String]) async {
+        for address in addresses where probedDiscoveryAddresses.insert(address).inserted {
+            guard !devices.records.contains(where: { $0.address == address }) else { continue }
+            let identified: (DeviceDescriptor, DeviceAdapterKind)
+            do {
+                identified = try await NativeDeviceAdapter().identify(address: address)
+            } catch {
+                probedDiscoveryAddresses.remove(address)
+                let blocked = (error as? URLError)?.code == .notConnectedToInternet
+                DiagnosticLog.info(blocked
+                    ? "Cannot reach \(address): allow paperGIF Mac in System Settings > Privacy & Security > Local Network"
+                    : "Cannot identify device at \(address): \(error.localizedDescription)")
+                continue
+            }
+            let (descriptor, kind) = identified
+            guard kind == .native,
+                  let record = devices.records.first(where: { $0.id == descriptor.deviceID }),
+                  record.address != address else { continue }
+            do {
+                _ = try devices.remember(descriptor, address: address)
+                DiagnosticLog.info("\(descriptor.name) found on the network at \(address)")
+            } catch {
+                DiagnosticLog.info("Could not save address for \(descriptor.name): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Switches to a saved device. Bluetooth-only devices have no address, so they are
+    /// selected from their saved descriptor instead of being probed over HTTP (which would
+    /// fail and drop the Bluetooth relay).
+    func selectSavedDevice(id: String) async {
+        guard let record = devices.records.first(where: { $0.id == id }) else { return }
+        if record.address.isEmpty {
+            await useBluetoothDevice(record.descriptor)
+        } else {
+            deviceAddress = record.address
+            await loadFromDevice()
+        }
     }
 
     /// Uses a device identified over Bluetooth that is not reachable on the network.

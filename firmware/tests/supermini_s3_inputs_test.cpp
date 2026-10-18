@@ -6,7 +6,7 @@
 uint32_t now = 0;
 int pins[40]{};
 bool mt6701Present = true;
-uint16_t mt6701RawAngle = 1000;
+uint16_t mt6701RawAngle = 16384 - 1000;  // reports 1000 after mirroring
 uint32_t wireClock = 0;
 int wireSDA = -1, wireSCL = -1;
 uint8_t wireAddress = 0, wireRegister = 0;
@@ -15,6 +15,7 @@ int responseIndex = 0, responseCount = 0;
 TwoWire Wire;
 
 uint32_t millis() { return now; }
+uint32_t micros() { return now * 1000; }
 void pinMode(int, int) {}
 int digitalRead(int pin) { return pins[pin]; }
 int analogRead(int) { return 0; }
@@ -65,19 +66,20 @@ int main() {
     now += 20;
     assert(inputs.poll(event) && !std::strcmp(event.inputID, "button-2"));
 
-    mt6701RawAngle = 1040;
+    mt6701RawAngle = 16384 - 1040;  // reported angles are mirrored
     now += 20;
     assert(inputs.poll(event) && !std::strcmp(event.inputID, "dial-1"));
-    assert(!std::strcmp(event.event, "change") && event.value == 1040);
-    mt6701RawAngle = 1042;
+    assert(!std::strcmp(event.event, "change") && event.value > 1000 && event.value < 1050);
+    mt6701RawAngle = 16384 - 1042;
     now += 20;
     assert(!inputs.poll(event));
-    mt6701RawAngle = 16380;
+    mt6701RawAngle = 4;
     now += 20;
-    assert(inputs.poll(event) && event.value == 16380);
-    mt6701RawAngle = 3;
+    // This is a small backwards movement across zero, not a full clockwise turn.
+    assert(inputs.poll(event) && event.value < 10);
+    mt6701RawAngle = 16384 - 3;
     now += 20;
-    assert(inputs.poll(event) && event.value == 3);
+    assert(!inputs.poll(event));  // Noise inside the angular hysteresis band.
 
     inputs.release();
     now += 20;
