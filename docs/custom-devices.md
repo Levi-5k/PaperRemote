@@ -118,10 +118,17 @@ changed snapshots at most 10 times per second; visible Wi-Fi views poll every
   decrements the existing value binding. Revolutions per output range sets
   sensitivity; there are no angular stops. The assigned action's own minimum
   and maximum still apply.
-- **Precision:** Output resolution is 0.01–10% of the assigned output range.
+- **Sensing:** the full 14-bit MT6701 angle (16,384 counts per turn) is read
+  about every millisecond, and every reading within an output period (5 ms, or
+  one send period in low latency mode) is averaged, wraparound-safe, into a
+  single sub-count position. Nothing is sent while the averaged position is
+  still; the settled position after movement is always sent.
+- **Precision:** Output resolution is 0.01–10% of the assigned output range
+  (default 0.01%).
   The binding's existing Step is the final output-unit increment (for example,
   volume percentage points). Sub-step relative movements accumulate rather than
-  being discarded. Jitter filter is 0–5 degrees of angular hysteresis; slow
+  being discarded. Jitter filter is 0–5 degrees of angular hysteresis (default 0.05,
+  applied after averaging); slow
   deliberate movement is retained. Older firmware's "reverse direction" setting
   is migrated to a negative end stop.
 - **Set current position to start** calibrates the origin to the current shaft

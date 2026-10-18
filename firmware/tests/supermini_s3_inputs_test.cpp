@@ -66,20 +66,35 @@ int main() {
     now += 20;
     assert(inputs.poll(event) && !std::strcmp(event.inputID, "button-2"));
 
+    // The dial is sampled every millisecond and averaged over 5 ms output periods;
+    // run enough polls to complete a full window at the new angle.
+    auto settle = [&](InputEvent& last) {
+        bool emitted = false;
+        for (int i = 0; i < 12; ++i) {
+            now += 1;
+            InputEvent next;
+            if (inputs.poll(next)) { last = next; emitted = true; }
+        }
+        return emitted;
+    };
     mt6701RawAngle = 16384 - 1040;  // reported angles are mirrored
-    now += 20;
-    assert(inputs.poll(event) && !std::strcmp(event.inputID, "dial-1"));
+    assert(settle(event) && !std::strcmp(event.inputID, "dial-1"));
     assert(!std::strcmp(event.event, "change") && event.value > 1000 && event.value < 1050);
-    mt6701RawAngle = 16384 - 1042;
-    now += 20;
-    assert(!inputs.poll(event));
+    mt6701RawAngle = 16384 - 1039;  // A one-count (0.022 deg) reversal is inside the 0.05 deg filter.
+    assert(!settle(event));
     mt6701RawAngle = 4;
-    now += 20;
     // This is a small backwards movement across zero, not a full clockwise turn.
-    assert(inputs.poll(event) && event.value < 10);
-    mt6701RawAngle = 16384 - 3;
-    now += 20;
-    assert(!inputs.poll(event));  // Noise inside the angular hysteresis band.
+    assert(settle(event) && event.value < 10);
+    mt6701RawAngle = 3;
+    assert(!settle(event));  // Noise inside the angular hysteresis band.
+    mt6701RawAngle = 4;
+    assert(!settle(event));
+    // Readings alternating within one window average out instead of emitting.
+    for (int i = 0; i < 24; ++i) {
+        mt6701RawAngle = i % 2 ? 2 : 6;
+        now += 1;
+        assert(!inputs.poll(event));
+    }
 
     inputs.release();
     now += 20;

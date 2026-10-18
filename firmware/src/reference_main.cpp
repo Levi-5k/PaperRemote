@@ -121,15 +121,18 @@ void loadDialConfiguration() {
         Serial.println("Invalid saved dial settings fields");
         return;
     }
+    // Saved numbers can come back as 32-bit floats (0.01 -> 0.0099999998); drop
+    // that noise so values saved at a limit still pass validation.
+    auto clean = [](double value) { return std::round(value * 1e6) / 1e6; };
     candidate.mode = static_cast<DialMode>(mode);
-    candidate.start = json["start"];
-    candidate.sweep = json["sweep"];
-    candidate.turns = json["turns"];
-    candidate.step = json["step"];
-    candidate.jitter = json["jitter"];
+    candidate.start = clean(json["start"]);
+    candidate.sweep = clean(json["sweep"]);
+    candidate.turns = clean(json["turns"]);
+    candidate.step = clean(json["step"]);
+    candidate.jitter = clean(json["jitter"]);
     // Fields added later default when absent from older saved settings.
     candidate.lowLatency = json["lowLatency"] | false;
-    candidate.rate = json["rate"] | dial_stream::defaultRate;
+    candidate.rate = clean(json["rate"] | dial_stream::defaultRate);
     // Older firmware stored a separate reverse flag; fold it into the end stop side.
     if (json["reversed"] | false) {
         candidate.sweep = -candidate.sweep;

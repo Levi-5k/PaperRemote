@@ -206,28 +206,45 @@ public struct DeviceDialView: View {
 private struct DialNumberField: View {
     let control: DeviceControl
     @ObservedObject var model: DeviceControlsModel
-    @State private var draft: Double?
+    // Edit raw text: a number-formatted field reparses each keystroke, so "0." became
+    // "0" mid-typing, and live dial refreshes re-applied the formatting.
+    @State private var draft: String?
+    @FocusState private var focused: Bool
+
+    private var current: Double { model.values[control.id]?.numberValue ?? control.minimum ?? 0 }
+    private var parsed: Double? {
+        draft.flatMap { Double($0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")) }
+    }
 
     var body: some View {
         HStack {
             Text(control.name)
             Spacer()
-            TextField(control.name, value: Binding(
-                get: { draft ?? model.values[control.id]?.numberValue ?? control.minimum ?? 0 },
+            TextField(control.name, text: Binding(
+                get: { draft ?? Self.format(current) },
                 set: { draft = $0 }
-            ), format: .number)
+            ))
+            .focused($focused)
+            #if os(iOS)
+            .keyboardType(.numbersAndPunctuation)
+            #endif
             .multilineTextAlignment(.trailing)
             .frame(width: 85)
             .onSubmit { commit() }
             if let unit = control.unit { Text(unit).foregroundStyle(.secondary) }
-            Button("Apply") { commit() }.disabled(draft == nil)
+            Button("Apply") { commit() }.disabled(parsed == nil)
         }
         .disabled(model.values[control.id] == nil || model.pendingIDs.contains(control.id))
     }
 
+    static func format(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(0...6)).grouping(.never))
+    }
+
     private func commit() {
-        guard let draft else { return }
-        model.set(control, to: .number(draft))
-        self.draft = nil
+        guard let value = parsed else { draft = nil; return }
+        model.set(control, to: .number(value))
+        draft = nil
+        focused = false
     }
 }

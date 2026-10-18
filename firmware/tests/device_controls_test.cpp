@@ -276,6 +276,20 @@ static void descriptorTests(const std::string& directory) {
     assert(parseSetRequest(mode.c_str(), mode.size(), reference_controls::controls,
         reference_controls::count, selected, selectedValue) == Status::ok);
     assert(!std::strcmp(selectedValue.text, "continuous"));
+    // Decimal limits survive ArduinoJson's float storage (0.01 parses as 0.0099999998).
+    const struct { const char* request; double expected; } limits[] = {
+        {R"({"id":"dialStep","value":0.01})", 0.01}, {R"({"id":"dialStep","value":10})", 10},
+        {R"({"id":"dialJitter","value":0.05})", 0.05}, {R"({"id":"dialStart","value":359.9})", 359.9},
+        {R"({"id":"dialTurns","value":-0.1})", -0.1}, {R"({"id":"dialSweep","value":-360})", -360},
+    };
+    for (const auto& limit : limits) {
+        assert(parseSetRequest(limit.request, std::strlen(limit.request), reference_controls::controls,
+            reference_controls::count, selected, selectedValue) == Status::ok);
+        assert(selectedValue.number == limit.expected);
+    }
+    const std::string below = R"({"id":"dialStep","value":0.0099})";
+    assert(parseSetRequest(below.c_str(), below.size(), reference_controls::controls,
+        reference_controls::count, selected, selectedValue) == Status::invalidValue);
 #endif
     JsonDocument plain;
     writeDeviceDescriptor(plain, m5paper(), "papergif-000000000003", "test");

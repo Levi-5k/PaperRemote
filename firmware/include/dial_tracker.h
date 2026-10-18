@@ -14,8 +14,8 @@ struct DialConfiguration {
     // counterclockwise, so moving the end stop past the start reverses the dial.
     double sweep = 360;
     double turns = 3;
-    double step = 0.1;  // Percent of the output range.
-    double jitter = 0.2;  // Degrees of sensor hysteresis.
+    double step = 0.01;  // Percent of the output range.
+    double jitter = 0.05;  // Degrees of sensor hysteresis, applied after averaging.
     // Low latency streams change-only values over UDP/Bluetooth, at most `rate` per second.
     bool lowLatency = false;
     double rate = 75;
@@ -31,6 +31,38 @@ struct DialConfiguration {
     }
     double span() const { return std::abs(mode == DialMode::single ? sweep : turns) * (mode == DialMode::single ? 1 : 360); }
     bool counterclockwise() const { return (mode == DialMode::single ? sweep : turns) < 0; }
+};
+
+// Mean of the 14-bit readings taken during one output period. Each reading is
+// unwrapped against the previous one, so a window spanning 359 -> 0 degrees
+// averages to ~0 rather than 180.
+class AngleAverager {
+    double first = 0, offset = 0, total = 0;
+    uint16_t last = 0;
+    uint32_t count = 0;
+public:
+    void add(uint16_t raw) {
+        if (count == 0) {
+            first = raw;
+            offset = total = 0;
+        } else {
+            int delta = int(raw) - int(last);
+            if (delta > 8192) delta -= 16384;
+            else if (delta < -8192) delta += 16384;
+            offset += delta;
+            total += offset;
+        }
+        last = raw;
+        ++count;
+    }
+    uint32_t samples() const { return count; }
+    // Mean angle in raw counts, 0 <= mean < 16384.
+    double take() {
+        const double mean = std::fmod(first + total / count + 16384, 16384);
+        count = 0;
+        return mean;
+    }
+    void clear() { count = 0; }
 };
 
 // Unwrap before filtering. Clipping discards overshoot so reversing at a soft
@@ -73,8 +105,9 @@ public:
         position = emitted = 0;
         accepted = sensor;
     }
-    bool update(uint16_t raw, double& value) {
-        const double angle = double(raw) * 360 / 16384;
+    // `raw` is in 14-bit sensor counts; fractional counts come from averaging.
+    bool update(double raw, double& value) {
+        const double angle = std::fmod(raw * 360 / 16384, 360);
         if (!initialized) {
             previous = angle;
             sensor = accepted = 0;

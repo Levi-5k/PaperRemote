@@ -102,5 +102,26 @@ int main() {
     rates.rate = 500; assert(rates.valid());
     rates.rate = 14; assert(!rates.valid());
     rates.rate = 501; assert(!rates.valid());
+    assert(rates.jitter == 0.05 && rates.step == 0.01);
+
+    AngleAverager average;
+    for (uint16_t raw : {100, 102, 98, 100}) average.add(raw);
+    assert(average.samples() == 4 && std::abs(average.take() - 100) < 1e-9);
+    assert(average.samples() == 0);
+    for (uint16_t raw : {16382, 16383, 0, 1}) average.add(raw);  // Across 359 -> 0 degrees.
+    const double wrapped = average.take();
+    assert(std::abs(wrapped - 16383.5) < 1e-9);
+    for (uint16_t raw : {1, 0, 16383}) average.add(raw);
+    assert(std::abs(average.take() - 0) < 1e-9 || std::abs(average.take() - 16384) < 1e-9);
+    // Sensor noise averages out, so a still dial with the finer default filter stays silent.
+    DialTracker still;
+    assert(still.configure(DialConfiguration{}));
+    assert(!still.update(8000.0, value));
+    for (int window = 0; window < 200; ++window) {
+        for (int i = 0; i < 13; ++i) average.add(uint16_t(8000 + (i * 7 + window) % 5 - 2));
+        assert(!still.update(average.take(), value));
+    }
+    // Fractional counts carry the averaged resolution into the tracker.
+    assert(still.update(8000.0 + 0.25 * 16384 / 360, value));
     puts("Dial zero-crossing, soft stops, multi-turn, relative, end-stop side, jitter and precision tests passed");
 }

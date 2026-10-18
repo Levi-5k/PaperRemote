@@ -5,6 +5,7 @@
 // Kept C++11 compatible for the ESP32 Arduino toolchain.
 
 #include <ArduinoJson.h>
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -114,10 +115,13 @@ inline double snap(const Control& control, double value) {
         snapped = control.minimum +
             std::round((value - control.minimum) / control.step) * control.step;
     }
-    if (snapped > control.maximum) snapped -= control.step;
+    // Remove binary noise such as 21.300000000000001 before the limit checks, so
+    // a value on the maximum (359.9 -> 359.90000000000003) is not stepped down.
+    auto clean = [](double value) { return std::round(value * 1e6) / 1e6; };
+    snapped = clean(snapped);
+    if (snapped > control.maximum) snapped = clean(snapped - control.step);
     if (snapped < control.minimum) snapped = control.minimum;
-    // Remove binary noise such as 21.300000000000001.
-    return std::round(snapped * 1e6) / 1e6;
+    return snapped;
 }
 
 // Validates a set request value. `present` is false when the request omitted
@@ -138,7 +142,11 @@ inline Status validate(const Control& control, JsonVariantConst value, bool pres
         if (!present || value.is<bool>() || !(value.is<double>() || value.is<long long>()))
             return Status::invalidValue;
         const double number = value.as<double>();
-        if (!std::isfinite(number) || number < control.minimum || number > control.maximum)
+        // ArduinoJson may hold parsed numbers as 32-bit floats (0.01 -> 0.0099999998),
+        // so accept float rounding at a limit; snap() then clamps to the exact bound.
+        auto slack = [](double bound) { return std::max(1.0, std::fabs(bound)) * 1e-6; };
+        if (!std::isfinite(number) || number < control.minimum - slack(control.minimum) ||
+            number > control.maximum + slack(control.maximum))
             return Status::invalidValue;
         out = Value::ofNumber(snap(control, number));
         return Status::ok;

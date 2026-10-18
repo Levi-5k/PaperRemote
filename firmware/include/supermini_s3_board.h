@@ -32,7 +32,9 @@ class SuperMiniS3Inputs final : public InputDriver {
     };
     Button buttons[2]{{PAPERGIF_SUPERMINI_BUTTON_1_PIN, "button-1"},
         {PAPERGIF_SUPERMINI_BUTTON_2_PIN, "button-2"}};
-    uint32_t sequence = 0, dialAt = 0, dialIntervalMicros = 5000;
+    uint32_t sequence = 0, dialAt = 0, sampleAt = 0, dialIntervalMicros = 5000;
+    static constexpr uint32_t sampleIntervalMicros = 1000;
+    AngleAverager average;
     DialTracker dial;
     bool sensorPresent = false;
 
@@ -52,7 +54,7 @@ class SuperMiniS3Inputs final : public InputDriver {
 
 public:
     DialTracker& dialTracker() { return dial; }
-    // Low latency samples faster so a high stream rate has fresh readings to send.
+    // Output period: readings within it are averaged into one tracker update.
     void setDialIntervalMicros(uint32_t interval) { dialIntervalMicros = interval < 1000 ? 1000 : interval; }
     bool dialPresent() const { return sensorPresent; }
     bool readDialForDiagnostics(uint16_t& angle) { return readAngle(angle); }
@@ -100,14 +102,21 @@ public:
             }
         }
 
+        // Sample every ~1 ms and hand the tracker the mean once per output
+        // period. The tracker only emits when the averaged position actually
+        // moves, so a still dial stays silent; the window keeps running, so
+        // the settled position after motion still goes out.
         const uint32_t sampledAt = micros();
-        if (sampledAt - dialAt < dialIntervalMicros) return false;
-        dialAt = sampledAt;
+        if (sampledAt - sampleAt < sampleIntervalMicros) return false;
+        sampleAt = sampledAt;
         uint16_t angle = 0;
         sensorPresent = readAngle(angle);
-        if (!sensorPresent) { dial.resetSensor(); return false; }
+        if (!sensorPresent) { average.clear(); dial.resetSensor(); return false; }
+        if (average.samples() == 0) dialAt = sampledAt;
+        average.add(angle);
+        if (sampledAt - dialAt < dialIntervalMicros) return false;
         double value = 0;
-        if (!dial.update(angle, value)) return false;
+        if (!dial.update(average.take(), value)) return false;
         event = {"dial-1", "change", value, ++sequence,
             dial.configuration().mode == DialMode::continuous};
         return true;
@@ -132,8 +141,9 @@ public:
     DialTracker& dialTracker() { return input.dialTracker(); }
     bool configureDial(const DialConfiguration& settings) {
         if (!input.dialTracker().configure(settings)) return false;
-        const uint32_t streamInterval = uint32_t(1e6 / settings.rate);
-        input.setDialIntervalMicros(settings.lowLatency && streamInterval < 5000 ? streamInterval : 5000);
+        // In low latency the averaging window is one send period, so each send
+        // carries the mean of every reading since the previous one.
+        input.setDialIntervalMicros(settings.lowLatency ? uint32_t(1e6 / settings.rate) : 5000);
         return true;
     }
     bool dialPresent() const { return input.dialPresent(); }
