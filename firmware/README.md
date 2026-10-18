@@ -46,7 +46,7 @@ Compiled input defaults: `PAPERGIF_BUTTON_PIN=25` (active-low pull-up),
 BLE enrollment has no added authentication or bonding enforcement.
 
 The `supermini-s3-mt6701` target uses an ESP32-S3 SuperMini with two active-low
-pull-up buttons and an MT6701 absolute dial: GPIO11/10 are Button 1/2, and
+pull-up buttons and an MT6701 absolute dial: GPIO10/11 are Button 1/2, and
 GPIO13/12 are I2C SDA/SCL. The dial reads the MT6701's 14-bit angle at I2C
 address `0x06` and advertises `dial-1` from 0 to 16383. Build with
 `pio run -d firmware -e supermini-s3-mt6701`. Its explicit
