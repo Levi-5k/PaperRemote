@@ -204,7 +204,8 @@ Artwork travels inside the digest-verified JSON package and is bundled/cached
 with it; no external image host or additional download is required. Keep the
 whole package below 64 KiB for all clients. The SuperMini MT6701 definition
 includes the knob enclosure artwork with its dial above the left/right buttons.
-Boards without artwork retain the generic control preview.
+Boards without artwork retain the generic control preview. A proposed optional
+animated 3D model is described in [3d-board-models.md](3d-board-models.md).
 
 When no catalog entry exists, retain the device's basic geometry. Firmware can
 generate simple geometry from its input list; no detailed artwork is required.
