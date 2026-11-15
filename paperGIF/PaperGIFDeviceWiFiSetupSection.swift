@@ -15,6 +15,11 @@ struct PaperGIFDeviceWiFiSetupSection: View {
     var body: some View {
         Section {
             statusRow
+            LabeledContent("App Connection", value: bluetooth.wifiConnectionState == .connected
+                ? "Wi-Fi" : bluetooth.connectionState == .connected ? "Bluetooth" : "Not connected")
+            if let error = bluetooth.wifiConnectionError {
+                Text(error).font(.footnote).foregroundStyle(.orange)
+            }
             if bluetooth.canSetUpDeviceWiFi {
                 ForEach(bluetooth.nearbyWiFiNetworks) { network in
                     Button { choose(network) } label: { networkRow(network) }

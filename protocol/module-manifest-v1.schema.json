@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/Levi-5k/PaperRemote/main/protocol/module-manifest-v1.schema.json",
-  "title": "paperGIF Module Manifest v1",
+  "title": "OP Remote Module Manifest v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "id", "name", "summary", "version", "author", "controls"],

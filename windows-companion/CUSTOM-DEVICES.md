@@ -1,6 +1,6 @@
 # Windows custom controllers
 
-The Windows companion supports the native PaperRemote HTTP protocol and verified
+The Windows companion supports the native OP Remote HTTP protocol and verified
 legacy M5Paper firmware. It does **not** configure arbitrary third-party products.
 Such products need an explicitly implemented `IDeviceAdapter`; board catalog JSON
 is data, not an executable driver or protocol adapter.
@@ -162,11 +162,11 @@ Limitations:
 ## Bluetooth-only devices in the picker
 
 Some controllers start out reachable only over Bluetooth, for example a fresh
-"paperGIF SuperMini S3" that is still on its setup AP. These now appear in the
+"OP Remote SuperMini S3" that is still on its setup AP. These now appear in the
 device picker as well.
 
 - **Scanning.** While the editor window is visible, the Windows Bluetooth scanner
-  runs and lists peripherals that advertise the PaperRemote service
+  runs and lists peripherals that advertise the OP Remote service
   (`7A230001-7D2A-4C7B-9C42-504749460001`). It takes the device name from the
   scan response. A device that has not been seen for about 30 s is dropped from
   the list. **Scan** restarts both LAN and Bluetooth discovery.

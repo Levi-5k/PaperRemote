@@ -6,7 +6,7 @@
       "name": "Media Controls",
       "summary": "Playback and volume controls for your computer.",
       "version": "1.3.0",
-      "author": "paperGIF",
+      "author": "OP Remote",
       "manifest": "media-controls.json"
     },
     {
@@ -14,7 +14,7 @@
       "name": "Presentation Controls",
       "summary": "Cross-platform slide controls for presenting from your computer.",
       "version": "1.0.0",
-      "author": "paperGIF",
+      "author": "OP Remote",
       "manifest": "presentation-controls.json"
     },
     {
@@ -22,7 +22,7 @@
       "name": "WLED Scenes",
       "summary": "Power, brightness, and preset scenes for a WLED light.",
       "version": "1.0.0",
-      "author": "paperGIF",
+      "author": "OP Remote",
       "manifest": "wled-scenes.json"
     },
     {
@@ -30,7 +30,7 @@
       "name": "OpenBuilds CONTROL",
       "summary": "Local CNC jogging and run-state controls for OpenBuilds CONTROL.",
       "version": "1.5.0",
-      "author": "paperGIF",
+      "author": "OP Remote",
       "manifest": "openbuilds-control.json"
     },
     {
@@ -38,7 +38,7 @@
       "name": "Matter Switch",
       "summary": "Direct local control for a Matter smart switch through the Mac companion.",
       "version": "1.0.0",
-      "author": "paperGIF",
+      "author": "OP Remote",
       "manifest": "matter-switch.json"
     }
   ]

@@ -4,6 +4,8 @@
     <OutputType>WinExe</OutputType>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>PaperGIF.Windows.Host</AssemblyName>
+    <Product>OP Remote</Product>
+    <AssemblyTitle>OP Remote</AssemblyTitle>
     <ApplicationIcon>paperGIF.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>

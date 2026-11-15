@@ -8,7 +8,8 @@ namespace paper_board {
 constexpr size_t descriptorChunkBytes = 512;
 constexpr size_t maxDescriptorBytes = 65536;
 inline size_t descriptorSliceLength(size_t length, uint32_t offset) {
-    return offset < length ? std::min(descriptorChunkBytes, length - offset) : 0;
+    // size_t and uint32_t are distinct 32-bit types on the Arduino 3 toolchain.
+    return offset < length ? std::min(descriptorChunkBytes, size_t(length - offset)) : 0;
 }
 inline void writeRect(JsonObject json, const Rect& r) {
     json["x"] = r.x; json["y"] = r.y;
@@ -57,7 +58,7 @@ inline void writeDeviceDescriptor(JsonDocument& json, const BoardInfo& board,
     auto versions = capabilities["profileVersions"].to<JsonArray>();
     versions.add(6);
     if (board.profile7) versions.add(7);
-    capabilities["media"] = board.display != nullptr;
+    capabilities["media"] = board.legacyMedia;
     capabilities["firmwareUpdate"] = board.firmwareUpdate;
     capabilities["maxProfileBytes"] = board.maxProfileBytes;
     capabilities["maxControls"] = board.maxControls;

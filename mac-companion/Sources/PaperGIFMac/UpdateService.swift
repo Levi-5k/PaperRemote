@@ -39,7 +39,7 @@ enum UpdateError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .noReleases: "No paperGIF releases have been published yet."
+        case .noReleases: "No OP Remote releases have been published yet."
         case .invalidRelease(let detail): "The latest release is incomplete: \(detail)"
         case .downloadFailed(let name): "Could not download \(name)."
         case .checksumMismatch(let name): "\(name) failed its checksum and was discarded."
@@ -399,7 +399,7 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
     func installAppUpdate() async {
         guard activity == nil, let release = appUpdate, let asset = release.manifest.mac else { return }
         dismissMessages()
-        setActivity(.downloading("paperGIF Mac \(release.version)"))
+        setActivity(.downloading("OP Remote \(release.version)"))
         defer { setActivity(nil) }
         do {
             try await installApp(asset, from: release)
@@ -451,12 +451,12 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
         UserDefaults.standard.set(release.version, forKey: Self.notifiedVersionKey)
         let center = UNUserNotificationCenter.current()
         let body = appUpdate != nil
-            ? "paperGIF Mac \(release.version) is ready to install."
+            ? "OP Remote \(release.version) is ready to install."
             : "M5Paper firmware \(release.version) is ready to install."
         center.requestAuthorization(options: [.alert]) { granted, _ in
             guard granted else { return }
             let content = UNMutableNotificationContent()
-            content.title = "paperGIF Update Available"
+            content.title = "OP Remote Update Available"
             content.body = body
             center.add(UNNotificationRequest(identifier: "papergif-update", content: content, trigger: nil))
         }
@@ -474,15 +474,15 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
     private func installApp(_ asset: ReleaseManifest.Asset, from release: AvailableRelease) async throws {
         let appURL = Bundle.main.bundleURL
         guard appURL.pathExtension == "app" else {
-            throw UpdateError.notInstallable("Updates can only be installed into the packaged paperGIF Mac.app.")
+            throw UpdateError.notInstallable("Updates can only be installed into the packaged OP Remote app.")
         }
         let parent = appURL.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: parent.path) else {
-            throw UpdateError.notInstallable("paperGIF Mac cannot write to \(parent.path).")
+            throw UpdateError.notInstallable("OP Remote cannot write to \(parent.path).")
         }
         let archive = try await ReleaseClient.download(asset, from: release)
         defer { try? FileManager.default.removeItem(at: archive) }
-        setActivity(.installing("paperGIF Mac \(release.version)"))
+        setActivity(.installing("OP Remote \(release.version)"))
         let staging = parent.appendingPathComponent(".paperGIF-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
         do {
@@ -498,7 +498,7 @@ final class UpdateService: NSObject, ObservableObject, UNUserNotificationCenterD
             try? FileManager.default.removeItem(at: staging)
             throw error
         }
-        DiagnosticLog.info("Installing paperGIF Mac \(release.version) and relaunching")
+        DiagnosticLog.info("Installing OP Remote \(release.version) and relaunching")
         isShowingUpdates = false
         Self.quitForReplacement()
     }

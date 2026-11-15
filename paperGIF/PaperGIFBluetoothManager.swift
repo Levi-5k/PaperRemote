@@ -308,6 +308,13 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             connectionState == .connected
     }
 
+    func confirmLoadedRemoteProfile(_ profile: PaperGIFRemoteProfile) {
+        deviceRemoteProfile = profile
+        pendingRemoteProfile = nil
+        isAwaitingRemoteProfilePull = false
+        updateRelayProfile(profile)
+    }
+
     func selectedDeviceChanged() {
         deviceGeneration = UUID()
         nativeProfileTask?.cancel()
@@ -469,6 +476,16 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     var canSend: Bool {
         legacyBLEPermitted && activeDescriptor?.canUseLegacyMedia == true &&
         (connectionState == .connected || wifiConnectionState == .connected) && !isTransferring
+    }
+
+    var canSendColorImage: Bool {
+        deviceSession?.isVerified == true && activeDescriptor?.canUseColorImages == true &&
+            !(deviceSession?.address.isEmpty ?? true) && !isTransferring
+    }
+
+    func sendColorImage(_ data: Data, to deviceID: String, name: String, mediaID: UUID? = nil) {
+        guard deviceSession?.selectedID == deviceID, canSendColorImage else { return }
+        send(data, name: name, mediaID: mediaID)
     }
 
     var canAccessDeviceLibrary: Bool {
@@ -908,6 +925,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     func syncRemoteProfile(_ profile: PaperGIFRemoteProfile) {
         updateRelayProfile(profile)
+        guard !isEditingPhoneProfile else { return }
         if let session = deviceSession, let descriptor = session.descriptor,
            !session.address.isEmpty {
             guard session.isVerified else {
@@ -1029,9 +1047,15 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
 
     /// True when only existing controls differ from the M5Paper, so the edit can be sent at once.
     func canSendAsControlUpdate(_ profile: PaperGIFRemoteProfile) -> Bool {
-        legacyBLEPermitted && !controlUpdatesUnsupported && deviceRemoteProfile.flatMap {
+        !isEditingPhoneProfile && canSyncSelectedProfile && legacyBLEPermitted &&
+            !controlUpdatesUnsupported && deviceRemoteProfile.flatMap {
             PaperGIFRemoteProfile.changedControls(from: $0, to: profile)
         } != nil
+    }
+
+    /// The Edit tab's "Phone" profile drives only this phone's Remote tab, never a connected device.
+    var isEditingPhoneProfile: Bool {
+        UserDefaults.standard.bool(forKey: PaperGIFSettingKey.editingPhone) && deviceSession?.selectedID == nil
     }
 
     private func sendControlUpdate(_ payload: Data, profile: PaperGIFRemoteProfile) {
@@ -1110,7 +1134,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         let uploaded = uploadedButtonImageIDs()
         for id in profile.referencedButtonImageIDs
         where !uploaded.contains(id) && !skippedButtonImageIDs.contains(id) {
-            guard let data = PaperGIFButtonImageStore.load(id) else {
+            guard let stored = PaperGIFButtonImageStore.load(id),
+                  let data = PaperGIFButtonImageStore.panelFile(stored) else {
                 skippedButtonImageIDs.insert(id)
                 continue
             }
@@ -1627,7 +1652,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
     }
 
     private func noteNearby(_ peripheral: CBPeripheral, advertisementData: [String: Any], rssi: Int) {
-        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? "PaperRemote device"
+        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? "OP Remote device"
         let deviceID = peripheralDeviceIDs[peripheral.identifier.uuidString]
         if let index = nearbyDevices.firstIndex(where: { $0.id == peripheral.identifier }) {
             nearbyDevices[index].name = name
@@ -1661,7 +1686,8 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
             return
         }
         let requested = connectionTarget?.accepts(peripheral.identifier, descriptor: descriptor) == true
-        if requested || deviceSession.selectedID == nil,
+        let editingPhone = UserDefaults.standard.bool(forKey: PaperGIFSettingKey.editingPhone)
+        if !editingPhone, requested || deviceSession.selectedID == nil,
            deviceSession.selectedID != descriptor.deviceID {
             deviceSession.select(id: descriptor.deviceID)
         }
@@ -1931,7 +1957,7 @@ final class PaperGIFBluetoothManager: NSObject, ObservableObject {
         case 0x31:
             guard data.count > 1,
                   let ssid = String(bytes: data.dropFirst(), encoding: .utf8),
-                  ssid.hasPrefix("paperGIF-") else {
+                  ssid.hasPrefix("OP Remote-") || ssid.hasPrefix("paperGIF-") else {
                 failWiFiConnection("The M5Paper returned an invalid Wi-Fi network")
                 return
             }
@@ -2366,6 +2392,8 @@ extension PaperGIFBluetoothManager: CBCentralManagerDelegate {
         MainActor.assumeIsolated {
             if central.state == .poweredOn {
                 reconnectOrScan()
+                // Browsing usually begins before power-on, and reconnecting a saved board skips the scan.
+                if isBrowsingNearby { startScan() }
             } else {
                 connectionState = .bluetoothUnavailable
                 resetConnection()
@@ -2497,7 +2525,7 @@ extension PaperGIFBluetoothManager: CBPeripheralDelegate {
                 requestDescriptorPage(at: 0)
             } else {
                 let name = peripheral.name?.lowercased() ?? ""
-                if name.contains("m5paper") || name.contains("papergif") || name.contains("paperremote") {
+                if name.contains("m5paper") || name.contains("papergif") || name.contains("paperremote") || name.contains("op remote") {
                     descriptorStatus = "Legacy M5Paper protocol"
                     let savedM5Papers = (deviceSession?.records ?? []).filter { $0.descriptor.isM5Paper }
                     let deviceID = PaperGIFBluetoothTarget.legacyM5PaperID(

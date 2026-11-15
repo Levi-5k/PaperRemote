@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://papergif.local/protocol/remote-profile-v6.schema.json",
-  "title": "paperGIF Remote Profile v6",
+  "title": "OP Remote Remote Profile v6",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "pages"],
@@ -81,7 +81,8 @@
         "dotSpacing": { "type": "integer", "minimum": 3, "maximum": 24 },
         "angle": { "type": "integer", "minimum": 0, "maximum": 90 },
         "dotGain": { "type": "integer", "minimum": -50, "maximum": 50 },
-        "fade": { "type": "integer", "minimum": 0, "maximum": 90 }
+        "fade": { "type": "integer", "minimum": 0, "maximum": 90 },
+        "preserveColor": { "type": "boolean" }
       }
     },
     "uuid": {
@@ -147,6 +148,8 @@
           "type": "string",
           "pattern": "^[0-9A-Fa-f]{6}$"
         },
+        "backgroundTintHex": { "type": ["string", "null"], "pattern": "^[0-9A-Fa-f]{6}$" },
+        "imageTintHex": { "type": ["string", "null"], "pattern": "^[0-9A-Fa-f]{6}$" },
         "kind": { "enum": ["button", "slider", "textBox"] },
         "isToggle": { "type": ["boolean", "null"] },
         "toggleOn": { "type": ["boolean", "null"] },

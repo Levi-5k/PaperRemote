@@ -75,6 +75,7 @@ public final class DeviceSession: ObservableObject {
     private let catalog: DeviceCatalog
     private var catalogTask: Task<Void, Never>?
     private var generation = UUID()
+    private var networkVerification = UUID()
 
     deinit { catalogTask?.cancel() }
 
@@ -131,6 +132,36 @@ public final class DeviceSession: ObservableObject {
         let operation = UUID()
         generation = operation
         try await install(descriptor, address: address, adapter: .native, operation: operation)
+        isVerified = false
+    }
+
+    public func verifyNetwork(address: String, deviceID: String,
+                              adapter: any DeviceAdapter = NativeDeviceAdapter()) async throws {
+        guard selectedID == deviceID else { throw CancellationError() }
+                let operation = generation
+                let verification = UUID()
+                networkVerification = verification
+                if self.address != address { isVerified = false }
+        let (identified, kind) = try await adapter.identify(address: address)
+        try Task.checkCancellation()
+                guard generation == operation, networkVerification == verification,
+                            selectedID == deviceID else { throw CancellationError() }
+        guard identified.deviceID == deviceID, kind == .native,
+              identified.capabilities.supports(transport: "http") else {
+                        isVerified = false
+            throw DeviceContractError.invalid("Wi-Fi address does not identify the selected HTTP device")
+        }
+                if descriptor != identified || self.address != address {
+                        try remember(identified, address: address)
+                }
+        self.address = address
+        isVerified = true
+        message = "Connected over Wi-Fi"
+    }
+
+    public func invalidateNetwork() {
+        generation = UUID()
+        isVerified = false
     }
 
     private func install(_ descriptor: DeviceDescriptor, address: String,
@@ -204,6 +235,20 @@ public final class DeviceSession: ObservableObject {
         layout = record.layoutOverride ?? record.descriptor.layout
         address = record.address
         message = "Saved device selected. Connect to verify current capabilities."
+    }
+
+    /// Leave hardware unselected so the editor can edit this iPhone's remote.
+    public func clearSelection() {
+        catalogTask?.cancel()
+        generation = UUID()
+        networkVerification = UUID()
+        isLoading = false
+        isVerified = false
+        selectedID = nil
+        descriptor = nil
+        layout = nil
+        if !address.isEmpty { address = "" }
+        message = "Editing this iPhone."
     }
 
     public func saveProfile(_ data: Data) throws {

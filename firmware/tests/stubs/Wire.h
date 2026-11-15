@@ -5,7 +5,7 @@
 
 class TwoWire {
 public:
-    void begin(int sda, int scl);
+    bool begin(int sda, int scl);
     void setClock(uint32_t frequency);
     void beginTransmission(uint8_t address);
     size_t write(uint8_t value);

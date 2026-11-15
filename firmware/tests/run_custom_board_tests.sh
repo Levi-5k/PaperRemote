@@ -29,8 +29,12 @@ mkdir -p .pio/host-tests/supermini
     -Itests/stubs tests/reference_inputs_test.cpp -o .pio/host-tests/reference_inputs_test
 .pio/host-tests/reference_inputs_test
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
-    -Itests/stubs tests/supermini_s3_inputs_test.cpp -o .pio/host-tests/supermini_s3_inputs_test
+    -Itests/stubs -I"$json_headers" tests/supermini_s3_inputs_test.cpp -o .pio/host-tests/supermini_s3_inputs_test
 .pio/host-tests/supermini_s3_inputs_test
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    -Itests/stubs -Iinclude tests/native_media_store_test.cpp idf/main/media_store.cpp \
+    -o .pio/host-tests/native_media_store_test
+.pio/host-tests/native_media_store_test
 python="../.venv/bin/python"
 if [ -x "$python" ] && "$python" -c "import jsonschema" 2>/dev/null; then
     "$python" tests/validate_firmware_descriptors.py .pio/host-tests

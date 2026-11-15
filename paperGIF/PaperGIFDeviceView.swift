@@ -7,6 +7,7 @@ struct PaperGIFDeviceView: View {
     let sourceName: String
     @ObservedObject var session: DeviceSession
     @Binding var profile: PaperGIFRemoteProfile
+    var effectsLive = false
     @StateObject private var firmware = PaperGIFFirmwareUpdater()
     @State private var firmwareTask: Task<Void, Never>?
 
@@ -36,9 +37,11 @@ struct PaperGIFDeviceView: View {
             Form {
                 Section {
                     NavigationLink {
-                        PaperGIFDeviceSetupView(session: session, bluetooth: bluetoothManager, profile: $profile)
+                        PaperGIFDeviceSetupView(
+                            session: session, bluetooth: bluetoothManager, profile: $profile, effectsLive: effectsLive
+                        )
                     } label: {
-                        Label("Device Setup, Wi-Fi & Saved Controllers", systemImage: "rectangle.connected.to.line.below")
+                        Label("Device Setup & Wi-Fi", systemImage: "rectangle.connected.to.line.below")
                     }
                     if let descriptor = session.descriptor {
                         LabeledContent("Selected", value: descriptor.name)
@@ -48,15 +51,21 @@ struct PaperGIFDeviceView: View {
                     PaperGIFDeviceControlsView(
                         descriptor: descriptor,
                         bluetoothManager: bluetoothManager,
-                        session: session
+                        session: session,
+                        effectsLive: effectsLive
                     )
                     .id(descriptor.deviceID)
                 }
                 if session.descriptor?.isM5Paper != false {
                 Section("M5Paper") {
                     LabeledContent {
-                        Text(bluetoothManager.connectionState.description)
-                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            if effectsLive, isSearchingBluetooth {
+                                PaperGIFActivityLoader(label: bluetoothManager.connectionState.description, size: 18)
+                            }
+                            Text(bluetoothManager.connectionState.description)
+                                .foregroundStyle(.secondary)
+                        }
                     } label: {
                         Label("Bluetooth", systemImage: connectionIcon)
                     }
@@ -109,7 +118,14 @@ struct PaperGIFDeviceView: View {
                         LabeledContent("Frames", value: "\(animation.frames.count)")
 
                         if bluetoothManager.isTransferring {
-                            ProgressView(value: bluetoothManager.transferProgress)
+                            if effectsLive {
+                                PaperGIFTransferBar(
+                                    fraction: bluetoothManager.transferProgress,
+                                    label: bluetoothManager.transferStatus ?? "Sending"
+                                )
+                            } else {
+                                ProgressView(value: bluetoothManager.transferProgress)
+                            }
                             Text(bluetoothManager.transferStatus ?? "Sending")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
@@ -135,7 +151,7 @@ struct PaperGIFDeviceView: View {
                         )
                     }
                 }
-                } else {
+                } else if session.descriptor?.canUseColorImages != true {
                     Section("Media") {
                         Text("Media and button images are unavailable: this device has no supported M5Paper-compatible display encoder.")
                     }
@@ -160,7 +176,11 @@ struct PaperGIFDeviceView: View {
 
             if let activity = firmware.activity {
                 HStack(spacing: 10) {
-                    ProgressView()
+                    if effectsLive {
+                        PaperGIFActivityLoader(label: activity, size: 18)
+                    } else {
+                        ProgressView()
+                    }
                     Text(activity)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -200,6 +220,13 @@ struct PaperGIFDeviceView: View {
             } else if firmware.deviceFirmware != nil, !firmware.updateAvailable, firmware.release != nil {
                 Text("The M5Paper is up to date.")
             }
+        }
+    }
+
+    private var isSearchingBluetooth: Bool {
+        switch bluetoothManager.connectionState {
+        case .searching, .connecting: true
+        case .bluetoothUnavailable, .connected: false
         }
     }
 

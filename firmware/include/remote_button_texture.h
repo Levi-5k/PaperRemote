@@ -42,6 +42,7 @@ struct Texture {
     uint8_t angle = 45;
     int8_t dotGain = 0;
     uint8_t fade = 50;
+    bool preserveColor = false;
     char imageId[kImageIdBytes] = {};
 
     bool operator==(const Texture& other) const {
@@ -49,7 +50,7 @@ struct Texture {
             lineWidth == other.lineWidth && mode == other.mode &&
             threshold == other.threshold && levels == other.levels &&
             dotSpacing == other.dotSpacing && angle == other.angle &&
-            dotGain == other.dotGain && fade == other.fade &&
+            dotGain == other.dotGain && fade == other.fade && preserveColor == other.preserveColor &&
             strcmp(imageId, other.imageId) == 0;
     }
     bool operator!=(const Texture& other) const { return !(*this == other); }
@@ -114,14 +115,15 @@ inline bool normalizeImageId(const char* input, char output[kImageIdBytes]) {
 // "PBGI", version 1, reserved, width/height (LE), then 8-bit luminance rows.
 inline bool parseImageHeader(const uint8_t* header, uint32_t fileBytes,
                              uint16_t& width, uint16_t& height) {
-    if (fileBytes < kImageHeaderBytes || memcmp(header, "PBGI", 4) != 0 || header[4] != 1) {
+    if (fileBytes < kImageHeaderBytes || memcmp(header, "PBGI", 4) != 0 ||
+        (header[4] != 1 && header[4] != 2) || header[5] != 0) {
         return false;
     }
     width = static_cast<uint16_t>(header[6] | header[7] << 8);
     height = static_cast<uint16_t>(header[8] | header[9] << 8);
     return width > 0 && height > 0 && width <= kMaximumImageSide &&
         height <= kMaximumImageSide &&
-        fileBytes == kImageHeaderBytes + static_cast<uint32_t>(width) * height;
+        fileBytes == kImageHeaderBytes + static_cast<uint32_t>(width) * height * (header[4] == 2 ? 2 : 1);
 }
 
 inline float clampUnit(float value) { return value < 0 ? 0 : value > 1 ? 1 : value; }
@@ -296,6 +298,7 @@ struct ImageView {
     const uint8_t* pixels = nullptr;
     uint16_t width = 0;
     uint16_t height = 0;
+    bool rgb565 = false;
 };
 
 // Centered aspect-fill crop, box-filtered into an output of width x height.
@@ -336,11 +339,45 @@ struct CoverSampler {
         uint32_t total = 0;
         for (int32_t row = top; row < bottom; ++row) {
             const uint8_t* source = image.pixels + static_cast<size_t>(row) * image.width;
-            for (int32_t column = left; column < right; ++column) total += source[column];
+            for (int32_t column = left; column < right; ++column) {
+                if (!image.rgb565) total += source[column];
+                else {
+                    const size_t offset = (static_cast<size_t>(row) * image.width + column) * 2;
+                    const uint16_t pixel = image.pixels[offset] | uint16_t(image.pixels[offset + 1]) << 8;
+                    total += (((pixel >> 11) & 31) * 255 / 31 * 299 +
+                        ((pixel >> 5) & 63) * 255 / 63 * 587 + (pixel & 31) * 255 / 31 * 114) / 1000;
+                }
+            }
         }
         return static_cast<uint8_t>(total / static_cast<uint32_t>((right - left) * (bottom - top)));
     }
 };
+
+inline uint32_t parseRGB(const char* text, uint32_t fallback) {
+    if (!text || std::strlen(text) != 6) return fallback;
+    uint32_t color = 0;
+    for (int index = 0; index < 6; ++index) {
+        const char digit = text[index];
+        const int value = digit >= '0' && digit <= '9' ? digit - '0' :
+            digit >= 'a' && digit <= 'f' ? digit - 'a' + 10 :
+            digit >= 'A' && digit <= 'F' ? digit - 'A' + 10 : -1;
+        if (value < 0) return fallback;
+        color = (color << 4) | uint32_t(value);
+    }
+    return color;
+}
+
+inline uint16_t packRGB(uint32_t color) {
+    return uint16_t(((color >> 19) & 31) << 11 | ((color >> 10) & 63) << 5 | ((color >> 3) & 31));
+}
+
+inline uint32_t blendRGB(uint32_t background, uint32_t foreground, uint32_t amount) {
+    uint32_t color = 0;
+    for (int shift = 0; shift <= 16; shift += 8)
+        color |= ((((background >> shift) & 255) * (255 - amount) +
+            ((foreground >> shift) & 255) * amount + 127) / 255) << shift;
+    return color;
+}
 
 inline bool insideRoundedRect(int32_t x, int32_t y, int32_t width, int32_t height, int32_t radius) {
     const float px = x + 0.5f;
@@ -405,6 +442,23 @@ inline uint8_t luminance565(uint16_t color) {
     const uint32_t green = ((color >> 5) & 0x3F) * 255 / 63;
     const uint32_t blue = (color & 0x1F) * 255 / 31;
     return static_cast<uint8_t>((red * 299 + green * 587 + blue * 114) / 1000);
+}
+
+inline uint16_t colorPixel(const Renderer& renderer, int32_t x, int32_t y,
+    uint32_t background, uint32_t foreground, uint32_t imageTint, bool tintImage) {
+    if (!insideRoundedRect(x, y, renderer.width, renderer.height, renderer.radius)) return 0xffff;
+    const auto& sampler = renderer.sampler;
+    if (renderer.texture.kind == Kind::image && sampler.image.pixels && sampler.image.rgb565 && renderer.texture.preserveColor && !tintImage) {
+        const int32_t column = sampler.cropX + (x * 2 + 1) * sampler.cropWidth / (sampler.width * 2);
+        const int32_t row = sampler.cropY + (y * 2 + 1) * sampler.cropHeight / (sampler.height * 2);
+        const size_t offset = (size_t(row) * sampler.image.width + column) * 2;
+        const uint16_t pixel = sampler.image.pixels[offset] | uint16_t(sampler.image.pixels[offset + 1]) << 8;
+        const uint32_t color = uint32_t((pixel >> 11) * 255 / 31) << 16 |
+            uint32_t(((pixel >> 5) & 63) * 255 / 63) << 8 | uint32_t((pixel & 31) * 255 / 31);
+        return packRGB(blendRGB(background, color, renderer.inkPercent * 255 / 100));
+    }
+    return packRGB(blendRGB(background, tintImage ? imageTint : foreground,
+        255 - renderer.level(x, y) * 17));
 }
 
 }  // namespace remote_button_texture

@@ -22,14 +22,14 @@ internal static class Program
             DiagnosticLog.Error("Unobserved task exception", eventArgs.Exception);
             eventArgs.SetObserved();
         };
-        DiagnosticLog.Info("paperGIF Windows started");
+        DiagnosticLog.Info("OP Remote started");
         try
         {
             Run(args);
         }
         catch (Exception exception)
         {
-            DiagnosticLog.Error("paperGIF Windows terminated", exception);
+            DiagnosticLog.Error("OP Remote terminated", exception);
             throw;
         }
     }
@@ -83,11 +83,13 @@ internal static class Program
         System.Windows.Forms.Application.EnableVisualStyles();
         System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
         EditorTheme.ConfigureApplication();
+        var startupRegistration = app.Services.GetRequiredService<StartupRegistration>();
+        startupRegistration.AdoptCurrentName();
         System.Windows.Forms.Application.Run(new TrayApplicationContext(
             configuration,
             app.Services.GetRequiredService<CompanionActivity>(),
             app.Services.GetRequiredService<PairingApprovalService>(),
-            app.Services.GetRequiredService<StartupRegistration>(),
+            startupRegistration,
             app.Services.GetRequiredService<RemoteEditorStore>(),
             app.Services.GetRequiredService<NetworkDiscoveryService>(),
             app.Services.GetRequiredService<BleNearbyDeviceService>(),
@@ -120,18 +122,29 @@ internal static class Program
             await next();
         });
 
-        app.MapPost("/pair", (
+        app.MapPost("/pair", async Task<IResult> (
             PairingRequest request,
-            PairingApprovalService approvalService) =>
+            PairingApprovalService approvalService,
+            CancellationToken cancellationToken) =>
         {
-            if (!approvalService.RequestApproval(request.DeviceName))
+            var result = await approvalService.RequestApprovalAsync(request.DeviceName, cancellationToken);
+            if (result != PairingApprovalResult.Approved)
             {
-                return Results.Json(
-                    new { ok = false, error = "Pairing declined" },
-                    statusCode: StatusCodes.Status403Forbidden);
+                var (status, error) = result switch
+                {
+                    PairingApprovalResult.Busy => (StatusCodes.Status409Conflict, "Another pairing request is pending"),
+                    PairingApprovalResult.Expired => (StatusCodes.Status408RequestTimeout, "Pairing expired; request again"),
+                    _ => (StatusCodes.Status403Forbidden, "Pairing declined"),
+                };
+                return TypedResults.Json(new { ok = false, error }, statusCode: status);
             }
-            return Results.Json(new { ok = true, token = configuration.Token });
-        });
+            return TypedResults.Json(new { ok = true, token = configuration.Token });
+        })
+        .WithSummary("Request local approval to pair with this computer")
+        .Produces(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status403Forbidden)
+        .Produces(StatusCodes.Status408RequestTimeout)
+        .Produces(StatusCodes.Status409Conflict);
 
         app.MapPost("/home-accessories", async (HttpRequest request, [FromServices] HomeAccessoryCatalog catalog) =>
         {
@@ -216,7 +229,11 @@ internal static class Program
                 return;
             }
             var response = await resolver.ResolveAsync(request, cancellationToken);
-            publisher.Register(context.Connection.RemoteIpAddress, request);
+            // Pollers such as the iPhone remote have no HTTP server to receive pushes.
+            if (!context.Request.Headers.ContainsKey("X-PGIF-No-Push"))
+            {
+                publisher.Register(context.Connection.RemoteIpAddress, request);
+            }
             await WriteJsonWithContentLengthAsync(context, response, cancellationToken);
         });
 

@@ -1295,7 +1295,7 @@ void prepareWifiSsid() {
         return;
     }
     const uint16_t suffix = static_cast<uint16_t>(ESP.getEfuseMac());
-    snprintf(wifiSsid, sizeof(wifiSsid), "paperGIF-%04X", suffix);
+    snprintf(wifiSsid, sizeof(wifiSsid), "OP Remote-%04X", suffix);
 }
 
 void appendJsonString(String& json, const char* value) {
@@ -1379,7 +1379,7 @@ void displayFirmwareUpdateScreen() {
     M5.Display.setTextSize(1);
     M5.Display.drawString("UPDATING", 42, 300);
     M5.Display.setFont(&fonts::FreeSansBold12pt7b);
-    M5.Display.drawString("Installing new paperGIF firmware.", 42, 380);
+    M5.Display.drawString("Installing new OP Remote firmware.", 42, 380);
     M5.Display.setFont(&fonts::FreeSans12pt7b);
     M5.Display.drawString("Keep the M5Paper powered on.", 42, 420);
     M5.Display.drawString("It restarts by itself when done.", 42, 456);
@@ -4010,7 +4010,7 @@ void advertiseDeviceService() {
     }
     const uint16_t suffix = static_cast<uint16_t>(ESP.getEfuseMac());
     char hostname[24];
-    snprintf(hostname, sizeof(hostname), "papergif-%04x", suffix);
+    snprintf(hostname, sizeof(hostname), "op-remote-%04x", suffix);
     if (MDNS.begin(hostname)) {
         MDNS.addService("papergif-device", "tcp", 80);
         mdnsRunning = true;
@@ -4183,7 +4183,7 @@ void displayUploadStart() {
     M5.Display.setTextSize(1);
     M5.Display.drawString("RECEIVING", 36, 66);
     M5.Display.setFont(&fonts::FreeSans12pt7b);
-    M5.Display.drawString("Keep paperGIF open", 38, 145);
+    M5.Display.drawString("Keep OP Remote open", 38, 145);
 
     M5.Display.drawRect(36, 280, 468, 70, TFT_BLACK);
     M5.Display.setFont(&fonts::DejaVu56);
@@ -4703,7 +4703,7 @@ void startBluetooth() {
         return;
     }
     initDeviceControls();
-    NimBLEDevice::init("paperGIF");
+    NimBLEDevice::init("OP Remote");
     NimBLEDevice::setMTU(517);
     bluetoothServer = NimBLEDevice::createServer();
     bluetoothServer->setCallbacks(&serverCallbacks, false);
@@ -4807,7 +4807,7 @@ void displayDisconnectedSplash() {
     M5.Display.fillRect(0, 0, kDisplayWidth, 20, TFT_BLACK);
     M5.Display.setFont(&fonts::Yellowtail_32);
     M5.Display.setTextSize(1);
-    M5.Display.drawString("paperGIF", 40, 68);
+    M5.Display.drawString("OP Remote", 40, 68);
 
     M5.Display.drawFastHLine(40, 190, 460, TFT_BLACK);
 
@@ -4815,7 +4815,7 @@ void displayDisconnectedSplash() {
     M5.Display.drawString(deviceConnected ? "IPHONE CONNECTED" : "READY TO CONNECT", 40, 242);
 
     M5.Display.setFont(&fonts::FreeSans18pt7b);
-    M5.Display.drawString("Open paperGIF", 42, 338);
+    M5.Display.drawString("Open OP Remote", 42, 338);
     M5.Display.drawString("on your iPhone", 42, 388);
 
     M5.Display.drawCircle(60, 720, 18, TFT_BLACK);
@@ -5148,7 +5148,7 @@ void displayWifiMode() {
         M5.Display.drawString(kWifiPassword, 188, 562);
         M5.Display.drawString("192.168.4.1", 188, 624);
         M5.Display.setFont(&fonts::FreeSans12pt7b);
-        M5.Display.drawString("Scan to join, then return to paperGIF.", 42, 700);
+        M5.Display.drawString("Scan to join, then return to OP Remote.", 42, 700);
         M5.Display.drawString("The app detects Wi-Fi automatically.", 42, 740);
 
         if (wifiUploadSucceeded || wifiUploadFailed) {
@@ -7174,7 +7174,7 @@ void queueDeviceErrorUpload() {
             }
             JsonDocument document(&profileJsonAllocator);
             char deviceName[24];
-            snprintf(deviceName, sizeof(deviceName), "papergif-%04x",
+            snprintf(deviceName, sizeof(deviceName), "op-remote-%04x",
                 static_cast<uint16_t>(ESP.getEfuseMac()));
             document["deviceName"] = deviceName;
             JsonObject item = document["entries"].to<JsonArray>().add<JsonObject>();

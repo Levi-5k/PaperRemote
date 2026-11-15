@@ -135,11 +135,11 @@ internal sealed class UpdateCoordinator : IDisposable
         }
         Problem = null;
         Notice = null;
-        SetActivity($"Downloading paperGIF {release.Version}...");
+        SetActivity($"Downloading OP Remote {release.Version}...");
         try
         {
             var archive = await service.DownloadAsync(asset, release);
-            SetActivity($"Installing paperGIF {release.Version}...");
+            SetActivity($"Installing OP Remote {release.Version}...");
             service.InstallAppAndExit(archive, release.Version, ExitApplication ?? System.Windows.Forms.Application.Exit);
         }
         catch (Exception exception) when (IsUpdateFailure(exception))

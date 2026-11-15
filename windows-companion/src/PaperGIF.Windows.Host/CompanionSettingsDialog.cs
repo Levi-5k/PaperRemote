@@ -6,7 +6,7 @@ internal static class CompanionSettingsDialog
     {
         using var form = new Form
         {
-            Text = "paperGIF Companion Settings",
+            Text = "OP Remote Settings",
             ClientSize = new Size(520, 360),
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MaximizeBox = false,

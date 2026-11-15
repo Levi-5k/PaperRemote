@@ -10,7 +10,7 @@ final class DeviceBluetoothScannerTests: XCTestCase {
         let start = Date(timeIntervalSince1970: 1_000)
 
         XCTAssertTrue(scanner.noteAdvertisement(id: id, name: nil, rssi: -70, at: start))
-        XCTAssertEqual(scanner.nearby.first?.displayName, "PaperRemote device")
+        XCTAssertEqual(scanner.nearby.first?.displayName, "OP Remote device")
 
         XCTAssertTrue(scanner.noteAdvertisement(id: id, name: "paperGIF SuperMini S3", rssi: 127,
                                                 at: start.addingTimeInterval(5)))

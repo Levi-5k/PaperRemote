@@ -1,5 +1,6 @@
 #include "../include/dial_tracker.h"
 #include "../include/hardware_binding.h"
+#include "../include/reference_profile.h"
 #include <cassert>
 #include <cstdio>
 #include <limits>
@@ -97,6 +98,43 @@ int main() {
     binding.remainder = 0;
     assert(applyInput(binding, input, {"dial-1", "change", 16383, 11, true}, value) && value == 100);
     assert(applyInput(binding, input, {"dial-1", "change", -163.83, 12, true}, value) && value == 99);
+    DialTracker sliderDial;
+    DialConfiguration sliderConfig;
+    sliderConfig.jitter = 0;
+    assert(sliderDial.configure(sliderConfig));
+    assert(sliderDial.setRelativeOutput(true));
+    assert(sliderDial.configuration().mode == DialMode::single);
+    assert(!sliderDial.update(raw(350), value));
+    assert(sliderDial.update(raw(10), value) && value > 900 && value < 920);
+    binding = BindingState{};
+    binding.mode = BindingMode::absolute;
+    binding.value = 50;
+    assert(applyInput(binding, input, {"dial-1", "change", value, 1, true}, value) && value == 56);
+    for (int degrees = 100; degrees <= 820; degrees += 90)
+        assert(sliderDial.update(raw(degrees), value) && value > 0);
+    assert(sliderDial.update(raw(819), value) && value < 0);
+    assert(!sliderDial.setRelativeOutput(true));
+    assert(sliderDial.setRelativeOutput(false));
+    assert(!sliderDial.update(raw(180), value));
+    assert(std::abs(sliderDial.outputPercent() - 50) < 0.1);
+    NativeProfile sliderProfile;
+    sliderProfile.count = 1;
+    std::strcpy(sliderProfile.activePageID, "media");
+    auto& sliderBinding = sliderProfile.bindings[0];
+    std::strcpy(sliderBinding.inputID, "dial-1");
+    std::strcpy(sliderBinding.event, "change");
+    std::strcpy(sliderBinding.controlID, "volume");
+    std::strcpy(sliderBinding.pageID, "media");
+    sliderBinding.state.mode = BindingMode::absolute;
+    assert(hasSliderDialBinding(sliderProfile));
+    std::strcpy(sliderProfile.activePageID, "main");
+    assert(!hasSliderDialBinding(sliderProfile));
+    sliderBinding.pageID[0] = 0;
+    assert(!hasSliderDialBinding(sliderProfile));
+    sliderProfile.activePageID[0] = 0;
+    assert(hasSliderDialBinding(sliderProfile));
+    sliderBinding.state.mode = BindingMode::action;
+    assert(!hasSliderDialBinding(sliderProfile));
     DialConfiguration rates;
     assert(rates.rate == 75 && !rates.lowLatency && rates.valid());
     rates.rate = 500; assert(rates.valid());

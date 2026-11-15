@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include "hardware_binding.h"
+#include "remote_computer.h"
 
 namespace paper_board {
 constexpr size_t maxBindings = 24;
@@ -20,14 +21,30 @@ struct NativeAction {
 struct HardwareBinding {
     char inputID[32] = {};
     char event[12] = {};
+    char pageID[40] = {};
+    char controlID[40] = {};
     int8_t direction = 0;
     BindingState state;
     NativeAction action;
+    uint32_t localValueAt = 0;
+    bool hasLocalValue = false;
+    uint32_t mediaTrackRevision = 0;
 };
 struct NativeProfile {
     HardwareBinding bindings[maxBindings];
     size_t count = 0;
+    char activePageID[40] = {};
 };
+inline int nativeComputerIndex(JsonVariantConst profile, const char* requestedID) {
+    const auto computers = profile["computers"].as<JsonArrayConst>();
+    int index = 0;
+    for (JsonObjectConst computer : computers) {
+        if (index >= 8) return -2;
+        if (!requestedID[0] || remote_computer::sameId(requestedID, computer["id"] | "")) return index;
+        ++index;
+    }
+    return !requestedID[0] && computers.size() == 0 ? -1 : -2;
+}
 template <size_t N>
 bool copyField(char (&out)[N], JsonVariantConst value, const char* fallback = "") {
     const char* text = value.isNull() ? fallback : value.as<const char*>();
@@ -68,10 +85,32 @@ inline bool parseAction(JsonVariantConst json, NativeAction& action) {
     }
     return true;
 }
+inline JsonObjectConst findProfileControl(JsonVariantConst json, const char* pageID, const char* controlID) {
+    for (JsonObjectConst page : json["pages"].as<JsonArrayConst>()) {
+        if (std::strcmp(page["id"] | "", pageID)) continue;
+        for (JsonObjectConst control : page["controls"].as<JsonArrayConst>())
+            if (!std::strcmp(control["id"] | "", controlID)) return control;
+    }
+    return JsonObjectConst();
+}
+inline bool adjustableAction(const NativeAction& action) {
+    return !std::strcmp(action.type, "wledBrightness") ||
+        !std::strcmp(action.type, "netHomeTemperature") || !std::strcmp(action.type, "netHomeFan") ||
+        ((!std::strcmp(action.type, "macMedia") || !std::strcmp(action.type, "iPhoneMedia")) &&
+            (!std::strcmp(action.text, "volume") || !std::strcmp(action.text, "seek")));
+}
+inline double nativeControlValue(const NativeAction& action) {
+    if ((!std::strcmp(action.type, "macMedia") || !std::strcmp(action.type, "iPhoneMedia")) &&
+        (!std::strcmp(action.text, "volume") || !std::strcmp(action.text, "seek")))
+        return action.value * 100.0 / 255;
+    if (!std::strcmp(action.type, "netHomeTemperature")) return action.valueTenths / 10.0;
+    return action.value;
+}
 inline bool parseNativeProfile(JsonDocument& json, NativeProfile& output, const BoardInfo& board,
                                const char** reason = nullptr) {
     if (reason) *reason = "invalid_profile";
     output.count = 0;
+    output.activePageID[0] = 0;
     const int version = json["version"] | 0;
     if ((version != 6 && version != 7) || !json["pages"].is<JsonArray>() ||
         json["pages"].size() > board.maxPages ||
@@ -82,19 +121,35 @@ inline bool parseNativeProfile(JsonDocument& json, NativeProfile& output, const 
         // There is no touch surface on this target. Never silently accept invisible controls.
         if (!board.display && page["controls"].size()) return false;
     }
+    if (!copyField(output.activePageID, json["pages"][0]["id"])) return false;
     if (version == 6) return true;
     if (!json["hardwareBindings"].is<JsonArray>() ||
         json["hardwareBindings"].size() > maxBindings) return false;
     for (JsonObjectConst item : json["hardwareBindings"].as<JsonArrayConst>()) {
         auto& binding = output.bindings[output.count];
         binding = HardwareBinding{};
-        if (!supportedNativeAction(item["action"]["type"] | "")) {
+        if (!copyField(binding.pageID, item["pageID"]) ||
+            !copyField(binding.controlID, item["controlID"])) return false;
+        JsonObjectConst tile;
+        JsonVariantConst actionJSON = item["action"];
+        if (binding.controlID[0]) {
+            tile = findProfileControl(json.as<JsonVariantConst>(), binding.pageID, binding.controlID);
+            if (!binding.pageID[0] || tile.isNull()) return false;
+            actionJSON = tile["action"];
+        }
+        if (!supportedNativeAction(actionJSON["type"] | "")) {
             if (reason) *reason = "unsupported_action";
             return false;
         }
         if (!copyField(binding.inputID, item["inputID"]) ||
             !copyField(binding.event, item["event"]) ||
-            !parseAction(item["action"], binding.action)) return false;
+            !parseAction(actionJSON, binding.action)) return false;
+        if (binding.pageID[0]) {
+            bool found = false;
+            for (JsonObjectConst page : json["pages"].as<JsonArrayConst>())
+                found = found || !std::strcmp(page["id"] | "", binding.pageID);
+            if (!board.display || !found) return false;
+        }
         const auto* input = findInput(board, binding.inputID, binding.event);
         if (!input) return false;
         const char* mode = item["mode"] | "";
@@ -105,12 +160,9 @@ inline bool parseNativeProfile(JsonDocument& json, NativeProfile& output, const 
             if (std::strcmp(binding.event, "change") || input->maximum <= input->minimum) return false;
             binding.state.mode = BindingMode::absolute;
         } else if (std::strcmp(mode, "action")) return false;
-        if (binding.state.mode != BindingMode::action &&
-            std::strcmp(binding.action.type, "wledBrightness") &&
-            std::strcmp(binding.action.type, "netHomeTemperature") &&
-            !((!std::strcmp(binding.action.type, "macMedia") ||
-                !std::strcmp(binding.action.type, "iPhoneMedia")) &&
-                !std::strcmp(binding.action.text, "volume"))) return false;
+        if (binding.state.mode != BindingMode::action && !adjustableAction(binding.action)) return false;
+        if (!tile.isNull() && std::strcmp(tile["kind"] | "",
+            binding.state.mode == BindingMode::action ? "button" : "slider")) return false;
         if (!item["direction"].isNull()) {
             if (binding.state.mode != BindingMode::action || std::strcmp(binding.event, "rotate")) return false;
             const char* direction = item["direction"] | "";
@@ -123,7 +175,7 @@ inline bool parseNativeProfile(JsonDocument& json, NativeProfile& output, const 
         binding.state.minimum = item["minimum"];
         binding.state.maximum = item["maximum"];
         binding.state.step = item["step"];
-        binding.state.value = binding.action.value;
+        binding.state.value = binding.controlID[0] ? nativeControlValue(binding.action) : binding.action.value;
         if (!validBinding(binding.state)) return false;
         if (binding.state.mode != BindingMode::action) {
             const bool volume = !std::strcmp(binding.action.type, "macMedia") ||
@@ -134,7 +186,8 @@ inline bool parseNativeProfile(JsonDocument& json, NativeProfile& output, const 
         }
         binding.state.value = boundValue(binding.state.value, binding.state);
         for (size_t i = 0; i < output.count; ++i)
-            if (!std::strcmp(output.bindings[i].inputID, binding.inputID) &&
+            if (!std::strcmp(output.bindings[i].pageID, binding.pageID) &&
+                !std::strcmp(output.bindings[i].inputID, binding.inputID) &&
                 !std::strcmp(output.bindings[i].event, binding.event) &&
                 (!output.bindings[i].direction || !binding.direction ||
                     output.bindings[i].direction == binding.direction)) return false;
@@ -150,11 +203,26 @@ inline double mediaWireValue(const NativeAction& action, double percent) {
     return media && scaled ? std::fmax(0.0, std::fmin(255.0, percent * 255 / 100)) : percent;
 }
 
+inline bool bindingOnActivePage(const NativeProfile& profile, const HardwareBinding& binding) {
+    return !std::strcmp(binding.pageID, profile.activePageID);
+}
+
+inline bool hasSliderDialBinding(const NativeProfile& profile) {
+    for (size_t index = 0; index < profile.count; ++index) {
+        const auto& binding = profile.bindings[index];
+        if (binding.controlID[0] && binding.state.mode != BindingMode::action &&
+            !std::strcmp(binding.inputID, "dial-1") && !std::strcmp(binding.event, "change") &&
+            bindingOnActivePage(profile, binding)) return true;
+    }
+    return false;
+}
+
 template <typename Dispatch>
 void dispatchHardwareInput(NativeProfile& profile, const BoardInfo& board, const InputEvent& event,
                            Dispatch dispatch) {
     for (size_t i = 0; i < profile.count; ++i) {
         auto& binding = profile.bindings[i];
+        if (!bindingOnActivePage(profile, binding)) continue;
         if (std::strcmp(binding.inputID, event.inputID) || std::strcmp(binding.event, event.event)) continue;
         if (!std::strcmp(event.event, "rotate") && (event.value == 0 ||
             (binding.direction < 0 && event.value >= 0) || (binding.direction > 0 && event.value <= 0))) continue;
@@ -176,6 +244,7 @@ void dispatchHardwareInput(NativeProfile& profile, const BoardInfo& board, const
     if (!std::strcmp(event.event, "release")) {
         for (size_t i = 0; i < profile.count; ++i) {
             auto& binding = profile.bindings[i];
+            if (!bindingOnActivePage(profile, binding)) continue;
             if (std::strcmp(binding.inputID, event.inputID) ||
                 (std::strcmp(binding.event, "press") && std::strcmp(binding.event, "hold")) ||
                 std::strcmp(binding.action.type, "openBuilds") ||
@@ -185,7 +254,8 @@ void dispatchHardwareInput(NativeProfile& profile, const BoardInfo& board, const
             bool hasCancel = false;
             for (size_t j = 0; j < profile.count; ++j) {
                 const auto& release = profile.bindings[j];
-                hasCancel = hasCancel || (!std::strcmp(release.inputID, event.inputID) &&
+                hasCancel = hasCancel || (bindingOnActivePage(profile, release) &&
+                    !std::strcmp(release.inputID, event.inputID) &&
                     !std::strcmp(release.event, "release") &&
                     !std::strcmp(release.action.type, "openBuilds") &&
                     !std::strcmp(release.action.text, "cancelJog"));
@@ -209,6 +279,7 @@ void releaseHardwareInputs(NativeProfile& profile, const BoardInfo& board, bool*
         if (!pressed[i]) continue;
         for (size_t j = 0; j < profile.count; ++j) {
             auto& binding = profile.bindings[j];
+            if (!bindingOnActivePage(profile, binding)) continue;
             if (std::strcmp(binding.inputID, board.inputs[i].id)) continue;
             if (!std::strcmp(binding.event, "release")) dispatch(binding, binding.action);
             if ((!std::strcmp(binding.event, "press") || !std::strcmp(binding.event, "hold")) &&

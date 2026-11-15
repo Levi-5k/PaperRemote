@@ -141,6 +141,51 @@ running a disruptive action. IDs are unique, stable and match
 `ble`). Clients may use any listed transport. If it is absent, assume `http`
 for HTTP-identified devices and `ble` for BLE-identified devices.
 
+`capabilities.imageTransports` optionally advertises image upload transports. It
+must be a nonempty subset of `capabilities.transports`, and `imageFormats` must be
+present. HTTP profile/control support alone does not imply an HTTP image API.
+
+### HTTP Images
+
+Native boards advertising HTTP image uploads accept `POST /images` with a raw
+PIMG screensaver image or PBGI button image. Use these headers:
+
+- `Authorization: Bearer <selected-device token>`
+- `Content-Type: application/octet-stream`
+- `X-Image-ID`: a canonical UUID, reused for retries of this exact upload
+- `X-Image-Kind`: `screen` or `button`
+- `X-Image-CRC32`: eight hexadecimal digits, CRC32 over the entire body
+- `X-Image-Name`: optional printable ASCII title, limited to 48 bytes
+
+AMOLED accepts 368x448 RGB565 PIMG (329738 bytes). PBGI has a ten-byte header:
+`PBGI`, version (1 or 2), reserved zero, LE16 width, LE16 height. Version 1
+stores 8-bit luminance; version 2 stores RGB565 little-endian. Dimensions are
+1...540 and total payloads must not exceed 329738 bytes. Editors limit new
+assets to 400 pixels per side and convert version 2 to version 1 for M5Paper.
+Button controls optionally set six-digit RGB `tintHex` (text/icon),
+`backgroundTintHex` and `imageTintHex`; null background/image tints inherit
+the existing style. `buttonTexture.preserveColor` defaults to false. When
+true, version 2 retains source colors unless an image tint is selected; fade
+blends toward the chosen background. Unset background/image colors and the
+default text tint retain the existing style.
+The handler authorizes before receiving the body. Image/profile
+uploads cannot run concurrently. New installs return HTTP 201; identical retries
+return 200, with `{"ok":true,"id":"<uuid>","index":0}` (no index for button
+images). Screen request IDs survive reboot in sidecar metadata; button IDs are
+their immutable image identities. Reusing an ID with different bytes returns
+409. Invalid data/CRC returns 400, unauthorized requests 401, busy requests 409,
+full storage 507, and storage failures 500/503. Partial uploads are not installed.
+Bulk upload responses close the connection; controls/profiles retain keep-alive.
+
+`DELETE /images` uses Authorization, X-Image-ID and X-Image-Kind, with no body.
+It removes only that image and returns 200 with its ID, or 404 if absent.
+
+Identified screensaver BLE fallback uses `0x16`, LE32 length, LE32 CRC32, the
+36-byte upload UUID, then up to 48 title bytes. Data and completion use the
+existing `0x12`/`0x13` flow. It shares HTTP IDs, so a lost HTTP response followed
+by BLE fallback does not append a second image. Clients without this advertised
+capability retain legacy `0x10` uploads; button uploads retain `0x46`/`0x47`.
+
 ### HTTP
 
 - `GET /device/controls` returns a snapshot:

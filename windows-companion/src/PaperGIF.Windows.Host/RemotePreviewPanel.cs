@@ -49,6 +49,12 @@ internal sealed class RemotePreviewPanel : Control
     private string? artworkProblem;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string? SelectedInputID { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool EditHardwareInputs { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public RemoteButtonBackground DefaultButtonBackground { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public RemoteButtonTexture DefaultButtonTexture { get; set; } = new();
     public event EventHandler<string>? InputSelected;
     private RemotePage? page;
     private Guid? draggedControlId;
@@ -63,6 +69,7 @@ internal sealed class RemotePreviewPanel : Control
     private int? previewTarget;
     private int?[]? previewSlots;
     private Rectangle gridFrame;
+    private Rectangle screenFrame;
     private int maxButtonTextSize = RemoteProfile.MaximumButtonTextSize;
 
     public RemotePreviewPanel()
@@ -114,6 +121,7 @@ internal sealed class RemotePreviewPanel : Control
     protected override void OnMouseDown(MouseEventArgs eventArgs)
     {
         base.OnMouseDown(eventArgs);
+        if (EditHardwareInputs) return;
         if (Descriptor?.Display?.Touch != true && Descriptor is not null) return;
         var match = controlFrames.FirstOrDefault(pair => pair.Value.Contains(eventArgs.Location));
         draggedControlId = match.Key == Guid.Empty ? null : match.Key;
@@ -219,17 +227,21 @@ internal sealed class RemotePreviewPanel : Control
     protected override void OnMouseClick(MouseEventArgs eventArgs)
     {
         base.OnMouseClick(eventArgs);
+        if (!EditHardwareInputs && (Descriptor?.Display?.Touch == true || Descriptor is null))
+        {
+            var match = controlFrames.FirstOrDefault(pair => pair.Value.Contains(eventArgs.Location));
+            if (match.Key != Guid.Empty)
+            {
+                ControlSelected?.Invoke(this, match.Key);
+                return;
+            }
+            if (screenFrame.Contains(eventArgs.Location)) return;
+        }
         var input = inputFrames.FirstOrDefault(pair => pair.Value.Contains(eventArgs.Location));
         if (input.Key is not null)
         {
             InputSelected?.Invoke(this, input.Key);
             return;
-        }
-        if (Descriptor?.Display?.Touch != true && Descriptor is not null) return;
-        var match = controlFrames.FirstOrDefault(pair => pair.Value.Contains(eventArgs.Location));
-        if (match.Key != Guid.Empty)
-        {
-            ControlSelected?.Invoke(this, match.Key);
         }
     }
 
@@ -239,6 +251,7 @@ internal sealed class RemotePreviewPanel : Control
         controlFrames.Clear();
         controlSlots.Clear();
         inputFrames.Clear();
+        screenFrame = Rectangle.Empty;
         settingsSlot = -1;
         var graphics = eventArgs.Graphics;
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -314,6 +327,7 @@ internal sealed class RemotePreviewPanel : Control
             if (layout.Screen is not { } bounds) return;
             screen = Map(bounds.X, bounds.Y, bounds.Width, bounds.Height);
         }
+        screenFrame = screen;
         var shadowFrame = Rectangle.Inflate(screen, 9, 9);
         shadowFrame.Offset(0, 6);
         using var shadow = new SolidBrush(Color.FromArgb(110, 0, 0, 0));
@@ -606,9 +620,37 @@ internal sealed class RemotePreviewPanel : Control
             return;
         }
         var selected = control.Id == SelectedControlId;
-        using var fill = new SolidBrush(selected ? EditorTheme.PaperSelected : EditorTheme.PaperControl);
+        var style = control.ButtonBackground ?? (control.Kind == RemoteControlKind.Button ? DefaultButtonBackground : RemoteButtonBackground.Outline);
+        var foreground = ButtonImageStore.ColorFromHex(control.TintHex == "202020" ? null : control.TintHex,
+            style == RemoteButtonBackground.Filled ? Color.White : Color.Black);
+        var background = ButtonImageStore.ColorFromHex(control.BackgroundTintHex,
+            style == RemoteButtonBackground.Filled ? Color.Black : style == RemoteButtonBackground.Shaded ? Color.FromArgb(195, 195, 195) :
+                selected ? EditorTheme.PaperSelected : EditorTheme.PaperControl);
+        using var textColor = new SolidBrush(foreground);
+        using var fill = new SolidBrush(background);
         using var outline = new Pen(selected ? EditorTheme.PaperAccent : Color.FromArgb(157, 168, 162), selected ? 2 : 1);
         EditorTheme.FillRoundedRectangle(graphics, fill, frame, 5);
+        var texture = control.ButtonTexture ?? DefaultButtonTexture;
+        Bitmap? renderedTexture = null;
+        var nativeWidth = Math.Max(1, (int)Math.Round(frame.Width / screenScale));
+        var nativeHeight = Math.Max(1, (int)Math.Round(frame.Height / screenScale));
+        if (control.Kind == RemoteControlKind.Button && texture is { Kind: RemoteButtonTextureKind.Image, ImageID: { } imageId } &&
+            ButtonImageStore.Load(imageId) is { } imageBytes)
+            renderedTexture = ButtonImageStore.Render(imageBytes, texture, nativeWidth, nativeHeight,
+                background, foreground, control.ImageTintHex);
+        else if (control.Kind == RemoteControlKind.Button && texture.Kind == RemoteButtonTextureKind.Pattern)
+            renderedTexture = ButtonImageStore.RenderPattern(texture, nativeWidth, nativeHeight, background, foreground, control.ImageTintHex);
+        using (renderedTexture)
+        {
+            if (renderedTexture != null)
+            {
+                var state = graphics.Save();
+                using var clip = EditorTheme.RoundedRectangle(frame, 5);
+                graphics.SetClip(clip, CombineMode.Intersect);
+                graphics.DrawImage(renderedTexture, frame);
+                graphics.Restore(state);
+            }
+        }
         EditorTheme.DrawRoundedRectangle(graphics, outline, frame, 5);
         if (selected)
         {
@@ -682,7 +724,7 @@ internal sealed class RemotePreviewPanel : Control
         using var title = NativeButtonLabelLayout.Fit(graphics, text,
             RectangleF.Inflate(frame, -7 * screenScale, -7 * screenScale), MaxButtonTextSize, screenScale,
             wordOnlyWrap: control.Kind == RemoteControlKind.Button);
-        title.Draw(graphics, Brushes.Black);
+        title.Draw(graphics, textColor);
     }
 
     internal readonly record struct IconLayout(
@@ -732,11 +774,14 @@ internal sealed class RemotePreviewPanel : Control
     private void DrawIconAndTitle(Graphics graphics, RemoteControl control, string text, IconLayout layout,
         float screenScale)
     {
+        var foreground = ButtonImageStore.ColorFromHex(control.TintHex == "202020" ? null : control.TintHex,
+            (control.ButtonBackground ?? DefaultButtonBackground) == RemoteButtonBackground.Filled ? Color.White : Color.Black);
+        using var textColor = new SolidBrush(foreground);
         using var label = NativeButtonLabelLayout.Fit(graphics, text, layout.Title, MaxButtonTextSize, screenScale);
         if (layout.Horizontal)
         {
-            DrawControlIcon(graphics, control, layout.Icon, Color.Black);
-            label.Draw(graphics, Brushes.Black);
+            DrawControlIcon(graphics, control, layout.Icon, foreground);
+            label.Draw(graphics, textColor);
             return;
         }
         // Like the firmware, center the icon and measured title together as one group.
@@ -745,12 +790,12 @@ internal sealed class RemotePreviewPanel : Control
         var top = layout.Content.Top + (layout.Content.Height - layout.Extent - gap - textHeight) / 2;
         var icon = layout.Icon;
         icon.Y = top + layout.Extent / 2 - icon.Height / 2;
-        DrawControlIcon(graphics, control, icon, Color.Black);
+        DrawControlIcon(graphics, control, icon, foreground);
         var shift = top + layout.Extent + gap - label.TextBounds.Top;
         var shiftedTitle = layout.Title;
         shiftedTitle.Offset(0, shift);
         using var shifted = NativeButtonLabelLayout.Fit(graphics, text, shiftedTitle, MaxButtonTextSize, screenScale);
-        shifted.Draw(graphics, Brushes.Black);
+        shifted.Draw(graphics, textColor);
     }
 
     private static void DrawControlIcon(Graphics graphics, RemoteControl control, RectangleF bounds, Color color)

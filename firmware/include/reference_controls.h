@@ -12,6 +12,10 @@ enum Index : uint8_t { wifiConnected, wifiSignal, restart,
     dialPresent, dialPosition, dialAngle, dialOutput, dialMode, dialStart, dialSweep, dialTurns,
     dialStep, dialJitter, dialLowLatency, dialRate, dialZero,
 #endif
+#if defined(PAPERGIF_NATIVE_IDF) && defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    screensaverEnabled, screensaverDelay, screensaverInterval, screensaverNow, screensaverClear, screensaverImageCount,
+    sdCardMounted, sdCardCapacity, mediaImageLimit,
+#endif
     count };
 
 #if defined(PAPERGIF_SUPERMINI_S3)
@@ -41,6 +45,17 @@ static const Control controls[] = {
     {"dialLowLatency", "Low latency mode", Kind::toggle, "Dial", 0, 0, 0, nullptr, nullptr, 0, false, false},
     {"dialRate", "Low latency rate", Kind::range, "Dial", 15, 500, 1, "/s", nullptr, 0, false, false},
     {"dialZero", "Set current position to start", Kind::action, "Dial", 0, 0, 0, nullptr, nullptr, 0, false, false},
+#endif
+#if defined(PAPERGIF_NATIVE_IDF) && defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    {"screensaverEnabled", "Screensaver", Kind::toggle, "Display", 0, 0, 0, nullptr, nullptr, 0, false, false},
+    {"screensaverDelay", "Idle delay", Kind::range, "Display", 10, 3600, 10, "s", nullptr, 0, false, false},
+    {"screensaverInterval", "Image interval", Kind::range, "Display", 5, 300, 5, "s", nullptr, 0, false, false},
+    {"screensaverNow", "Show images", Kind::action, "Display", 0, 0, 0, nullptr, nullptr, 0, false, false},
+    {"screensaverClear", "Clear screensaver images", Kind::action, "Display", 0, 0, 0, nullptr, nullptr, 0, false, true},
+    {"screensaverImageCount", "Stored images", Kind::range, "Display", 0, 128, 1, nullptr, nullptr, 0, true, false},
+    {"sdCardMounted", "SD card mounted", Kind::toggle, "Storage", 0, 0, 0, nullptr, nullptr, 0, true, false},
+    {"sdCardCapacity", "SD card capacity", Kind::range, "Storage", 0, 1e9, 1, "MB", nullptr, 0, true, false},
+    {"mediaImageLimit", "Image limit", Kind::range, "Storage", 1, 128, 1, nullptr, nullptr, 0, true, false},
 #endif
 };
 

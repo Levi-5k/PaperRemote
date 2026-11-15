@@ -1,4 +1,5 @@
 import CoreGraphics
+import PaperDeviceKit
 import SwiftUI
 
 struct PaperGIFMediaEditorView: View {
@@ -10,6 +11,7 @@ struct PaperGIFMediaEditorView: View {
     let name: String
     let sourcePreview: CGImage
     let isAnimated: Bool
+    let colorDisplay: DeviceDisplay?
     let onSave: (PaperGIFConversionRecipe) -> Void
     let onCancel: () -> Void
 
@@ -24,12 +26,14 @@ struct PaperGIFMediaEditorView: View {
         initialRecipe: PaperGIFConversionRecipe,
         isNew: Bool,
         startsAtAdjustment: Bool = false,
+        colorDisplay: DeviceDisplay? = nil,
         onSave: @escaping (PaperGIFConversionRecipe) -> Void,
         onCancel: @escaping () -> Void
     ) {
         self.name = name
         self.sourcePreview = sourcePreview
         self.isAnimated = isAnimated
+        self.colorDisplay = colorDisplay
         self.onSave = onSave
         self.onCancel = onCancel
         _recipe = State(initialValue: initialRecipe)
@@ -45,7 +49,9 @@ struct PaperGIFMediaEditorView: View {
                     image: sourcePreview,
                     initialCropRect: recipe.cropRect,
                     initialRotationQuarterTurns: recipe.rotationQuarterTurns,
-                    initialFramingIsCrop: cropFramingIsCrop
+                    initialFramingIsCrop: cropFramingIsCrop,
+                    targetSize: CGSize(width: colorDisplay?.width ?? PaperGIFAnimation.width,
+                        height: colorDisplay?.height ?? PaperGIFAnimation.height)
                 ) { cropRect, rotationQuarterTurns in
                     recipe.cropRect = cropRect
                     recipe.rotationQuarterTurns = rotationQuarterTurns
@@ -59,7 +65,8 @@ struct PaperGIFMediaEditorView: View {
                     name: name,
                     sourcePreview: sourcePreview,
                     isAnimated: isAnimated,
-                    recipe: $recipe
+                    recipe: $recipe,
+                    colorDisplay: colorDisplay
                 ) {
                     step = .crop
                 } onSave: {

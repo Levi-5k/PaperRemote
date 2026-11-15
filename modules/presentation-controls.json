@@ -5,7 +5,7 @@
   "name": "Presentation Controls",
   "summary": "Cross-platform slide controls for presenting from your computer.",
   "version": "1.0.0",
-  "author": "paperGIF",
+  "author": "OP Remote",
   "controls": [
     {
       "id": "start-presentation",

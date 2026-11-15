@@ -155,10 +155,8 @@ internal sealed class WindowsTextSourceResolver(
             var duration = timeline.EndTime - timeline.StartTime;
             var elapsed = timeline.Position - timeline.StartTime;
             var durationMilliseconds = Math.Max(0, (long)duration.TotalMilliseconds);
-            var elapsedMilliseconds = Math.Clamp(
-                (long)elapsed.TotalMilliseconds,
-                0,
-                durationMilliseconds);
+            var elapsedMilliseconds = PlaybackElapsedMilliseconds(elapsed, duration,
+                isPlaying, timeline.LastUpdatedTime, DateTimeOffset.UtcNow);
             return new MediaSessionState(
                 description,
                 isPlaying,
@@ -170,6 +168,14 @@ internal sealed class WindowsTextSourceResolver(
         {
             return null;
         }
+    }
+
+    internal static long PlaybackElapsedMilliseconds(TimeSpan position, TimeSpan duration,
+        bool playing, DateTimeOffset sampledAt, DateTimeOffset now)
+    {
+        var advance = playing && sampledAt != default && now > sampledAt ? now - sampledAt : TimeSpan.Zero;
+        return (long)Math.Clamp(position.TotalMilliseconds + advance.TotalMilliseconds,
+            0, Math.Max(0, duration.TotalMilliseconds));
     }
 
     private static async Task<string?> RunScriptAsync(

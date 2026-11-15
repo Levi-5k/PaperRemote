@@ -1,4 +1,4 @@
-# paperGIF HTTP and Discovery Contract
+# OP Remote HTTP and Discovery Contract
 
 ## Roles
 

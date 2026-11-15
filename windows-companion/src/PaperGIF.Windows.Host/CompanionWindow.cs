@@ -34,7 +34,7 @@ internal sealed class CompanionWindow : Form
         this.activity = activity;
         this.pairingApprovalService = pairingApprovalService;
         this.startupRegistration = startupRegistration;
-        Text = "paperGIF Windows Companion";
+        Text = "OP Remote";
         Icon = (Icon)icon.Clone();
         ClientSize = new Size(620, 520);
         MinimumSize = new Size(560, 480);
@@ -62,7 +62,7 @@ internal sealed class CompanionWindow : Form
             Font = new Font("Segoe UI Semibold", 20F),
             ForeColor = Color.White,
             Location = new Point(94, 20),
-            Text = "paperGIF",
+            Text = "OP Remote",
         };
         var subtitle = new Label
         {
@@ -302,7 +302,7 @@ internal sealed class CompanionWindow : Form
             MessageBox.Show(
                 this,
                 error ?? "The startup setting could not be changed.",
-                "paperGIF",
+                "OP Remote",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
             RefreshStartupControl();

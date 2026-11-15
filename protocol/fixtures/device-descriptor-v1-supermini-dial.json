@@ -3,7 +3,7 @@
   "protocolVersion": 1,
   "deviceID": "fixture-supermini-dial",
   "name": "ESP32-S3 SuperMini with MT6701",
-  "manufacturer": "PaperGIF",
+  "manufacturer": "OP Remote",
   "boardID": "paperremote.supermini-s3-mt6701",
   "hardwareRevision": "1",
   "firmwareVersion": "test",

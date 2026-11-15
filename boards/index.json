@@ -21,6 +21,13 @@
       "version": 2,
       "path": "supermini-s3-mt6701.json",
       "sha256": "8f0a1badd68067630829af8b722440f401fd1e5de62de4527989edaddb8959b9"
+    },
+    {
+      "boardID": "paperremote.waveshare-amoled-18-v2",
+      "hardwareRevisions": ["2"],
+      "version": 1,
+      "path": "waveshare-amoled-18-v2.json",
+      "sha256": "531bd6e4fb85b74b511276b3ea8a0fe886301665721055d94de7ba24d736dd29"
     }
   ]
 }

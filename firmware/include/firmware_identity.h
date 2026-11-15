@@ -8,6 +8,7 @@ namespace paper_board {
 constexpr char m5paperFirmwareIdentity[] = "PGIFBOARD:m5stack.m5paper@1.0;";
 constexpr char referenceFirmwareIdentity[] = "PGIFBOARD:paperremote.esp32-screenless-reference@1;";
 constexpr char superminiS3FirmwareIdentity[] = "PGIFBOARD:paperremote.supermini-s3-mt6701@1;";
+constexpr char waveshareAmoled18FirmwareIdentity[] = "PGIFBOARD:paperremote.waveshare-amoled-18-v2@2;";
 class FirmwareIdentityScanner {
     size_t matched = 0;
     bool found = false;

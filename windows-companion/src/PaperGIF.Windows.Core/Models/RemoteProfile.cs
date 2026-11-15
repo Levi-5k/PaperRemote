@@ -70,6 +70,7 @@ public sealed class RemoteButtonTexture
     public int Angle { get; set; } = 45;
     public int DotGain { get; set; }
     public int Fade { get; set; } = 50;
+    public bool PreserveColor { get; set; }
 }
 
 public enum RemoteJogMode
@@ -217,6 +218,8 @@ public sealed class RemoteControl
     public string Symbol { get; set; } = string.Empty;
     public string? IconBitmap { get; set; }
     public string TintHex { get; set; } = "202020";
+    public string? BackgroundTintHex { get; set; }
+    public string? ImageTintHex { get; set; }
     public RemoteControlKind Kind { get; set; }
     public bool? IsToggle { get; set; }
     public int? ButtonHeight { get; set; }

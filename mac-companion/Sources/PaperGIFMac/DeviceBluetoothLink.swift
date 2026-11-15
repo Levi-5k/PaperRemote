@@ -367,7 +367,7 @@ final class DeviceBluetoothRelay: NSObject, ObservableObject {
 
     private static func describe(_ state: CBManagerState) -> String {
         switch state {
-        case .unauthorized: "Bluetooth permission is off for paperGIF Mac"
+        case .unauthorized: "Bluetooth permission is off for OP Remote"
         case .poweredOff: "Bluetooth is off"
         case .unsupported: "Bluetooth is not supported on this Mac"
         default: "Bluetooth is not ready"

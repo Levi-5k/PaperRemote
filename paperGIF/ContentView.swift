@@ -4,6 +4,14 @@ import PaperDeviceKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum PaperGIFAppTab: Hashable {
+    case remote
+    case edit
+    case media
+    case settings
+    case device
+}
+
 struct ContentView: View {
     private enum LibraryLocation: String, CaseIterable, Identifiable {
         case phone = "Phone"
@@ -13,9 +21,11 @@ struct ContentView: View {
     }
 
     @StateObject private var bluetoothManager = PaperGIFBluetoothManager()
-    @StateObject private var homeManager = PaperGIFHomeManager()
     @StateObject private var deviceSession = DeviceSession()
     @State private var profileDeviceID: String?
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(PaperGIFPhoneRemoteBackground.storageKey) private var phoneBackgroundRaw = PaperGIFPhoneRemoteBackground.off.rawValue
 
     @AppStorage(PaperGIFSettingKey.monochromeMode) private var monochromeMode = PaperGIFMonochromeMode.threshold
     @AppStorage(PaperGIFSettingKey.threshold) private var threshold = 128.0
@@ -46,37 +56,66 @@ struct ContentView: View {
     @State private var errorMessage: String?
     @State private var remoteProfileSaveError: String?
     @State private var remoteProfile = PaperGIFStorage.loadRemoteProfile()
+    @State private var isLoadingConnectedProfile = false
+    @State private var selectedTab = PaperGIFAppTab.remote
+    @State private var remotePageID: UUID?
+    @State private var remoteTabBarMinimizeRequests = 0
 
     var body: some View {
-        TabView {
+        root
+    }
+
+    private var tabs: some View {
+        TabView(selection: $selectedTab) {
+            PaperGIFPhoneRemoteView(
+                profile: remoteProfile,
+                isVisible: selectedTab == .remote,
+                selectedPageID: $remotePageID,
+                minimizeTabBarRequests: remoteTabBarMinimizeRequests
+            )
+                .environment(\.paperGIFEffectTab, .remote)
+                .tag(PaperGIFAppTab.remote)
+                .tabItem {
+                    Label("Remote", systemImage: "av.remote")
+                }
+
             PaperGIFRemoteView(
                 profile: $remoteProfile,
                 bluetoothManager: bluetoothManager,
-                deviceSession: deviceSession
+                deviceSession: deviceSession,
+                locksLayout: (deviceSession.isLoading && deviceSession.descriptor == nil) || isLoadingConnectedProfile
             )
+            .environment(\.paperGIFEffectTab, .edit)
             .id(deviceSession.selectedID ?? "offline")
-            .disabled(deviceSession.isLoading && deviceSession.descriptor == nil)
+            .tag(PaperGIFAppTab.edit)
             .tabItem {
-                Label("Remote", systemImage: "rectangle.grid.2x2")
+                Label("Edit", systemImage: "square.and.pencil")
             }
 
             Group {
-                if let descriptor = deviceSession.descriptor, !descriptor.canUseLegacyMedia {
-                    ContentUnavailableView(
-                        "Media Unavailable", systemImage: "photo.badge.exclamationmark",
-                        description: Text(descriptor.display == nil
-                            ? "This controller has no screen."
-                            : "This panel has no compatible media encoder. M5Paper image data is never sent to a different panel.")
-                    )
+                if let descriptor = deviceSession.descriptor, !supportsMedia {
+                    PaperGIFEmptyScreen(isVisible: selectedTab == .media) {
+                        ContentUnavailableView(
+                            "Media Unavailable", systemImage: "photo.badge.exclamationmark",
+                            description: Text(descriptor.display == nil
+                                ? "This controller has no screen."
+                                : "This panel has no compatible media encoder. M5Paper image data is never sent to a different panel.")
+                        )
+                    }
                 } else {
                     mediaView
                 }
             }
-                .tabItem {
-                    Label("Media", systemImage: "photo.stack")
-                }
+            .environment(\.paperGIFEffectTab, .media)
+            .tag(PaperGIFAppTab.media)
+            .tabItem {
+                Label("Media", systemImage: "photo.stack")
+            }
 
             PaperGIFSettingsView(
+                profile: $remoteProfile,
+                bluetoothManager: bluetoothManager,
+                deviceSession: deviceSession,
                 monochromeMode: $monochromeMode,
                 threshold: $threshold,
                 monochromeLevels: $monochromeLevels,
@@ -87,8 +126,11 @@ struct ContentView: View {
                 scanRateHz: $scanRateHz,
                 transitionScans: $transitionScans,
                 cleanRefreshInterval: $cleanRefreshInterval,
-                adaptiveCleaning: $adaptiveCleaning
+                adaptiveCleaning: $adaptiveCleaning,
+                effectsLive: selectedTab == .settings
             )
+            .environment(\.paperGIFEffectTab, .settings)
+            .tag(PaperGIFAppTab.settings)
             .tabItem {
                 Label("Settings", systemImage: "slider.horizontal.3")
             }
@@ -98,21 +140,45 @@ struct ContentView: View {
                 animation: animation,
                 sourceName: sourceName,
                 session: deviceSession,
-                profile: $remoteProfile
+                profile: $remoteProfile,
+                effectsLive: selectedTab == .device
             )
+            .environment(\.paperGIFEffectTab, .device)
+            .tag(PaperGIFAppTab.device)
             .tabItem {
                 Label("Device", systemImage: "antenna.radiowaves.left.and.right")
             }
         }
+    }
+
+    private var remoteShaderCoversChrome: Bool {
+        selectedTab == .remote && (PaperGIFPhoneRemoteBackground(rawValue: phoneBackgroundRaw) ?? .off) != .off
+    }
+
+    private var root: some View {
+        mediaChrome
+    }
+
+    private var profileChrome: some View {
+        tabs
+        .toolbarBackground(remoteShaderCoversChrome ? .hidden : .visible, for: .tabBar)
+        .toolbarColorScheme(selectedTab == .remote ? .dark : colorScheme, for: .tabBar)
         .tabViewStyle(.sidebarAdaptable)
-        .onAppear {
-            bluetoothManager.deviceSession = deviceSession
-            bluetoothManager.updateRelayProfile(remoteProfile)
-            if deviceSession.selectedID == nil,
-               let id = UserDefaults.standard.string(forKey: "devices.selectedControllerID"),
-               deviceSession.records.contains(where: { $0.id == id }) {
-                deviceSession.select(id: id)
+        .tabBarMinimizeBehavior(.onScrollDown)
+        .tabViewBottomAccessory(isEnabled: selectedTab == .remote && !remoteProfile.pages.isEmpty) {
+            PaperGIFRemotePageAccessory(pages: remoteProfile.pages, selectedPageID: $remotePageID) {
+                remoteTabBarMinimizeRequests += 1
             }
+        }
+        .onAppear {
+            PaperGIFEffectVisibility.publish(tab: selectedTab, sceneIsActive: scenePhase == .active)
+            connectSelectedController()
+        }
+        .onChange(of: selectedTab) { _, tab in
+            PaperGIFEffectVisibility.publish(tab: tab, sceneIsActive: scenePhase == .active)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            PaperGIFEffectVisibility.publish(tab: selectedTab, sceneIsActive: phase == .active)
         }
         .onChange(of: deviceSession.selectedID) {
             selectProfileForDevice()
@@ -120,13 +186,27 @@ struct ContentView: View {
         .onChange(of: remoteProfile) {
             bluetoothManager.updateRelayProfile(remoteProfile)
         }
-        .task(id: bluetoothManager.bluetoothDescriptor) {
-            guard let descriptor = bluetoothManager.bluetoothDescriptor,
-                  deviceSession.selectedID == nil || deviceSession.selectedID == descriptor.deviceID else { return }
-            let address = deviceSession.records.first { $0.id == descriptor.deviceID }?.address ?? ""
-            do { try await deviceSession.applyDescriptor(descriptor, address: address) }
-            catch { remoteProfileSaveError = error.localizedDescription }
+        .task(id: deviceSession.isVerified ? profileDeviceID : nil) {
+            await loadConnectedAMOLEDProfile()
         }
+        .task(id: bluetoothManager.bluetoothDescriptor) {
+            await applyConnectedDescriptor()
+        }
+        .onChange(of: bluetoothManager.remoteProfileFromDevice) {
+            applyRemoteProfileFromDevice()
+        }
+        .task {
+            restoreLibrary()
+        }
+        .task {
+            bluetoothManager.startBrowsingNearby()
+            defer { bluetoothManager.stopBrowsingNearby() }
+            await bluetoothManager.monitorWiFiConnection()
+        }
+    }
+
+    private var mediaChrome: some View {
+        profileChrome
         .fileImporter(isPresented: $isImporting, allowedContentTypes: [.image]) { result in
             importMedia(result)
         }
@@ -134,94 +214,14 @@ struct ContentView: View {
             guard let selectedPhoto else { return }
             importPhoto(selectedPhoto)
         }
-        .onChange(of: bluetoothManager.localHomePowerCommandEvent) {
-            guard let event = bluetoothManager.localHomePowerCommandEvent else { return }
-            bluetoothManager.sendHomePowerStatus(0)
-            homeManager.performPowerCommand(
-                event.command,
-                accessoryID: event.accessoryID,
-                serviceID: event.serviceID
-            ) { error in
-                Task { @MainActor in
-                    bluetoothManager.sendHomePowerStatus(
-                        error == nil ? 1 : 2,
-                        message: error?.localizedDescription ?? ""
-                    )
-                    if let error {
-                        errorMessage = error.localizedDescription
-                    }
-                }
-            }
-        }
-        .onChange(of: bluetoothManager.remoteProfileFromDevice) {
-            guard bluetoothManager.legacyBLEPermitted else { return }
-            guard let deviceProfile = bluetoothManager.remoteProfileFromDevice,
-                  deviceProfile != remoteProfile else { return }
-            if remoteProfile.updatedAtMilliseconds > deviceProfile.updatedAtMilliseconds {
-                bluetoothManager.syncRemoteProfile(remoteProfile)
-                return
-            }
-            if deviceProfile.usesStarterLayout && !remoteProfile.usesStarterLayout {
-                var recoveredProfile = remoteProfile
-                recoveredProfile.markUpdated()
-                do {
-                    try PaperGIFStorage.saveRemoteProfile(recoveredProfile, deviceID: profileDeviceID)
-                    remoteProfile = recoveredProfile
-                    bluetoothManager.syncRemoteProfile(recoveredProfile)
-                } catch {
-                    remoteProfileSaveError = error.localizedDescription
-                }
-                return
-            }
-            if deviceProfile.updatedAtMilliseconds == remoteProfile.updatedAtMilliseconds,
-               deviceProfile.updatedAtMilliseconds > 0 {
-                return
-            }
-            var reconciledProfile = deviceProfile
-            let repairedComputerHosts = reconciledProfile.preserveNumericComputerHosts(
-                from: remoteProfile
-            )
-            do {
-                if repairedComputerHosts {
-                    reconciledProfile.markUpdated()
-                }
-                try PaperGIFStorage.saveRemoteProfile(reconciledProfile, deviceID: profileDeviceID)
-                remoteProfile = reconciledProfile
-                if repairedComputerHosts,
-                   bluetoothManager.connectionState == .connected {
-                    bluetoothManager.syncRemoteProfile(reconciledProfile)
-                }
-
-            } catch {
-                remoteProfileSaveError = error.localizedDescription
-            }
-        }
-        .task {
-            restoreLibrary()
-        }
-        .task {
-            await bluetoothManager.monitorWiFiConnection()
-        }
         .sheet(item: $pendingMedia) { media in
-            PaperGIFMediaEditorView(
-                name: media.name,
-                sourcePreview: media.preview,
-                isAnimated: media.isAnimated,
-                initialRecipe: media.recipe,
-                isNew: media.savedMediaID == nil,
-                startsAtAdjustment: media.startsAtAdjustment
-            ) { recipe in
-                pendingMedia = nil
-                convert(media, recipe: recipe)
-            } onCancel: {
-                pendingMedia = nil
-            }
+            mediaEditor(for: media)
         }
         .fileExporter(
             isPresented: $isExporting,
             document: exportDocument,
-            contentType: .paperGIF,
-            defaultFilename: "\(sourceName).pgif"
+            contentType: exportDocument?.isColorImage == true ? .data : .paperGIF,
+            defaultFilename: "\(sourceName).\(exportDocument?.isColorImage == true ? "pimg" : "pgif")"
         ) { result in
             if case .failure(let error) = result {
                 errorMessage = error.localizedDescription
@@ -242,14 +242,99 @@ struct ContentView: View {
         }
     }
 
+    private func connectSelectedController() {
+        bluetoothManager.deviceSession = deviceSession
+        bluetoothManager.updateRelayProfile(remoteProfile)
+        guard !UserDefaults.standard.bool(forKey: PaperGIFSettingKey.editingPhone) else { return }
+        if deviceSession.selectedID == nil,
+           let id = UserDefaults.standard.string(forKey: "devices.selectedControllerID"),
+           deviceSession.records.contains(where: { $0.id == id }) {
+            deviceSession.select(id: id)
+        }
+    }
+
+    private func applyConnectedDescriptor() async {
+        guard !UserDefaults.standard.bool(forKey: PaperGIFSettingKey.editingPhone) else { return }
+        guard let descriptor = bluetoothManager.bluetoothDescriptor,
+              deviceSession.selectedID == nil || deviceSession.selectedID == descriptor.deviceID else { return }
+        let address = deviceSession.records.first { $0.id == descriptor.deviceID }?.address ?? ""
+        do {
+            try await deviceSession.applyDescriptor(descriptor, address: address)
+            bluetoothManager.requestDeviceWiFiStatus()
+        }
+        catch { remoteProfileSaveError = error.localizedDescription }
+    }
+
+    private func applyRemoteProfileFromDevice() {
+        guard bluetoothManager.legacyBLEPermitted, !bluetoothManager.isEditingPhoneProfile else { return }
+        guard let deviceProfile = bluetoothManager.remoteProfileFromDevice,
+              deviceProfile != remoteProfile else { return }
+        if remoteProfile.updatedAtMilliseconds > deviceProfile.updatedAtMilliseconds {
+            bluetoothManager.syncRemoteProfile(remoteProfile)
+            return
+        }
+        if deviceProfile.usesStarterLayout && !remoteProfile.usesStarterLayout {
+            var recoveredProfile = remoteProfile
+            recoveredProfile.markUpdated()
+            do {
+                try PaperGIFStorage.saveRemoteProfile(recoveredProfile, deviceID: profileDeviceID)
+                remoteProfile = recoveredProfile
+                bluetoothManager.syncRemoteProfile(recoveredProfile)
+            } catch {
+                remoteProfileSaveError = error.localizedDescription
+            }
+            return
+        }
+        if deviceProfile.updatedAtMilliseconds == remoteProfile.updatedAtMilliseconds,
+           deviceProfile.updatedAtMilliseconds > 0 {
+            return
+        }
+        var reconciledProfile = deviceProfile
+        let repairedComputerHosts = reconciledProfile.preserveNumericComputerHosts(from: remoteProfile)
+        do {
+            if repairedComputerHosts {
+                reconciledProfile.markUpdated()
+            }
+            try PaperGIFStorage.saveRemoteProfile(reconciledProfile, deviceID: profileDeviceID)
+            remoteProfile = reconciledProfile
+            if repairedComputerHosts, bluetoothManager.connectionState == .connected {
+                bluetoothManager.syncRemoteProfile(reconciledProfile)
+            }
+        } catch {
+            remoteProfileSaveError = error.localizedDescription
+        }
+    }
+
+    private func mediaEditor(for media: PendingMedia) -> some View {
+        PaperGIFMediaEditorView(
+            name: media.name,
+            sourcePreview: media.preview,
+            isAnimated: media.isAnimated && colorDisplay == nil,
+            initialRecipe: media.recipe,
+            isNew: media.savedMediaID == nil,
+            startsAtAdjustment: media.startsAtAdjustment,
+            colorDisplay: colorDisplay
+        ) { recipe in
+            pendingMedia = nil
+            convert(media, recipe: recipe)
+        } onCancel: {
+            pendingMedia = nil
+        }
+    }
+
     private func selectProfileForDevice() {
         do {
             if let previousID = profileDeviceID {
                 try PaperGIFStorage.saveRemoteProfile(remoteProfile, deviceID: previousID)
+            } else {
+                try PaperGIFStorage.saveRemoteProfile(remoteProfile)
             }
             bluetoothManager.selectedDeviceChanged()
             profileDeviceID = deviceSession.selectedID
-            guard let id = profileDeviceID, let descriptor = deviceSession.descriptor else { return }
+            guard let id = profileDeviceID, let descriptor = deviceSession.descriptor else {
+                remoteProfile = PaperGIFStorage.loadRemoteProfile()
+                return
+            }
             UserDefaults.standard.set(id, forKey: "devices.selectedControllerID")
             if let data = deviceSession.profileData,
                let saved = try? JSONDecoder().decode(PaperGIFRemoteProfile.self, from: data) {
@@ -268,11 +353,45 @@ struct ContentView: View {
                 }
             }
             if descriptor.capabilities.profileVersions.contains(7) { remoteProfile.version = 7 }
-            if !descriptor.canUseLegacyMedia {
-                pendingMedia = nil
-                selectedPhoto = nil
+            if remoteProfile.prepareBluetoothEnrollment(for: descriptor,
+                savedToken: PaperGIFDeviceCredentials.token(for: id)) {
+                try PaperGIFStorage.saveRemoteProfile(remoteProfile, deviceID: id)
+                try deviceSession.saveProfile(JSONEncoder().encode(remoteProfile))
             }
+            pendingMedia = nil
+            selectedPhoto = nil
         } catch { remoteProfileSaveError = error.localizedDescription }
+    }
+
+    private func loadConnectedAMOLEDProfile() async {
+        guard deviceSession.isVerified, let descriptor = deviceSession.descriptor,
+              descriptor.boardID == "paperremote.waveshare-amoled-18-v2",
+              profileDeviceID == descriptor.deviceID else { return }
+          isLoadingConnectedProfile = true
+          defer { isLoadingConnectedProfile = false }
+        let snapshot = remoteProfile
+        do {
+            let data = try await deviceSession.loadProfile(token: PaperGIFDeviceCredentials.token(for: descriptor.deviceID))
+            try Task.checkCancellation()
+            guard profileDeviceID == descriptor.deviceID else { return }
+            let loaded = try PaperGIFRemoteProfile.profileFromDeviceRefresh(data, descriptor: descriptor,
+                previousLocalProfile: snapshot, currentLocalProfile: remoteProfile)
+            try PaperGIFStorage.saveRemoteProfile(loaded, deviceID: descriptor.deviceID)
+            try deviceSession.saveProfile(data)
+            bluetoothManager.confirmLoadedRemoteProfile(loaded)
+            remoteProfile = loaded
+        } catch is CancellationError {
+        } catch {
+            remoteProfileSaveError = "Could not load the device profile. Your saved profile was not sent: \(error.localizedDescription)"
+        }
+    }
+
+    private var supportsMedia: Bool {
+        deviceSession.descriptor.map { $0.canUseLegacyMedia || $0.canUseColorImages } ?? true
+    }
+
+    private var colorDisplay: DeviceDisplay? {
+        deviceSession.descriptor?.canUseColorImages == true ? deviceSession.descriptor?.display : nil
     }
 
     private var mediaView: some View {
@@ -321,12 +440,13 @@ struct ContentView: View {
     private var phoneMediaContent: some View {
         GeometryReader { proxy in
             if savedMedia.isEmpty && !isConverting {
-                ContentUnavailableView(
-                    "No Media",
-                    systemImage: "photo.on.rectangle",
-                    description: Text("Add a picture or GIF to begin.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                PaperGIFEmptyScreen(isVisible: selectedTab == .media) {
+                    ContentUnavailableView(
+                        "No Media",
+                        systemImage: "photo.on.rectangle",
+                        description: Text("Add a picture or GIF to begin.")
+                    )
+                }
             } else {
                 let rowHeight = min(176, max(112, (proxy.size.height - 48) / 3))
                 List {
@@ -335,6 +455,8 @@ struct ContentView: View {
                             savedMedia: saved,
                             isSelected: selectedSavedMediaID == saved.id,
                             bluetoothManager: bluetoothManager,
+                            descriptor: deviceSession.descriptor,
+                            effectsLive: selectedTab == .media,
                             onChangeCrop: { edit(saved, startsAtAdjustment: false) },
                             onEditConversion: { edit(saved, startsAtAdjustment: true) },
                             onExport: { export(saved) },
@@ -359,8 +481,13 @@ struct ContentView: View {
                 .overlay(alignment: .top) {
                     if isConverting {
                         HStack(spacing: 10) {
-                            ProgressView(value: conversionProgress)
-                                .frame(width: 72)
+                            if selectedTab == .media {
+                                PaperGIFTransferBar(fraction: conversionProgress, label: conversionStatus)
+                                    .frame(width: 120)
+                            } else {
+                                ProgressView(value: conversionProgress)
+                                    .frame(width: 72)
+                            }
                             Text(conversionStatus)
                                 .monospacedDigit()
                         }
@@ -403,31 +530,36 @@ struct ContentView: View {
     @ViewBuilder
     private var deviceLibraryContent: some View {
         if !bluetoothManager.canAccessDeviceLibrary && bluetoothManager.deviceMedia.isEmpty {
-            ContentUnavailableView(
-                "Device Unavailable",
-                systemImage: "antenna.radiowaves.left.and.right.slash",
-                description: Text("Connect to the M5Paper to manage its library.")
-            )
+            PaperGIFEmptyScreen(isVisible: selectedTab == .media) {
+                ContentUnavailableView(
+                    "Device Unavailable",
+                    systemImage: "antenna.radiowaves.left.and.right.slash",
+                    description: Text("Connect to the selected device to manage its library.")
+                )
+            }
         } else if bluetoothManager.isLoadingDeviceLibrary && bluetoothManager.deviceMedia.isEmpty {
-            ProgressView("Loading device library")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            PaperGIFActivityWait(label: "Loading device library", isLive: selectedTab == .media)
         } else if let error = bluetoothManager.deviceLibraryError {
-            ContentUnavailableView {
-                Label("Couldn’t Load Device", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(error)
-            } actions: {
-                Button("Try Again") {
-                    bluetoothManager.refreshDeviceLibrary()
+            PaperGIFEmptyScreen(isVisible: selectedTab == .media) {
+                ContentUnavailableView {
+                    Label("Couldn’t Load Device", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                } actions: {
+                    Button("Try Again") {
+                        bluetoothManager.refreshDeviceLibrary()
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
             }
         } else if bluetoothManager.deviceMedia.isEmpty {
-            ContentUnavailableView(
-                "No Device Media",
-                systemImage: "display",
-                description: Text("Media sent to the M5Paper appears here.")
-            )
+            PaperGIFEmptyScreen(isVisible: selectedTab == .media) {
+                ContentUnavailableView(
+                    "No Device Media",
+                    systemImage: "display",
+                    description: Text("Media sent to this device appears here.")
+                )
+            }
         } else {
             List(bluetoothManager.deviceMedia) { media in
                 Button {
@@ -494,7 +626,7 @@ struct ContentView: View {
     }
 
     private func importMedia(_ result: Result<URL, Error>) {
-        guard deviceSession.descriptor?.canUseLegacyMedia != false else { return }
+        guard supportsMedia else { return }
         do {
             let url = try result.get()
             let hasSecurityAccess = url.startAccessingSecurityScopedResource()
@@ -518,7 +650,7 @@ struct ContentView: View {
     }
 
     private func importPhoto(_ item: PhotosPickerItem) {
-        guard deviceSession.descriptor?.canUseLegacyMedia != false else { return }
+        guard supportsMedia else { return }
         Task {
             defer { selectedPhoto = nil }
             do {
@@ -539,7 +671,8 @@ struct ContentView: View {
     }
 
     private func convert(_ media: PendingMedia, recipe: PaperGIFConversionRecipe) {
-        guard deviceSession.descriptor?.canUseLegacyMedia != false else { return }
+        guard supportsMedia else { return }
+        let colorDisplay = colorDisplay
         isConverting = true
         conversionProgress = 0
         conversionStatus = "Converting 0%"
@@ -547,19 +680,9 @@ struct ContentView: View {
 
         Task {
             do {
-                let conversion = try await Task.detached(priority: .userInitiated) {
-                    let result = try PaperGIFEncoder.encode(
-                        mediaData: media.data,
-                        monochromeMode: recipe.monochromeMode,
-                        threshold: UInt8(clamping: Int(recipe.threshold.rounded())),
-                        monochromeLevels: recipe.monochromeLevels,
-                        halftoneDotSpacing: recipe.halftoneDotSpacing,
-                        halftoneAngle: recipe.halftoneAngle,
-                        halftoneDotGain: recipe.halftoneDotGain,
-                        maximumFramesPerSecond: recipe.maximumFramesPerSecond,
-                        cropRect: recipe.cropRect,
-                        rotationQuarterTurns: recipe.rotationQuarterTurns,
-                        playbackConfiguration: recipe.playbackConfiguration,
+                let encoded = try await Task.detached(priority: .userInitiated) {
+                    try PaperGIFStorage.LoadedMedia(data: Data(), sourceData: media.data, recipe: recipe).convertedData(
+                        for: colorDisplay,
                         progress: { progress in
                             Task { @MainActor in
                                 conversionProgress = progress
@@ -567,10 +690,8 @@ struct ContentView: View {
                             }
                         }
                     )
-                    return (result, result.encoded)
                 }.value
-                let result = conversion.0
-                let encoded = conversion.1
+                let result = colorDisplay == nil ? try PaperGIFAnimation(encoded: encoded) : nil
                 conversionProgress = 1
                 conversionStatus = "Saving"
                 let saved = try await Task.detached(priority: .utility) {
@@ -618,7 +739,7 @@ struct ContentView: View {
                     try PaperGIFStorage.loadData(saved)
                 }.value
                 let restoredAnimation = try await Task.detached(priority: .userInitiated) {
-                    try PaperGIFAnimation(encoded: data)
+                    saved.isColorImage ? nil : try PaperGIFAnimation(encoded: data)
                 }.value
                 sourceName = saved.name
                 animation = restoredAnimation
@@ -708,6 +829,7 @@ struct ContentView: View {
                     try PaperGIFStorage.loadData(saved)
                 }.value
                 exportDocument = PaperGIFDocument(data: data)
+                sourceName = saved.name
                 isExporting = true
             } catch {
                 errorMessage = error.localizedDescription
@@ -747,9 +869,10 @@ private struct PendingMedia: Identifiable {
 }
 
 private struct PaperGIFDocument: FileDocument {
-    static let readableContentTypes: [UTType] = [.paperGIF]
+    static let readableContentTypes: [UTType] = [.paperGIF, .data]
 
     let data: Data
+    var isColorImage: Bool { data.starts(with: Data("PIMG".utf8)) }
 
     init(data: Data) {
         self.data = data

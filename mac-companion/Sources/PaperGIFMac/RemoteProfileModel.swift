@@ -84,11 +84,12 @@ struct RemoteButtonTexture: Codable, Equatable, Sendable {
     var angle = 45
     var dotGain = 0
     var fade = 50
+    var preserveColor = false
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case kind, pattern, scale, lineWidth, imageID, mode, threshold, levels, dotSpacing, angle, dotGain, fade
+        case kind, pattern, scale, lineWidth, imageID, mode, threshold, levels, dotSpacing, angle, dotGain, fade, preserveColor
     }
 
     init(from decoder: Decoder) throws {
@@ -108,6 +109,7 @@ struct RemoteButtonTexture: Codable, Equatable, Sendable {
         angle = integer(.angle, 45, 0...90)
         dotGain = integer(.dotGain, 0, -50...50)
         fade = integer(.fade, 50, 0...90)
+        preserveColor = (try? container.decodeIfPresent(Bool.self, forKey: .preserveColor)) ?? false
     }
 }
 
@@ -451,6 +453,8 @@ struct RemoteControl: Codable, Equatable, Identifiable, Sendable {
     var symbol: String
     var iconBitmap: String? = nil
     var tintHex = "202020"
+    var backgroundTintHex: String? = nil
+    var imageTintHex: String? = nil
     var kind: RemoteControlKind
     var isToggle: Bool? = nil
     var buttonHeight: Int? = nil

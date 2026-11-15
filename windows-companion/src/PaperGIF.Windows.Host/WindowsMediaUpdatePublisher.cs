@@ -99,7 +99,16 @@ internal sealed class WindowsMediaUpdatePublisher(
                 }, subscription.Source == "outputVolume" ? null : track);
                 var heartbeat = response.Available && response.DurationMilliseconds > 0 &&
                     now - subscription.DeliveredAt >= TimeSpan.FromSeconds(30);
-                if (signature != subscription.Delivered || heartbeat)
+                var positionChanged = false;
+                if (response.Available && response.DurationMilliseconds is long duration && duration > 0 &&
+                    response.ElapsedMilliseconds is long elapsed && subscription.DeliveredElapsedMilliseconds is long delivered)
+                {
+                    var advance = subscription.Delivered?.Response.Playing == true
+                        ? Math.Max(0, (now - subscription.DeliveredAt).TotalMilliseconds) : 0;
+                    var projected = Math.Clamp(delivered + advance, 0, duration);
+                    positionChanged = Math.Abs(elapsed - projected) >= 1_000;
+                }
+                if (signature != subscription.Delivered || heartbeat || positionChanged)
                     pending.Add(new Pending(subscription, response, signature));
             }
         }
@@ -126,6 +135,7 @@ internal sealed class WindowsMediaUpdatePublisher(
                         if (subscriber.Controls.GetValueOrDefault(item.Subscription.Id) != item.Subscription) continue;
                         item.Subscription.Delivered = item.Signature;
                         item.Subscription.DeliveredAt = now;
+                        item.Subscription.DeliveredElapsedMilliseconds = item.Response.ElapsedMilliseconds;
                     }
                     subscriber.Failures = 0;
                     subscriber.RetryAt = now;
@@ -182,6 +192,7 @@ internal sealed class WindowsMediaUpdatePublisher(
         public string Source { get; } = source;
         public Signature? Delivered { get; set; }
         public DateTimeOffset DeliveredAt { get; set; }
+        public long? DeliveredElapsedMilliseconds { get; set; }
     }
 
     private sealed record Signature(TextSourceResponse Response, string? Track);

@@ -1,6 +1,7 @@
 import CoreGraphics
 import CryptoKit
 import Foundation
+import PaperDeviceKit
 
 enum PaperGIFMonochromeMode: String, CaseIterable, Identifiable, Sendable {
     case threshold
@@ -56,12 +57,41 @@ enum PaperGIFStorage {
         let savedAt: Date
         let byteCount: Int
         let isEditable: Bool
+        var isColorImage = false
     }
 
     struct LoadedMedia: Sendable {
         let data: Data
         let sourceData: Data?
         let recipe: PaperGIFConversionRecipe?
+
+        nonisolated func convertedData(for colorDisplay: DeviceDisplay?,
+            progress: @escaping @Sendable (Double) -> Void = { _ in }) throws -> Data {
+            let isColorImage = data.starts(with: Data("PIMG".utf8))
+            if let colorDisplay {
+                let image: CGImage
+                if let sourceData {
+                    let source = try PaperGIFEncoder.previewImage(from: sourceData)
+                    let rotated = try PaperGIFEncoder.rotatedImage(source, quarterTurns: recipe?.rotationQuarterTurns ?? 0)
+                    image = try DeviceImageEncoder.crop(rotated, normalizedRect: recipe?.cropRect)
+                } else if isColorImage {
+                    image = try DeviceImageEncoder.decode(data)
+                } else {
+                    guard let frame = try PaperGIFAnimation(encoded: data).frames.first else { throw PaperGIFError.noFrames }
+                    image = try PaperGIFEncoder.previewImage(fromPackedFrame: frame)
+                }
+                return try DeviceImageEncoder.encode(image, for: colorDisplay).data
+            }
+            if !data.isEmpty && !isColorImage { return data }
+            guard let sourceData, let recipe else { throw PaperGIFError.invalidMedia }
+            return try PaperGIFEncoder.encode(mediaData: sourceData,
+                monochromeMode: recipe.monochromeMode, threshold: UInt8(clamping: Int(recipe.threshold.rounded())),
+                monochromeLevels: recipe.monochromeLevels, halftoneDotSpacing: recipe.halftoneDotSpacing,
+                halftoneAngle: recipe.halftoneAngle, halftoneDotGain: recipe.halftoneDotGain,
+                maximumFramesPerSecond: recipe.maximumFramesPerSecond, cropRect: recipe.cropRect,
+                rotationQuarterTurns: recipe.rotationQuarterTurns, playbackConfiguration: recipe.playbackConfiguration,
+                progress: progress).encoded
+        }
     }
 
     nonisolated private static let packageExtension = "pgif"
@@ -115,7 +145,9 @@ enum PaperGIFStorage {
         let directory = try storageDirectory()
         let id = id ?? UUID()
         let savedAt = Date()
-        try data.write(to: packageURL(for: id, in: directory), options: .atomic)
+        let isColorImage = data.starts(with: Data("PIMG".utf8))
+        try data.write(to: packageURL(for: id, in: directory, isColorImage: isColorImage), options: .atomic)
+        try? FileManager.default.removeItem(at: packageURL(for: id, in: directory, isColorImage: !isColorImage))
         try Data(name.utf8).write(to: nameURL(for: id, in: directory), options: .atomic)
         if let sourceData, let recipe {
             try sourceData.write(to: sourceURL(for: id, in: directory), options: .atomic)
@@ -126,7 +158,8 @@ enum PaperGIFStorage {
             name: name,
             savedAt: savedAt,
             byteCount: data.count,
-            isEditable: sourceData != nil && recipe != nil
+            isEditable: sourceData != nil && recipe != nil,
+            isColorImage: isColorImage
         )
     }
 
@@ -139,7 +172,7 @@ enum PaperGIFStorage {
         )
 
         return try urls.compactMap { url in
-            guard url.pathExtension == packageExtension,
+            guard [packageExtension, "pimg"].contains(url.pathExtension),
                   let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else {
                 return nil
             }
@@ -152,7 +185,8 @@ enum PaperGIFStorage {
                 savedAt: values.contentModificationDate ?? .distantPast,
                 byteCount: values.fileSize ?? 0,
                 isEditable: FileManager.default.fileExists(atPath: sourceURL(for: id, in: directory).path) &&
-                    FileManager.default.fileExists(atPath: recipeURL(for: id, in: directory).path)
+                    FileManager.default.fileExists(atPath: recipeURL(for: id, in: directory).path),
+                isColorImage: url.pathExtension == "pimg"
             )
         }
         .sorted { $0.savedAt > $1.savedAt }
@@ -164,7 +198,7 @@ enum PaperGIFStorage {
             ? decodeRecipe(try Data(contentsOf: recipeURL(for: savedMedia.id, in: directory)))
             : nil
         return LoadedMedia(
-            data: try Data(contentsOf: packageURL(for: savedMedia.id, in: directory)),
+            data: try Data(contentsOf: packageURL(for: savedMedia.id, in: directory, isColorImage: savedMedia.isColorImage)),
             sourceData: savedMedia.isEditable
                 ? try Data(contentsOf: sourceURL(for: savedMedia.id, in: directory))
                 : nil,
@@ -173,12 +207,12 @@ enum PaperGIFStorage {
     }
 
     nonisolated static func loadData(_ savedMedia: SavedMedia) throws -> Data {
-        try Data(contentsOf: packageURL(for: savedMedia.id, in: storageDirectory()))
+        try Data(contentsOf: packageURL(for: savedMedia.id, in: storageDirectory(), isColorImage: savedMedia.isColorImage))
     }
 
     nonisolated static func delete(_ savedMedia: SavedMedia) throws {
         let directory = try storageDirectory()
-        try FileManager.default.removeItem(at: packageURL(for: savedMedia.id, in: directory))
+        try FileManager.default.removeItem(at: packageURL(for: savedMedia.id, in: directory, isColorImage: savedMedia.isColorImage))
         try? FileManager.default.removeItem(at: nameURL(for: savedMedia.id, in: directory))
         try? FileManager.default.removeItem(at: sourceURL(for: savedMedia.id, in: directory))
         try? FileManager.default.removeItem(at: recipeURL(for: savedMedia.id, in: directory))
@@ -228,8 +262,8 @@ enum PaperGIFStorage {
         }
     }
 
-    nonisolated private static func packageURL(for id: UUID, in directory: URL) -> URL {
-        directory.appendingPathComponent(id.uuidString).appendingPathExtension(packageExtension)
+    nonisolated private static func packageURL(for id: UUID, in directory: URL, isColorImage: Bool = false) -> URL {
+        directory.appendingPathComponent(id.uuidString).appendingPathExtension(isColorImage ? "pimg" : packageExtension)
     }
 
     nonisolated private static func nameURL(for id: UUID, in directory: URL) -> URL {

@@ -25,17 +25,13 @@ private struct PaperGIFConnectedNetHomeUnit: Identifiable, Sendable {
     var id: String { "\(computer.id.uuidString):\(unit.id)" }
 }
 
-private enum PaperGIFRemoteEditorPanel: String, CaseIterable, Identifiable {
-    case layout = "Layout"
-    case connections = "Connections"
-
-    var id: Self { self }
-}
-
 struct PaperGIFRemoteView: View {
     @Binding var profile: PaperGIFRemoteProfile
     @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
     @ObservedObject var deviceSession: DeviceSession
+    /// Settings opens the old connections screen on its own. The Edit tab never shows it.
+    var showsConnections = false
+    var locksLayout = false
 
     @StateObject private var computerDiscovery = PaperGIFComputerDiscovery()
     @StateObject private var wledDiscovery = PaperGIFWLEDDiscovery()
@@ -64,12 +60,112 @@ struct PaperGIFRemoteView: View {
     @State private var computerDraftHost = ""
     @State private var computerDraftPort = 43_821
     @State private var computerDraftToken = ""
-    @State private var selectedPanel = PaperGIFRemoteEditorPanel.layout
+    @State private var pendingDeviceOptionID: String?
     @State private var liveSyncTask: Task<Void, Never>?
     @State private var liveSyncStatus: String?
     @State private var availableModules = (try? PaperGIFModuleCatalog.bundledModules()) ?? []
     @State private var isLoadingModules = false
     @State private var moduleStatus: String?
+    @AppStorage(PaperGIFPhoneRemoteBackground.storageKey) private var phoneBackgroundRaw = PaperGIFPhoneRemoteBackground.off.rawValue
+    @AppStorage(PaperGIFPhoneRemoteChrome.opacityKey) private var phoneElementOpacity = PaperGIFPhoneRemoteChrome.defaultOpacity
+
+    private var deviceOptions: [PaperGIFDeviceSelectorOption] {
+        PaperGIFDeviceSelectorOption.includingCurrent(
+            saved: deviceSession.records,
+            nearby: bluetoothManager.nearbyDevices,
+            selectedID: deviceSession.selectedID,
+            selectedName: deviceSession.descriptor?.name
+                ?? deviceSession.records.first { $0.id == deviceSession.selectedID }?.descriptor.name,
+            connectedPeripheralID: bluetoothManager.connectedPeripheralID,
+            connectedDeviceID: bluetoothManager.bluetoothDescriptor?.deviceID,
+            connectedName: bluetoothManager.bluetoothDescriptor?.name
+        )
+    }
+
+    private var selectedOptionID: String {
+        if let pendingDeviceOptionID, deviceOptions.contains(where: { $0.id == pendingDeviceOptionID }) {
+            return pendingDeviceOptionID
+        }
+        guard deviceSession.selectedID != nil || pendingDeviceOptionID != nil else {
+            return PaperGIFDeviceSelectorOption.phoneID
+        }
+        if let selectedID = deviceSession.selectedID,
+           let match = deviceOptions.first(where: { $0.deviceID == selectedID }) {
+            return match.id
+        }
+        if let peripheralID = bluetoothManager.connectedPeripheralID,
+           let match = deviceOptions.first(where: { option in
+               if case .nearby(let id) = option.target { return id == peripheralID }
+               return false
+           }) {
+            return match.id
+        }
+        let activeID = deviceSession.descriptor?.deviceID ?? bluetoothManager.bluetoothDescriptor?.deviceID
+        return deviceOptions.first { $0.deviceID == activeID }?.id ?? PaperGIFDeviceSelectorOption.phoneID
+    }
+
+    private var currentDeviceName: String {
+        if selectedOptionID == PaperGIFDeviceSelectorOption.phoneID { return "Phone" }
+        if let name = deviceOptions.first(where: { $0.id == selectedOptionID })?.name, !name.isEmpty {
+            return name
+        }
+        if let name = deviceSession.descriptor?.name, !name.isEmpty { return name }
+        return "Phone"
+    }
+
+    private var deviceSelection: Binding<String> {
+        Binding(
+            get: { selectedOptionID },
+            set: { optionID in
+                guard optionID != selectedOptionID else { return }
+                if optionID == PaperGIFDeviceSelectorOption.phoneID {
+                    pendingDeviceOptionID = nil
+                    UserDefaults.standard.set(true, forKey: PaperGIFSettingKey.editingPhone)
+                    UserDefaults.standard.removeObject(forKey: "devices.selectedControllerID")
+                    if deviceSession.selectedID != nil { deviceSession.clearSelection() }
+                    return
+                }
+                UserDefaults.standard.set(false, forKey: PaperGIFSettingKey.editingPhone)
+                selectDevice(optionID)
+            }
+        )
+    }
+
+    private var deviceSlider: some View {
+        let segments = deviceOptions.count + 1
+        return GeometryReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                Picker("Device", selection: deviceSelection) {
+                    Text("Phone").tag(PaperGIFDeviceSelectorOption.phoneID)
+                    ForEach(deviceOptions) { option in
+                        Text(displayName(option)).tag(option.id)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: max(proxy.size.width, CGFloat(segments) * 132))
+            }
+        }
+        .frame(height: 32)
+        .accessibilityIdentifier("edit-device-slider")
+    }
+
+    private func selectDevice(_ optionID: String) {
+        guard let option = deviceOptions.first(where: { $0.id == optionID }) else { return }
+        pendingDeviceOptionID = optionID
+        switch option.target {
+        case .savedDevice(let id):
+            if deviceSession.records.contains(where: { $0.id == id }), deviceSession.selectedID != id {
+                deviceSession.select(id: id)
+            }
+            bluetoothManager.connectSavedDevice(deviceID: id)
+        case .nearby(let id):
+            bluetoothManager.connectNearby(id)
+        }
+    }
+
+    private func displayName(_ option: PaperGIFDeviceSelectorOption) -> String {
+        option.name.isEmpty ? "Unnamed device" : option.name
+    }
 
     private var canAddPage: Bool {
         (deviceSession.descriptor == nil || deviceSession.descriptor?.display != nil) &&
@@ -79,46 +175,23 @@ struct PaperGIFRemoteView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Picker("Remote Editor", selection: $selectedPanel) {
-                    ForEach(PaperGIFRemoteEditorPanel.allCases) { panel in
-                        Text(panel.rawValue).tag(panel)
-                    }
+                if !showsConnections {
+                    deviceSlider
+                        .padding(.horizontal)
+                        .padding(.vertical, 10)
                 }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.vertical, 10)
-
                 List {
-                    if selectedPanel == .layout {
-                        if let descriptor = deviceSession.descriptor {
-                            PaperGIFPhysicalInputsSection(
-                                profile: $profile, descriptor: descriptor,
-                                layout: deviceSession.layout ?? descriptor.layout,
-                                wledDiscovery: wledDiscovery, bluetoothManager: bluetoothManager
-                            )
-                        }
-                        if deviceSession.descriptor?.display != nil || deviceSession.descriptor == nil {
-                            pagesSection
-                            modulesSection
-                        }
-                        if deviceSession.descriptor?.canUseLegacyMedia != false {
-                            screensaverSection
-                        }
-                        saveSection
+                    if showsConnections {
+                        connectionSections
                     } else {
-                        if bluetoothManager.legacyBLEPermitted { deviceWiFiSection }
-                        computerSection
-                        temperatureUnitSection
-                        netHomeSection
-                        homeSection
-                        networkDevicesSection
-                        wledSection
+                        layoutSections
                     }
                 }
             }
-            .navigationTitle("Remote")
+            .navigationTitle(showsConnections ? "Connections" : "Edit")
+            .navigationSubtitle(showsConnections ? "Computers and network devices" : currentDeviceName)
             .toolbar {
-                if selectedPanel == .layout {
+                if !showsConnections {
                     EditButton()
                 }
             }
@@ -185,6 +258,38 @@ struct PaperGIFRemoteView: View {
                 Text(saveError ?? "Unknown error")
             }
         }
+    }
+
+    @ViewBuilder private var layoutSections: some View {
+        if selectedOptionID == PaperGIFDeviceSelectorOption.phoneID {
+            phoneBackgroundSection
+        }
+        if let descriptor = deviceSession.descriptor {
+            PaperGIFPhysicalInputsSection(
+                profile: $profile, descriptor: descriptor,
+                layout: deviceSession.layout ?? descriptor.layout,
+                wledDiscovery: wledDiscovery, bluetoothManager: bluetoothManager
+            )
+            .disabled(locksLayout)
+        }
+        if deviceSession.descriptor?.display != nil || deviceSession.descriptor == nil {
+            pagesSection.disabled(locksLayout)
+            modulesSection.disabled(locksLayout)
+        }
+        if deviceSession.descriptor?.canUseLegacyMedia != false {
+            screensaverSection.disabled(locksLayout)
+        }
+        saveSection.disabled(locksLayout)
+    }
+
+    @ViewBuilder private var connectionSections: some View {
+        if bluetoothManager.legacyBLEPermitted { deviceWiFiSection }
+        computerSection
+        temperatureUnitSection
+        netHomeSection
+        homeSection
+        networkDevicesSection
+        wledSection
     }
 
     private var deviceWiFiSection: some View {
@@ -404,7 +509,7 @@ struct PaperGIFRemoteView: View {
         } header: {
             Text("Computers")
         } footer: {
-            Text("Run the paperGIF companion on your Mac or PC, select a discovered computer, then approve the pairing request on that computer. Individual controls can target any paired computer.")
+            Text("Run the OP Remote companion on your Mac or PC, select a discovered computer, then approve the pairing request on that computer. Individual controls can target any paired computer.")
         }
     }
 
@@ -427,7 +532,8 @@ struct PaperGIFRemoteView: View {
                             updatedProfile.buttonTexture = texture
                             applyLiveProfile(updatedProfile)
                         }
-                    )
+                    ),
+                    fullResolutionColor: selectedOptionID == PaperGIFDeviceSelectorOption.phoneID
                 )
             } label: {
                 LabeledContent("Button background", value: profile.buttonTexture.kind == .none
@@ -831,6 +937,36 @@ struct PaperGIFRemoteView: View {
         }
     }
 
+    private var phoneBackgroundSection: some View {
+        Section {
+            Picker("Background", selection: $phoneBackgroundRaw) {
+                ForEach(PaperGIFPhoneRemoteBackground.allCases) { item in
+                    Text(item.title).tag(item.rawValue)
+                }
+            }
+            .accessibilityIdentifier("phone-remote-background")
+            LabeledContent("Element opacity") {
+                Text("\(Int((phoneElementOpacity * 100).rounded()))%")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Slider(value: $phoneElementOpacity, in: 0.35...1)
+                .accessibilityLabel("Element opacity")
+                .accessibilityValue("\(Int((phoneElementOpacity * 100).rounded())) percent")
+        } header: {
+            Text("Phone Background")
+        } footer: {
+            Text("The effect fills the Remote screen. Buttons, sliders, and page chips use this opacity so it shows through. Fluid and Aurora also trace each button press.")
+        }
+    }
+
+    /// The connected panel preview. The Phone profile is not that panel, so its pages keep button backgrounds and colors.
+    private var phonePanelPreview: DeviceDisplay? {
+        guard selectedOptionID != PaperGIFDeviceSelectorOption.phoneID else { return nil }
+        guard deviceSession.descriptor?.isM5Paper == false else { return nil }
+        return deviceSession.descriptor?.display
+    }
+
     private var pagesSection: some View {
         Section("Pages") {
             ForEach(Array(profile.pages.enumerated()), id: \.element.id) { index, page in
@@ -844,13 +980,12 @@ struct PaperGIFRemoteView: View {
                         buttonBackground: profile.buttonBackground,
                         buttonTexture: profile.buttonTexture,
                         wledDiscovery: wledDiscovery,
-                        deviceDisplay: deviceSession.descriptor?.isM5Paper == false
-                            ? deviceSession.descriptor?.display : nil
+                        fullResolutionColor: selectedOptionID == PaperGIFDeviceSelectorOption.phoneID,
+                        deviceDisplay: phonePanelPreview
                     )
                 } label: {
                     HStack(spacing: 14) {
-                        if let descriptor = deviceSession.descriptor,
-                           !descriptor.isM5Paper, let display = descriptor.display {
+                        if let display = phonePanelPreview {
                             PaperGIFAdaptivePagePreview(page: .constant(page), display: display, onEdit: { _ in })
                                 .frame(width: 52, height: 72)
                                 .allowsHitTesting(false)
@@ -1120,8 +1255,9 @@ struct PaperGIFRemoteView: View {
         if immediately {
             liveSyncTask?.cancel()
             guard save(updatedProfile) else { return }
-            guard bluetoothManager.canSyncSelectedProfile else {
-                liveSyncStatus = "Saved; connect the selected device to sync"
+            guard bluetoothManager.canSyncSelectedProfile, !bluetoothManager.isEditingPhoneProfile else {
+                liveSyncStatus = bluetoothManager.isEditingPhoneProfile
+                    ? "Saved on this phone" : "Saved; connect the selected device to sync"
                 return
             }
             liveSyncStatus = "Syncing changes…"
@@ -1166,8 +1302,9 @@ struct PaperGIFRemoteView: View {
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled, save(profileSnapshot) else { return }
 
-            guard bluetoothManager.canSyncSelectedProfile else {
-                liveSyncStatus = "Saved; connect the selected device to sync"
+            guard bluetoothManager.canSyncSelectedProfile, !bluetoothManager.isEditingPhoneProfile else {
+                liveSyncStatus = bluetoothManager.isEditingPhoneProfile
+                    ? "Saved on this phone" : "Saved; connect the selected device to sync"
                 return
             }
 
@@ -1303,7 +1440,7 @@ struct PaperGIFRemoteView: View {
                         : "Connected to \(computer.name)."
                 }
             } catch {
-                computerStatus = "Couldn’t reach \(name). Make sure its paperGIF companion is running."
+                computerStatus = "Couldn’t reach \(name). Make sure its OP Remote companion is running."
             }
         }
     }
@@ -1713,6 +1850,7 @@ private struct PaperGIFRemotePageEditor: View {
     let buttonBackground: PaperGIFRemoteButtonBackground
     let buttonTexture: PaperGIFRemoteButtonTexture
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
+    var fullResolutionColor = false
     var deviceDisplay: DeviceDisplay? = nil
     @State private var selectedControlID: UUID?
 
@@ -1737,6 +1875,7 @@ private struct PaperGIFRemotePageEditor: View {
                     maxButtonTextSize: maxButtonTextSize,
                     buttonBackground: buttonBackground,
                     buttonTexture: buttonTexture,
+                    fullResolutionColor: fullResolutionColor,
                     onEditControl: { selectedControlID = $0 }
                 )
                 .aspectRatio(540.0 / 960.0, contentMode: .fit)
@@ -1765,6 +1904,7 @@ private struct PaperGIFRemotePageEditor: View {
                             defaultButtonBackground: buttonBackground,
                             defaultButtonTexture: buttonTexture,
                             wledDiscovery: wledDiscovery,
+                            fullResolutionColor: fullResolutionColor,
                             supportsButtonImages: deviceDisplay == nil
                         )
                     } label: {
@@ -1832,6 +1972,7 @@ private struct PaperGIFRemotePageEditor: View {
                     defaultButtonBackground: buttonBackground,
                     defaultButtonTexture: buttonTexture,
                     wledDiscovery: wledDiscovery,
+                    fullResolutionColor: fullResolutionColor,
                     supportsButtonImages: deviceDisplay == nil
                 )
             }
@@ -1920,6 +2061,7 @@ private struct PaperGIFRemotePagePreview: View {
     let maxButtonTextSize: Int
     var buttonBackground: PaperGIFRemoteButtonBackground = .outline
     var buttonTexture = PaperGIFRemoteButtonTexture()
+    var fullResolutionColor = false
     let onEditControl: (UUID) -> Void
     @State private var draggedControlID: UUID?
     @State private var dragLocation: CGPoint?
@@ -2108,7 +2250,11 @@ private struct PaperGIFRemoteTabsPreview: View {
                     texture: control.buttonTexture ?? buttonTexture,
                     pixelWidth: max(1, Int((frame.width / scale).rounded())),
                     pixelHeight: max(1, Int((frame.height / scale).rounded())),
-                    scale: scale
+                    scale: scale,
+                    backgroundHex: control.backgroundTintHex,
+                    foregroundHex: control.tintHex == "202020" ? nil : control.tintHex,
+                    imageTintHex: control.imageTintHex,
+                    retina: fullResolutionColor
                 )
             }
 
@@ -2161,7 +2307,10 @@ private struct PaperGIFRemoteTabsPreview: View {
                 }
             } else {
                 PaperGIFRemotePreviewLabel(control: control, scale: scale, compact: controllerCompact, maxButtonTextSize: maxButtonTextSize)
-                .foregroundStyle((control.buttonBackground ?? buttonBackground) == .filled ? Color.white : Color.black)
+                .foregroundStyle(PaperGIFButtonColors.textColor(
+                    tintHex: control.tintHex,
+                    style: control.buttonBackground ?? buttonBackground
+                ))
             }
         }
         .frame(width: frame.width, height: frame.height)
@@ -2464,9 +2613,21 @@ struct PaperGIFRemoteControlEditor: View {
     var defaultButtonTexture = PaperGIFRemoteButtonTexture()
     @ObservedObject var wledDiscovery: PaperGIFWLEDDiscovery
     var hardwareOnly = false
+    var fullResolutionColor = false
     var supportsButtonImages = true
     @StateObject private var applicationCatalog = PaperGIFMacApplicationCatalog()
     @StateObject private var homeManager = PaperGIFHomeManager()
+
+    private var buttonImageTargetSize: CGSize {
+        guard fullResolutionColor else { return CGSize(width: 240, height: 120) }
+        let span = control.gridSpan(columns: gridColumns, rows: gridRows)
+        let columns = CGFloat(max(1, gridColumns))
+        let rows = CGFloat(max(1, gridRows))
+        return CGSize(
+            width: max(48, CGFloat(span.width) * 504 / columns - 12),
+            height: max(48, CGFloat(span.height) * 712 / rows - 12)
+        )
+    }
 
     private let mediaCommands = ["playPause", "previous", "next", "seek", "volumeUp", "volumeDown", "volume", "mute"]
     private let modifierNames = ["command", "option", "control", "shift"]
@@ -2503,16 +2664,42 @@ struct PaperGIFRemoteControlEditor: View {
                         }
                         }
                     }
-                    TextField("Color hex", text: $control.tintHex)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
+                    ColorPicker("Text & Icon", selection: Binding(
+                        get: { PaperGIFButtonColors.color(control.tintHex) },
+                        set: { control.tintHex = PaperGIFButtonColors.hex($0) }
+                    ), supportsOpacity: false)
+                    if control.kind == .button {
+                        Toggle("Custom Background", isOn: Binding(
+                            get: { control.backgroundTintHex != nil },
+                            set: { control.backgroundTintHex = $0 ? (control.backgroundTintHex ?? "FFFFFF") : nil }
+                        ))
+                        if let backgroundTint = control.backgroundTintHex {
+                            ColorPicker("Background", selection: Binding(
+                                get: { PaperGIFButtonColors.color(backgroundTint) },
+                                set: { control.backgroundTintHex = PaperGIFButtonColors.hex($0) }
+                            ), supportsOpacity: false)
+                        }
+                        Toggle("Tint Image / Pattern", isOn: Binding(
+                            get: { control.imageTintHex != nil },
+                            set: { control.imageTintHex = $0 ? control.tintHex : nil }
+                        ))
+                        if let imageTint = control.imageTintHex {
+                            ColorPicker("Image / Pattern", selection: Binding(
+                                get: { PaperGIFButtonColors.color(imageTint) },
+                                set: { control.imageTintHex = PaperGIFButtonColors.hex($0) }
+                            ), supportsOpacity: false)
+                        }
+                    }
                 }
                 if control.kind == .button {
                     NavigationLink {
                         PaperGIFControlBackgroundEditor(
                             control: $control,
                             defaultBackground: defaultButtonBackground,
-                            defaultTexture: defaultButtonTexture
+                            defaultTexture: defaultButtonTexture,
+                            targetSize: buttonImageTargetSize,
+                            allowsColorImages: fullResolutionColor,
+                            fullResolutionColor: fullResolutionColor
                         )
                     } label: {
                         LabeledContent("Background", value: backgroundSummary)
@@ -4053,7 +4240,7 @@ private final class PaperGIFMacApplicationCatalog: ObservableObject {
         } catch {
             fail(configurationKey, Task.isCancelled
                 ? nil
-                : "Couldn’t reach \(computer.name). Make sure its paperGIF companion is running.")
+                : "Couldn’t reach \(computer.name). Make sure its OP Remote companion is running.")
         }
         return false
     }

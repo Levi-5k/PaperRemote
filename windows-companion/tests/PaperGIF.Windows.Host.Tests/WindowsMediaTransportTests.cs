@@ -4,6 +4,41 @@ namespace PaperGIF.Windows.Host.Tests;
 
 public sealed class WindowsMediaTransportTests
 {
+    [Fact]
+    public void RepeatedCachedPlayingSampleAdvancesInsteadOfResettingRemoteClock()
+    {
+        var sampledAt = new DateTimeOffset(2026, 11, 1, 12, 0, 0, TimeSpan.Zero);
+        for (var seconds = 0; seconds <= 5; ++seconds)
+            Assert.Equal(60000 + seconds * 1000,
+                WindowsTextSourceResolver.PlaybackElapsedMilliseconds(TimeSpan.FromSeconds(60),
+                    TimeSpan.FromSeconds(240), true, sampledAt, sampledAt.AddSeconds(seconds)));
+        Assert.Equal(20000, WindowsTextSourceResolver.PlaybackElapsedMilliseconds(TimeSpan.FromSeconds(20),
+            TimeSpan.FromSeconds(240), true, sampledAt.AddSeconds(6), sampledAt.AddSeconds(6)));
+        Assert.Equal(1000, WindowsTextSourceResolver.PlaybackElapsedMilliseconds(TimeSpan.Zero,
+            TimeSpan.FromSeconds(180), true, sampledAt.AddSeconds(6), sampledAt.AddSeconds(7)));
+    }
+
+    [Theory]
+    [InlineData(false, 60, 240, 5, 60000)]
+    [InlineData(true, 60, 240, -5, 60000)]
+    [InlineData(true, 238, 240, 5, 240000)]
+    [InlineData(false, -1, 240, 5, 0)]
+    [InlineData(true, 60, 0, 5, 0)]
+    public void PlaybackClockRespectsPauseTimestampAndDuration(bool playing, int position, int duration,
+        int age, long expected)
+    {
+        var sampledAt = new DateTimeOffset(2026, 11, 1, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal(expected, WindowsTextSourceResolver.PlaybackElapsedMilliseconds(TimeSpan.FromSeconds(position),
+            TimeSpan.FromSeconds(duration), playing, sampledAt, sampledAt.AddSeconds(age)));
+    }
+
+    [Fact]
+    public void MissingMediaTimestampDoesNotAdvanceFromTheBeginningOfTime()
+    {
+        Assert.Equal(60000, WindowsTextSourceResolver.PlaybackElapsedMilliseconds(TimeSpan.FromSeconds(60),
+            TimeSpan.FromSeconds(240), true, default, DateTimeOffset.UtcNow));
+    }
+
     [Theory]
     [InlineData("playPause")]
     [InlineData("previous")]

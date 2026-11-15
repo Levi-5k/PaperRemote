@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using PaperGIF.Windows.Core.Models;
+using PaperGIF.Windows.Core.Serialization;
 
 namespace PaperGIF.Windows.Host;
 
@@ -32,8 +33,87 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
     [Category("Appearance"), TypeConverter(typeof(RemoteIconNameConverter))]
     public string Symbol { get => control.Symbol; set { control.Symbol = value; store.Commit(); } }
 
-    [Category("Appearance"), DisplayName("Tint (hex)")]
-    public string TintHex { get => control.TintHex; set { control.TintHex = value; store.Commit(); } }
+    [Category("Colors"), DisplayName("Text / icon")]
+    public Color ForegroundColor
+    {
+        get => ButtonImageStore.ColorFromHex(control.TintHex, Color.Black);
+        set { control.TintHex = ButtonImageStore.Hex(value); store.Commit(); }
+    }
+    public void ResetForegroundColor() { control.TintHex = "202020"; store.Commit(); }
+    public bool ShouldSerializeForegroundColor() => control.TintHex != "202020";
+
+    [Category("Colors"), DisplayName("Background")]
+    public Color BackgroundColor
+    {
+        get => ButtonImageStore.ColorFromHex(control.BackgroundTintHex, Color.Empty);
+        set { control.BackgroundTintHex = value.IsEmpty ? null : ButtonImageStore.Hex(value); store.Commit(); }
+    }
+    public void ResetBackgroundColor() { control.BackgroundTintHex = null; store.Commit(); }
+    public bool ShouldSerializeBackgroundColor() => control.BackgroundTintHex != null;
+
+    [Category("Colors"), DisplayName("Image / pattern tint")]
+    public Color ImageColor
+    {
+        get => ButtonImageStore.ColorFromHex(control.ImageTintHex, Color.Empty);
+        set { control.ImageTintHex = value.IsEmpty ? null : ButtonImageStore.Hex(value); store.Commit(); }
+    }
+    public void ResetImageColor() { control.ImageTintHex = null; store.Commit(); }
+    public bool ShouldSerializeImageColor() => control.ImageTintHex != null;
+
+    [Category("Background"), DisplayName("Style")]
+    public RemoteButtonBackground ButtonStyle
+    {
+        get => control.ButtonBackground ?? store.Profile.ButtonBackground;
+        set { control.ButtonBackground = value; store.Commit(); }
+    }
+    public void ResetButtonStyle() { control.ButtonBackground = null; store.Commit(); }
+    public bool ShouldSerializeButtonStyle() => control.ButtonBackground != null;
+
+    [Category("Background"), DisplayName("Fill")]
+    public RemoteButtonTextureKind TextureKind
+    {
+        get => control.ButtonTexture?.Kind ?? store.Profile.ButtonTexture.Kind;
+        set { EnsureTexture().Kind = value; store.Commit(); }
+    }
+
+    [Category("Pattern"), DisplayName("Pattern")]
+    public RemoteButtonPattern ButtonPattern
+    {
+        get => control.ButtonTexture?.Pattern ?? store.Profile.ButtonTexture.Pattern;
+        set { EnsureTexture().Pattern = value; store.Commit(); }
+    }
+
+    [Category("Pattern"), DisplayName("Spacing (pixels)")]
+    public int PatternSpacing
+    {
+        get => control.ButtonTexture?.Scale ?? store.Profile.ButtonTexture.Scale;
+        set { EnsureTexture().Scale = Math.Clamp(value, 6, 64); store.Commit(); }
+    }
+
+    [Category("Image"), DisplayName("Full color")]
+    public bool PreserveImageColor
+    {
+        get => control.ButtonTexture?.PreserveColor ?? store.Profile.ButtonTexture.PreserveColor;
+        set { EnsureTexture().PreserveColor = value; store.Commit(); }
+    }
+
+    [Category("Image"), DisplayName("Fade (%)")]
+    public int ImageFade
+    {
+        get => control.ButtonTexture?.Fade ?? store.Profile.ButtonTexture.Fade;
+        set { EnsureTexture().Fade = Math.Clamp(value, 0, 90); store.Commit(); }
+    }
+
+    [Category("Image"), DisplayName("Conversion")]
+    public RemoteButtonImageMode ImageMode
+    {
+        get => control.ButtonTexture?.Mode ?? store.Profile.ButtonTexture.Mode;
+        set { EnsureTexture().Mode = value; store.Commit(); }
+    }
+
+    private RemoteButtonTexture EnsureTexture() => control.ButtonTexture ??=
+        System.Text.Json.JsonSerializer.Deserialize<RemoteButtonTexture>(
+            System.Text.Json.JsonSerializer.Serialize(store.Profile.ButtonTexture, RemoteProfileJson.Options), RemoteProfileJson.Options)!;
 
     [Category("Layout"), TypeConverter(typeof(RemoteControlKindNameConverter))]
     public RemoteControlKind Kind
@@ -261,6 +341,13 @@ internal sealed class ControlProperties(RemoteControl control, RemotePage page, 
     {
         var type = control.Action.Type;
         var isTextBox = control.Kind == RemoteControlKind.TextBox;
+        if (property.Category is "Image" or "Pattern" or "Background")
+        {
+            if (control.Kind != RemoteControlKind.Button) return false;
+            var kind = control.ButtonTexture?.Kind ?? store.Profile.ButtonTexture.Kind;
+            if (property.Category == "Pattern") return kind == RemoteButtonTextureKind.Pattern;
+            if (property.Category == "Image") return kind == RemoteButtonTextureKind.Image;
+        }
         if (property.Category == "Text Box")
         {
             return isTextBox;

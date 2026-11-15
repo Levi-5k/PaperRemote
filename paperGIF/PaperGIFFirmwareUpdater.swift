@@ -211,7 +211,7 @@ final class PaperGIFFirmwareUpdater: ObservableObject {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw UpdateError.unavailable("No paperGIF release is available.")
+            throw UpdateError.unavailable("No OP Remote release is available.")
         }
         let github = try JSONDecoder().decode(GitHubRelease.self, from: data)
         let downloads = Dictionary(

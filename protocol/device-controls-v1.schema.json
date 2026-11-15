@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://papergif.local/protocol/device-controls-v1.schema.json",
-  "title": "PaperRemote device control messages v1",
+  "title": "OP Remote device control messages v1",
   "oneOf": [
     {"$ref": "#/$defs/snapshot"},
     {"$ref": "#/$defs/setRequest"},

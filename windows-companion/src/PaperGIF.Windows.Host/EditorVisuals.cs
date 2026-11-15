@@ -147,7 +147,7 @@ internal static class EditorTheme
         graphics.FillPath(brush, path);
     }
 
-    private static GraphicsPath RoundedRectangle(Rectangle rectangle, int radius)
+    internal static GraphicsPath RoundedRectangle(Rectangle rectangle, int radius)
     {
         var diameter = Math.Min(radius * 2, Math.Min(rectangle.Width, rectangle.Height));
         var path = new GraphicsPath();
@@ -167,6 +167,7 @@ internal sealed class ModernTabControl : TabControl
         DrawMode = TabDrawMode.OwnerDrawFixed;
         ItemSize = new Size(96, 36);
         SizeMode = TabSizeMode.Fixed;
+        Multiline = true;
         // Paint the whole strip so the native light tab chrome never shows in dark mode.
         SetStyle(
             ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |

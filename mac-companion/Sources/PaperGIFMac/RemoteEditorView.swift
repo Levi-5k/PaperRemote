@@ -17,7 +17,7 @@ final class RemoteEditorWindowController: NSWindowController {
             store: store, devices: store.devices, moduleCatalog: moduleCatalog, matterDevices: matterDevices, updates: updates
         )
         let window = NSWindow(contentViewController: NSHostingController(rootView: content))
-        window.title = "paperGIF Controls"
+        window.title = "OP Remote"
         window.setContentSize(NSSize(width: 1_180, height: 780))
         window.minSize = NSSize(width: 980, height: 680)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -123,7 +123,7 @@ private struct RemoteEditorView: View {
                 .background(Color(red: 0.08, green: 0.35, blue: 0.42))
                 .clipShape(RoundedRectangle(cornerRadius: 7))
             VStack(alignment: .leading, spacing: 1) {
-                Text("paperGIF Controls")
+                Text("OP Remote")
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                 Text(devices.descriptor?.name ?? "Connect a compatible remote")
                     .font(.caption)
@@ -924,7 +924,7 @@ private struct ControlCatalogPanel: View {
 private struct ModulesPanel: View {
     @ObservedObject var store: RemoteEditorStore
     @ObservedObject var catalog: ModuleCatalog
-    @State private var status = "Browse controls published in the paperGIF GitHub catalog."
+    @State private var status = "Browse controls published in the OP Remote GitHub catalog."
     @State private var installingID: String?
 
     var body: some View {
@@ -1381,7 +1381,7 @@ private struct ControlInspector: View {
             }
         case .iPhoneHomePower:
             VStack(alignment: .leading, spacing: 6) {
-                Text("This button is relayed through the iPhone and only works while the paperGIF iPhone app is connected. Matter device power runs on this Mac instead.")
+                Text("This button is relayed through the iPhone and only works while the OP Remote iPhone app is connected. Matter device power runs on this Mac instead.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Use Matter Device Power") { actionChoiceBinding.wrappedValue = .matterPower }
@@ -1400,7 +1400,7 @@ private struct ControlInspector: View {
                 .labelsHidden()
             }
             if homeAccessories.accessories.isEmpty {
-                Text("Open the Remote tab in the paperGIF iPhone app to share your Apple Home accessories with this Mac.")
+                Text("Open the Remote tab in the OP Remote iPhone app to share your Apple Home accessories with this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1436,7 +1436,7 @@ private struct ControlInspector: View {
                 .font(.body.monospaced())
                 .frame(minHeight: 70)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3)))
-            Text("The command must exactly match an approved script in that computer's paperGIF Settings.")
+            Text("The command must exactly match an approved script in that computer's OP Remote Settings.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .openBuilds:
@@ -3439,7 +3439,7 @@ private final class RemoteApplicationCatalog: ObservableObject {
         } catch {
             fail(key, Task.isCancelled
                 ? nil
-                : "Couldn't reach \(computer.name). Make sure its paperGIF companion is running.")
+                : "Couldn't reach \(computer.name). Make sure its OP Remote companion is running.")
         }
     }
 

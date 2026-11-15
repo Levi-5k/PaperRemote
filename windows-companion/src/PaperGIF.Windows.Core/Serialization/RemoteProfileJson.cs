@@ -55,6 +55,10 @@ public static class RemoteProfileJson
             profile.Computers.Any(computer => computer is null) || profile.ButtonTexture is null)
             throw new JsonException("Invalid profile pages, controls, computers or texture.");
         var pageElements = pagesElement.EnumerateArray().ToArray();
+        if (profile.Pages.SelectMany(page => page.Controls).Any(control =>
+            new[] { control.BackgroundTintHex, control.ImageTintHex }.Any(hex =>
+                hex is not null && (hex.Length != 6 || !hex.All(Uri.IsHexDigit)))))
+            throw new JsonException("Button colors must contain six hexadecimal digits.");
         for (var index = 0; index < Math.Min(profile.Pages.Count, pageElements.Length); index++)
         {
             if (profile.Pages[index].OpenBuildsController is { } settings &&
@@ -156,8 +160,12 @@ public static class RemoteProfileJson
             throw new InvalidOperationException("This device has no touchscreen; remove screen controls and assign physical inputs.");
         var usesImages = profile.ButtonTexture.Kind == RemoteButtonTextureKind.Image ||
             profile.Pages.SelectMany(page => page.Controls).Any(control => control.ButtonTexture?.Kind == RemoteButtonTextureKind.Image);
-        if (usesImages && device is not { BoardID: "m5stack.m5paper", Display: { Width: 540, Height: 960, PixelFormat: "gray4" }, Capabilities.Media: true })
-            throw new InvalidOperationException("Button image assets use the M5Paper media format; custom-display conversion/upload is unavailable.");
+        var legacyImages = device is { BoardID: "m5stack.m5paper", Display: { Width: 540, Height: 960, PixelFormat: "gray4" }, Capabilities.Media: true };
+        var nativeImages = device is { Display.PixelFormat: "rgb565", Capabilities.Media: true } &&
+            device.Capabilities.ImageFormats?.Contains("pbgi-rgb565-v2") == true &&
+            device.Capabilities.ImageTransports?.Count > 0;
+        if (usesImages && !legacyImages && !nativeImages)
+            throw new InvalidOperationException("This device does not advertise a supported button-image format and transport.");
         var bindings = profile.HardwareBindings ?? [];
         if (BindingValidationMessage(bindings) is { } bindingError)
             throw new InvalidOperationException(bindingError);

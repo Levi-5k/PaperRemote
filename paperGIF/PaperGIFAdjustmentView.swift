@@ -1,4 +1,5 @@
 import CoreGraphics
+import PaperDeviceKit
 import SwiftUI
 
 private actor PaperGIFPreviewRenderer {
@@ -51,6 +52,7 @@ struct PaperGIFAdjustmentView: View {
     let sourcePreview: CGImage
     let isAnimated: Bool
     @Binding var recipe: PaperGIFConversionRecipe
+    var colorDisplay: DeviceDisplay? = nil
     let onBack: () -> Void
     let onSave: () -> Void
 
@@ -63,13 +65,15 @@ struct PaperGIFAdjustmentView: View {
                 VStack(spacing: 20) {
                     preview
                         .aspectRatio(
-                            CGFloat(PaperGIFAnimation.width) / CGFloat(PaperGIFAnimation.height),
+                            CGFloat(colorDisplay?.width ?? PaperGIFAnimation.width) /
+                                CGFloat(colorDisplay?.height ?? PaperGIFAnimation.height),
                             contentMode: .fit
                         )
                         .frame(maxHeight: 500)
                         .frame(maxWidth: .infinity)
 
-                    VStack(spacing: 18) {
+                                        if colorDisplay == nil {
+                                            VStack(spacing: 18) {
                         Picker("Rendering", selection: $recipe.monochromeMode) {
                             ForEach(PaperGIFMonochromeMode.allCases) { mode in
                                 Text(mode.title).tag(mode)
@@ -161,6 +165,7 @@ struct PaperGIFAdjustmentView: View {
                         }
                     }
                     .padding(.horizontal)
+                    }
                 }
                 .padding(.vertical)
             }
@@ -221,6 +226,16 @@ struct PaperGIFAdjustmentView: View {
         let rotationQuarterTurns = recipe.rotationQuarterTurns
         do {
             try await Task.sleep(for: .milliseconds(100))
+            if let colorDisplay {
+                let image = try await Task.detached(priority: .userInitiated) {
+                    let rotated = try PaperGIFEncoder.rotatedImage(sourcePreview, quarterTurns: rotationQuarterTurns)
+                    let cropped = try DeviceImageEncoder.crop(rotated, normalizedRect: cropRect)
+                    return try DeviceImageEncoder.encode(cropped, for: colorDisplay).preview
+                }.value
+                guard !Task.isCancelled else { return }
+                previewImage = image
+                return
+            }
             let image = try await PaperGIFPreviewRenderer.shared.render(
                 image: sourcePreview,
                 monochromeMode: monochromeMode,

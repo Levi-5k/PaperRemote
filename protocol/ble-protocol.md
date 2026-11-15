@@ -1,4 +1,4 @@
-# paperGIF BLE Protocol v1
+# OP Remote BLE Protocol v1
 
 This document records the currently deployed protocol. Revision-aware profile
 synchronization will extend it without changing these messages.

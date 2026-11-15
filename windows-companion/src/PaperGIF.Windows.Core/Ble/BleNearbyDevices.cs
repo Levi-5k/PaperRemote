@@ -170,14 +170,19 @@ public static class DevicePickerMerger
         return result;
     }
 
-    /// <summary>"paperGIF SuperMini S3" → "SuperMini S3"; a bare or missing name stays recognisable.</summary>
+    /// <summary>"OP Remote SuperMini S3" → "SuperMini S3"; a bare or missing name stays recognisable.</summary>
     public static string DisplayName(string? advertisedName)
     {
         var name = advertisedName?.Trim() ?? string.Empty;
-        const string prefix = "paperGIF ";
-        if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && name.Length > prefix.Length)
-            name = name[prefix.Length..].Trim();
-        return name.Length == 0 ? "PaperRemote device" : name;
+        foreach (var prefix in new[] { "OP Remote ", "paperGIF ", "PaperRemote " })
+        {
+            if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && name.Length > prefix.Length)
+            {
+                name = name[prefix.Length..].Trim();
+                break;
+            }
+        }
+        return name.Length == 0 ? "OP Remote device" : name;
     }
 
     private static string AddressSuffix(ulong address) => $"[{(address >> 8) & 0xFF:X2}:{address & 0xFF:X2}]";

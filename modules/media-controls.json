@@ -5,7 +5,7 @@
   "name": "Media Controls",
   "summary": "Playback and volume controls for your computer.",
   "version": "1.3.0",
-  "author": "paperGIF",
+  "author": "OP Remote",
   "controls": [
     {
       "id": "previous",

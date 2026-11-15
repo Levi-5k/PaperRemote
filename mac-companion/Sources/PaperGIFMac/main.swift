@@ -134,6 +134,7 @@ private final class CompanionServer {
     private let actionHandler: (RemoteRequest) -> RemoteActionResult
     private let netHomeUnitsHandler: () -> [NetHomeUnit]?
     private let textSourceHandler: (TextSourceBatchRequest, String?) -> TextSourceBatchResponse
+    private let matterDevicesHandler: () -> Data?
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var lifetimes: [ObjectIdentifier: CompanionRequestLifetime] = [:]
@@ -149,7 +150,8 @@ private final class CompanionServer {
         pairingHandler: @escaping (PairingRequest) -> Bool,
         actionHandler: @escaping (RemoteRequest) -> RemoteActionResult,
         netHomeUnitsHandler: @escaping () -> [NetHomeUnit]?,
-        textSourceHandler: @escaping (TextSourceBatchRequest, String?) -> TextSourceBatchResponse
+        textSourceHandler: @escaping (TextSourceBatchRequest, String?) -> TextSourceBatchResponse,
+        matterDevicesHandler: @escaping () -> Data?
     ) {
         self.port = port
         self.token = token
@@ -157,6 +159,7 @@ private final class CompanionServer {
         self.actionHandler = actionHandler
         self.netHomeUnitsHandler = netHomeUnitsHandler
         self.textSourceHandler = textSourceHandler
+        self.matterDevicesHandler = matterDevicesHandler
     }
 
     func start() throws {
@@ -168,7 +171,7 @@ private final class CompanionServer {
         let advertisedHost = routedIPv4Address() ?? ProcessInfo.processInfo.hostName
         let listener = try NWListener(using: .tcp, on: networkPort)
         listener.service = NWListener.Service(
-            name: Host.current().localizedName ?? "paperGIF Mac",
+            name: Host.current().localizedName ?? "OP Remote",
             type: "_papergif._tcp",
             txtRecord: NWTXTRecord([
                 "host": advertisedHost,
@@ -398,6 +401,18 @@ private final class CompanionServer {
             return
         }
 
+        if header.hasPrefix("GET /matter/devices ") {
+            enqueue(connection, on: .catalog) { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                let data = self.matterDevicesHandler()
+                self.queue.async {
+                    self.respond(connection, status: data == nil ? 503 : 200,
+                        body: data.flatMap { String(data: $0, encoding: .utf8) } ?? "{\"succeeded\":false,\"devices\":[]}")
+                }
+            }
+            return
+        }
+
         if header.hasPrefix("GET /applications ") {
             enqueue(connection, on: .catalog) { [weak self, weak connection] in
                 guard let self, let connection else { return }
@@ -438,7 +453,9 @@ private final class CompanionServer {
                 respond(connection, status: 400, body: "{\"ok\":false}")
                 return
             }
-            let subscriberHost = Self.host(from: connection.endpoint)
+            // Pollers such as the iPhone remote have no HTTP server to receive pushes.
+            let subscriberHost = header.lowercased().contains("\r\nx-pgif-no-push:")
+                ? nil : Self.host(from: connection.endpoint)
             enqueue(connection, on: .text) { [weak self, weak connection] in
                 guard let self, let connection else { return }
                 let response = self.textSourceHandler(request, subscriberHost)
@@ -683,7 +700,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         NSSetUncaughtExceptionHandler { exception in
             DiagnosticLog.error("Uncaught exception: \(exception.name.rawValue): \(exception.reason ?? "Unknown")")
         }
-        DiagnosticLog.info("paperGIF Mac started")
+        DiagnosticLog.info("OP Remote started")
         NSApp.setActivationPolicy(.accessory)
         configuration = loadConfiguration()
         configureMenu()
@@ -758,7 +775,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "rectangle.grid.2x2", accessibilityDescription: "paperGIF")
+        statusItem.button?.image = NSImage(systemSymbolName: "rectangle.grid.2x2", accessibilityDescription: "OP Remote")
         let menu = NSMenu()
         statusMenuItem = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
@@ -780,7 +797,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         updateMenuItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         menu.addItem(updateMenuItem)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit paperGIF Mac", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit OP Remote", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         updatePairedDevicesMenuItem()
         updateNetHomeMenuItem()
@@ -804,6 +821,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             textSourceHandler: { [weak self] request, subscriberHost in
                 self?.resolveTextSources(request, subscriberHost: subscriberHost)
                     ?? TextSourceBatchResponse(items: [])
+            },
+            matterDevicesHandler: { [weak self] in
+                try? self?.moduleRuntimeHost.manage(moduleID: "matter-switch",
+                    ModuleManageRequest(command: "list"), waitingAtMost: 1)
             }
         )
         dialStream?.stop()
@@ -1044,7 +1065,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Forget all paired devices?"
-        alert.informativeText = "Existing paperGIF remotes will stop controlling this Mac until they pair again."
+        alert.informativeText = "Existing OP Remote controllers will stop controlling this Mac until they pair again."
         alert.addButton(withTitle: "Forget Devices")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -1061,7 +1082,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "Pair with \(requester.isEmpty ? "an iPhone" : requester)?"
-        alert.informativeText = "Approve only if you initiated pairing in paperGIF. This device will be able to run configured remote actions on this Mac."
+        alert.informativeText = "Approve only if you initiated pairing in OP Remote. This device will be able to run configured remote actions on this Mac."
         alert.addButton(withTitle: "Pair")
         alert.addButton(withTitle: "Decline")
         NSApp.activate(ignoringOtherApps: true)
@@ -1081,7 +1102,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func showSettings() {
         let alert = NSAlert()
-        alert.messageText = "paperGIF Mac Settings"
+        alert.messageText = "OP Remote Settings"
         alert.informativeText = "Host: \(ProcessInfo.processInfo.hostName)\nPair from the iPhone Remote tab and approve the request here. Only exact script lines listed below may run."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")

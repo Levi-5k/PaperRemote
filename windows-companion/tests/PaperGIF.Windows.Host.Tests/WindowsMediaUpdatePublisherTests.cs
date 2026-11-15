@@ -73,6 +73,48 @@ public sealed class WindowsMediaUpdatePublisherTests
     }
 
     [Theory]
+    [InlineData(true, 60_000, 10_000)]
+    [InlineData(true, 1_000, 90_000)]
+    [InlineData(false, 60_000, 10_000)]
+    [InlineData(false, 1_000, 90_000)]
+    public async Task SameTrackSeekPushesPositionImmediately(bool playing, long initial, long sought)
+    {
+        using var fixture = new Fixture();
+        fixture.Register("192.168.50.142", "seek", "nowPlaying");
+        fixture.Register("192.168.50.142", "transport", "playbackState");
+        await fixture.Push(Snapshot(playing: playing, elapsed: initial));
+        fixture.Clock.Advance(1);
+
+        await fixture.Push(Snapshot(playing: playing, elapsed: sought));
+
+        Assert.Equal(2, fixture.Handler.Requests.Count);
+        Assert.All(fixture.Handler.Requests.Last().Body.Items,
+            item => Assert.Equal(sought, item.ElapsedMilliseconds));
+        fixture.Clock.Advance(1);
+        await fixture.Push(Snapshot(playing: playing, elapsed: sought + (playing ? 1_000 : 0)));
+        Assert.Equal(2, fixture.Handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task FailedSeekPushRetriesNewestPositionAndReanchorsAfterSuccess()
+    {
+        using var fixture = new Fixture();
+        fixture.Register("192.168.50.142", "seek", "nowPlaying");
+        await fixture.Push();
+        fixture.Clock.Advance(1);
+        fixture.Handler.Status = HttpStatusCode.ServiceUnavailable;
+        await fixture.Push(Snapshot(elapsed: 60_000));
+        fixture.Clock.Advance(2);
+        fixture.Handler.Status = HttpStatusCode.OK;
+        await fixture.Push(Snapshot(elapsed: 90_000));
+        Assert.Equal(3, fixture.Handler.Requests.Count);
+        Assert.Equal(90_000, fixture.Handler.Requests.Last().Body.Items[0].ElapsedMilliseconds);
+        fixture.Clock.Advance(1);
+        await fixture.Push(Snapshot(elapsed: 91_000));
+        Assert.Equal(3, fixture.Handler.Requests.Count);
+    }
+
+    [Theory]
     [InlineData(false, true, 120_000)]
     [InlineData(true, false, 120_000)]
     [InlineData(true, true, 150_000)]

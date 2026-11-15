@@ -25,7 +25,7 @@ final class ModuleCatalogTests: XCTestCase {
             name: "Media Controls",
             summary: "Playback and volume controls for your computer.",
             version: "1.4.0",
-            author: "paperGIF",
+            author: "OP Remote",
             manifest: "media-controls.json"
         )
 

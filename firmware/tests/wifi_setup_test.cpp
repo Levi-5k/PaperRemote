@@ -18,6 +18,12 @@ int main() {
     auto packet = join("Home 2.4", "correct horse");
     assert(parseJoin(packet.data(), packet.size(), credentials));
     assert(!std::strcmp(credentials.ssid, "Home 2.4") && !std::strcmp(credentials.password, "correct horse"));
+    assert(!profileReplacesSaved(credentials, "Home 2.4", ""));
+    assert(!profileReplacesSaved(credentials, "Home 2.4", nullptr));
+    assert(!profileReplacesSaved(credentials, "", ""));
+    assert(profileReplacesSaved(credentials, "Home 2.4", "new password"));
+    assert(profileReplacesSaved(credentials, "Open Cafe", ""));
+    assert(profileReplacesSaved(Credentials{}, "Home 2.4", "correct horse"));
     packet = join("Open Cafe", "");
     assert(parseJoin(packet.data(), packet.size(), credentials) && credentials.password[0] == 0);
     packet = join("Home", "short");

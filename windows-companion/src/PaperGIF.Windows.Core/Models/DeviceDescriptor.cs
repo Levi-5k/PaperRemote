@@ -71,7 +71,10 @@ public sealed record DeviceInput(string Id, string Name, string Kind, List<strin
     double? Minimum = null, double? Maximum = null);
 public sealed record DeviceCapabilities(List<int> ProfileVersions, bool Media, bool FirmwareUpdate,
     int MaxProfileBytes, int MaxControls, int MaxPages,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] List<string>? Transports = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] List<string>? Transports = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] List<string>? ImageFormats = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] List<string>? ImageTransports = null,
+    [property: JsonPropertyName("mediaStorageID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? MediaStorageID = null);
 public sealed record DeviceDescriptor(
     int SchemaVersion, int ProtocolVersion,
     [property: JsonPropertyName("deviceID")] string DeviceID,
@@ -141,6 +144,17 @@ public sealed record DeviceDescriptor(
             (transportList.Count == 0 || transportList.Any(transport => transport is not ("http" or "ble")) ||
              transportList.Distinct(StringComparer.Ordinal).Count() != transportList.Count))
             throw new JsonException("Invalid device transports.");
+        if (capabilities.ImageFormats is { } imageFormats &&
+            (imageFormats.Count > 16 || imageFormats.Any(format => string.IsNullOrEmpty(format) || format.Length > 64) ||
+             imageFormats.Distinct(StringComparer.Ordinal).Count() != imageFormats.Count))
+            throw new JsonException("Invalid image formats.");
+        if (capabilities.ImageTransports is { } imageTransports &&
+            (imageTransports.Count == 0 || capabilities.ImageFormats is not { Count: > 0 } ||
+             imageTransports.Any(transport => transport is not ("http" or "ble") || !SupportsTransport(transport)) ||
+             imageTransports.Distinct(StringComparer.Ordinal).Count() != imageTransports.Count))
+            throw new JsonException("Invalid image transports.");
+        if (capabilities.MediaStorageID is { Length: < 1 or > 128 })
+            throw new JsonException("Invalid media storage identity.");
         DeviceControl.ValidateAll(Controls);
         if (Display is { } display &&
             (display.Width is < 1 or > 4096 || display.Height is < 1 or > 4096 ||

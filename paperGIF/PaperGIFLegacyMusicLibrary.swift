@@ -12,7 +12,7 @@ nonisolated enum PaperGIFLegacyMusicLibrary {
         var errorDescription: String? {
             switch self {
             case .missingLibrary:
-                "No legacy music library was found on this device. Export from the device where you imported your music into paperGIF."
+                "No legacy music library was found on this device. Export from the device where you imported your music into OP Remote."
             case .emptyLibrary:
                 "The legacy music library contains no files to export. Nothing has been changed."
             case .invalidLibrary:

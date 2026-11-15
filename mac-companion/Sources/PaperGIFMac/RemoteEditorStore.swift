@@ -698,7 +698,7 @@ final class RemoteEditorStore: ObservableObject {
                 probedDiscoveryAddresses.remove(address)
                 let blocked = (error as? URLError)?.code == .notConnectedToInternet
                 DiagnosticLog.info(blocked
-                    ? "Cannot reach \(address): allow paperGIF Mac in System Settings > Privacy & Security > Local Network"
+                    ? "Cannot reach \(address): allow OP Remote in System Settings > Privacy & Security > Local Network"
                     : "Cannot identify device at \(address): \(error.localizedDescription)")
                 continue
             }

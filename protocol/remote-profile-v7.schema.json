@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://papergif.local/protocol/remote-profile-v7.schema.json",
-  "title": "PaperRemote Profile v7 hardware extension",
+  "title": "OP Remote Profile v7 hardware extension",
   "description": "Adds physical input bindings without changing deployed screen-control and action property names.",
   "type": "object",
   "additionalProperties": false,

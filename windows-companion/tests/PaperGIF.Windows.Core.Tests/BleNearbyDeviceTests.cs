@@ -220,6 +220,19 @@ public sealed class BleNearbyDeviceTests
     }
 
     [Fact]
+    public void DisplayNameStripsProductPrefixesAndKeepsBareNames()
+    {
+        Assert.Equal("SuperMini S3", DevicePickerMerger.DisplayName("OP Remote SuperMini S3"));
+        Assert.Equal("AMOLED 1.8", DevicePickerMerger.DisplayName("op remote AMOLED 1.8"));
+        Assert.Equal("SuperMini S3", DevicePickerMerger.DisplayName("paperGIF SuperMini S3"));
+        Assert.Equal("Reference", DevicePickerMerger.DisplayName("PaperRemote Reference"));
+        Assert.Equal("OP Remote", DevicePickerMerger.DisplayName("OP Remote"));
+        Assert.Equal("paperGIF", DevicePickerMerger.DisplayName("paperGIF"));
+        Assert.Equal("OP Remote device", DevicePickerMerger.DisplayName("  "));
+        Assert.Equal("OP Remote device", DevicePickerMerger.DisplayName(null));
+    }
+
+    [Fact]
     public void MergeCollapsesBluetoothAddressesOfOneDeviceAndLabelsNameCollisions()
     {
         var entries = DevicePickerMerger.Merge(
@@ -237,7 +250,7 @@ public sealed class BleNearbyDeviceTests
         Assert.Equal(0x0103ul, bluetooth.Single(entry => entry.DeviceId == "id:1").Bluetooth!.Address);
         Assert.Contains(bluetooth, entry => entry.DisplayName == "S3 [01:03] (Bluetooth)");
         Assert.Contains(bluetooth, entry => entry.DisplayName == "S3 [AA:BB] (Bluetooth)");
-        Assert.Contains(bluetooth, entry => entry.DisplayName == "PaperRemote device (Bluetooth)");
+        Assert.Contains(bluetooth, entry => entry.DisplayName == "OP Remote device (Bluetooth)");
     }
 
     // Selection / identification

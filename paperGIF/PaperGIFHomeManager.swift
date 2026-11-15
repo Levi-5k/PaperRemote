@@ -30,16 +30,18 @@ final class PaperGIFHomeManager: NSObject, ObservableObject, HMHomeManagerDelega
     }
 
     func homeManagerDidUpdateHomes(_ manager: HMHomeManager) {
-        authorizationStatus = manager.authorizationStatus
+        if authorizationStatus != manager.authorizationStatus {
+            authorizationStatus = manager.authorizationStatus
+        }
         refreshPowerServices()
-        isRefreshing = false
+        if isRefreshing { isRefreshing = false }
     }
 
     func homeManager(
         _ manager: HMHomeManager,
         didUpdate status: HMHomeManagerAuthorizationStatus
     ) {
-        authorizationStatus = status
+        if authorizationStatus != status { authorizationStatus = status }
         refreshPowerServices()
     }
 
@@ -81,7 +83,7 @@ final class PaperGIFHomeManager: NSObject, ObservableObject, HMHomeManagerDelega
 
     private func refreshPowerServices() {
         guard authorizationStatus.contains(.authorized) else {
-            powerServices = []
+            if !powerServices.isEmpty { powerServices = [] }
             return
         }
         var discoveredServices: [PaperGIFHomePowerService] = []
@@ -102,11 +104,12 @@ final class PaperGIFHomeManager: NSObject, ObservableObject, HMHomeManagerDelega
                 }
             }
         }
-        powerServices = discoveredServices.sorted {
+        let services = discoveredServices.sorted {
             let left = "\($0.homeName) \($0.displayName)"
             let right = "\($1.homeName) \($1.displayName)"
             return left.localizedStandardCompare(right) == .orderedAscending
         }
+        if powerServices != services { powerServices = services }
     }
 
     private func homeService(accessoryID: String, serviceID: String) -> HMService? {

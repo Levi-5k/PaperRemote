@@ -41,7 +41,7 @@ enum PaperGIFError: LocalizedError {
         case .invalidMedia:
             "That file could not be decoded as an image or GIF."
         case .invalidPackage:
-            "The saved paperGIF package is invalid."
+            "The saved OP Remote package is invalid."
         case .noFrames:
             "The selected file does not contain any images."
         case .tooManyFrames(let count):

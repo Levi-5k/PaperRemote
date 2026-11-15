@@ -103,6 +103,28 @@ internal sealed class RemoteEditorStore : IDisposable
     public bool IsBluetoothOnly => string.IsNullOrWhiteSpace(DeviceAddress);
     public CancellationToken DeviceSessionCancellation => sessionCancellation.Token;
 
+    public Task<bool> ImportButtonImageAsync(RemoteControl control, byte[] bytes) =>
+        RunDeviceOperationAsync("Sending button image", async remoteUri =>
+        {
+            if (Descriptor?.Display?.PixelFormat != "rgb565" ||
+                Descriptor.Capabilities.ImageFormats?.Contains("pbgi-rgb565-v2") != true ||
+                Descriptor.Capabilities.ImageTransports?.Contains("http") != true)
+                throw new InvalidOperationException("Full-color button images require a color device with Wi-Fi image uploads.");
+            var id = Guid.NewGuid();
+            await new DeviceImageClient(httpClient, remoteUri, configuration.Token)
+                .UploadButtonAsync(bytes, id, DeviceSessionCancellation);
+            DeviceSessionCancellation.ThrowIfCancellationRequested();
+            if (!Profile.Pages.SelectMany(page => page.Controls).Any(candidate => ReferenceEquals(candidate, control)))
+                throw new InvalidOperationException("The button changed while importing the image.");
+            ButtonImageStore.Save(id, bytes);
+            control.ButtonTexture = new RemoteButtonTexture
+            {
+                Kind = RemoteButtonTextureKind.Image, ImageID = id, PreserveColor = true, Fade = 0,
+            };
+            Commit();
+            return "Button image installed";
+        });
+
     private void RestoreOfflineDescriptor(SavedDevice saved)
     {
         try

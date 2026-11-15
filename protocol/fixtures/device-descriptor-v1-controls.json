@@ -3,7 +3,7 @@
   "protocolVersion": 1,
   "deviceID": "fixture:controls:001",
   "name": "Controllable panel",
-  "manufacturer": "PaperRemote fixture",
+  "manufacturer": "OP Remote fixture",
   "boardID": "fixture.controls",
   "hardwareRevision": "1",
   "firmwareVersion": "fixture-1",

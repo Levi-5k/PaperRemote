@@ -38,12 +38,14 @@ struct BoardInfo {
     size_t maxProfileBytes;
     size_t maxControls;
     size_t maxPages;
+    // M5Paper image/animation media. A touchscreen does not imply that path.
+    bool legacyMedia;
 };
 inline const BoardInfo& m5paper() {
     static const DisplayInfo display{540, 960, true, "gray4", 0};
     static const BoardInfo board{"m5stack.m5paper", "1.0", "M5Paper", "M5Stack",
         &display, {0, 0, 77, 132}, {4, 5, 69, 122}, nullptr, 0, false, true,
-        256 * 1024, 24, 8};
+        256 * 1024, 24, 8, true};
     return board;
 }
 inline const BoardInfo& esp32Reference() {
@@ -53,7 +55,7 @@ inline const BoardInfo& esp32Reference() {
         {"slider-1", "Slider", "slider", {"change", nullptr, nullptr}, {208, 24, 64, 112}, 0, 4095},
     };
     static const BoardInfo board{"paperremote.esp32-screenless-reference", "1", "ESP32 reference",
-        "PaperGIF", nullptr, {0, 0, 320, 160}, {}, inputs, 3, true, false, 32768, 24, 8};
+        "OP Remote", nullptr, {0, 0, 320, 160}, {}, inputs, 3, true, false, 32768, 24, 8, false};
     return board;
 }
 inline const BoardInfo& superminiS3Mt6701() {
@@ -63,8 +65,20 @@ inline const BoardInfo& superminiS3Mt6701() {
         {"dial-1", "MT6701 dial", "dial", {"change", nullptr, nullptr}, {112, 32, 96, 96}, 0, 16383},
     };
     static const BoardInfo board{"paperremote.supermini-s3-mt6701", "1",
-        "ESP32-S3 SuperMini with MT6701", "PaperGIF", nullptr,
-        {0, 0, 320, 160}, {}, inputs, 3, true, false, 32768, 24, 8};
+        "ESP32-S3 SuperMini with MT6701", "OP Remote", nullptr,
+        {0, 0, 320, 160}, {}, inputs, 3, true, false, 32768, 24, 8, false};
+    return board;
+}
+inline const BoardInfo& waveshareAmoled18V2() {
+    static const DisplayInfo display{368, 448, true, "rgb565", 0};
+    static const InputInfo inputs[] = {
+        {"button-1", "Button 1", "button", {"press", "hold", "release"}, {24, 360, 148, 64}, 0, 0},
+        {"button-2", "Button 2", "button", {"press", "hold", "release"}, {196, 360, 148, 64}, 0, 0},
+        {"dial-1", "MT6701 dial", "dial", {"change", nullptr, nullptr}, {64, 36, 240, 240}, 0, 16383},
+    };
+    static const BoardInfo board{"paperremote.waveshare-amoled-18-v2", "2",
+        "Waveshare Touch AMOLED 1.8 V2", "Waveshare", &display,
+        {0, 0, 368, 448}, {0, 0, 368, 448}, inputs, 3, true, false, 65536, 24, 8, false};
     return board;
 }
 inline bool validRect(const Rect& r) {
@@ -97,6 +111,39 @@ struct InputEvent {
     InputEvent(const char* id = "", const char* name = "", double position = 0,
                uint32_t serial = 0, bool relativeValue = false)
         : inputID(id), event(name), value(position), sequence(serial), relative(relativeValue) {}
+};
+template <size_t Capacity>
+class InputEventBuffer {
+    InputEvent events[Capacity]{};
+    size_t count = 0;
+public:
+    bool push(const InputEvent& event) {
+        const bool dial = !std::strcmp(event.inputID, "dial-1") && !std::strcmp(event.event, "change");
+        if (dial && count && !std::strcmp(events[count - 1].inputID, event.inputID) &&
+            !std::strcmp(events[count - 1].event, event.event) && events[count - 1].relative == event.relative) {
+            const double value = event.relative ? events[count - 1].value + event.value : event.value;
+            events[count - 1] = event;
+            events[count - 1].value = value;
+            return true;
+        }
+        if (count == Capacity) return false;
+        events[count++] = event;
+        return true;
+    }
+    bool pop(InputEvent& event) {
+        if (!count) return false;
+        event = events[0];
+        for (size_t index = 1; index < count; ++index) events[index - 1] = events[index];
+        --count;
+        return true;
+    }
+    void clear() { count = 0; }
+    void remove(const char* inputID) {
+        size_t retained = 0;
+        for (size_t index = 0; index < count; ++index)
+            if (std::strcmp(events[index].inputID, inputID)) events[retained++] = events[index];
+        count = retained;
+    }
 };
 class DisplayDriver {
 public:

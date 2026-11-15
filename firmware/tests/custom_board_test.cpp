@@ -1,6 +1,7 @@
 #include "../include/descriptor_json.h"
 #include "../include/firmware_identity.h"
 #include "../include/reference_profile.h"
+#include "../include/reference_pages.h"
 #include "../include/remote_action_payload.h"
 #include "../include/remote_network_queue.h"
 #include "../include/simulated_board.h"
@@ -29,7 +30,7 @@ static JsonDocument example() {
     return json;
 }
 static void descriptorTests() {
-    for (const auto* board : {&m5paper(), &esp32Reference(), &superminiS3Mt6701()}) {
+    for (const auto* board : {&m5paper(), &esp32Reference(), &superminiS3Mt6701(), &waveshareAmoled18V2()}) {
         JsonDocument json;
         writeDeviceDescriptor(json, *board, "stable-id", "test");
         assert(json["schemaVersion"] == 1 && json["protocolVersion"] == 1);
@@ -40,7 +41,7 @@ static void descriptorTests() {
         assert(json["inputs"].size() == board->inputCount);
         assert(json["layout"]["inputs"].size() == board->inputCount);
         assert(json["capabilities"]["profileVersions"].size() == (board->profile7 ? 2 : 1));
-        assert(json["capabilities"]["media"] == bool(board->display));
+        assert(json["capabilities"]["media"] == board->legacyMedia);
         std::string wire;
         serializeJson(json, wire);
         assert(!wire.empty() && wire.size() < maxDescriptorBytes);
@@ -62,6 +63,19 @@ static void descriptorTests() {
     assert(!compatibleFirmware(m5paper(), nullptr, "1.0"));
     assert(compatibleFirmware(superminiS3Mt6701(), "paperremote.supermini-s3-mt6701", "1"));
     assert(superminiS3Mt6701().inputs[2].maximum == 16383);
+    assert(m5paper().legacyMedia);
+    assert(!esp32Reference().legacyMedia && !superminiS3Mt6701().legacyMedia);
+    const auto& amoled = waveshareAmoled18V2();
+    assert(compatibleFirmware(amoled, "paperremote.waveshare-amoled-18-v2", "2"));
+    assert(!std::strcmp(waveshareAmoled18FirmwareIdentity, "PGIFBOARD:paperremote.waveshare-amoled-18-v2@2;"));
+    assert(amoled.display && amoled.display->width == 368 && amoled.display->height == 448);
+    assert(amoled.display->touch && !std::strcmp(amoled.display->pixelFormat, "rgb565"));
+    assert(!amoled.legacyMedia && amoled.inputCount == 3 && amoled.inputs[2].maximum == 16383);
+    assert(!std::strcmp(amoled.inputs[0].id, "button-1") && !std::strcmp(amoled.inputs[2].id, "dial-1"));
+    assert(amoled.inputs[0].bounds.x == 24 && amoled.inputs[0].bounds.y == 360);
+    assert(amoled.inputs[1].bounds.x == 196 && amoled.inputs[1].bounds.width == 148);
+    assert(amoled.inputs[2].bounds.x == 64 && amoled.inputs[2].bounds.width == 240);
+    assert(amoled.screen.width == 368 && amoled.screen.height == 448);
     FirmwareIdentityScanner valid, wrong;
     const std::string marker = m5paperFirmwareIdentity;
     for (size_t i = 0; i < marker.size(); ++i)
@@ -226,16 +240,173 @@ static void parserTests() {
     assert(!parseNativeProfile(json, output, esp32Reference()));
     json = example();
     json["hardwareBindings"][0]["action"]["text"] = "seek";
-    assert(!parseNativeProfile(json, output, esp32Reference()));
+    assert(parseNativeProfile(json, output, esp32Reference()));
     json = example();
     json["hardwareBindings"][0]["maximum"] = 101;
     assert(!parseNativeProfile(json, output, esp32Reference()));
 }
+static void pageBindingTests() {
+    auto json = example();
+    json["hardwareBindings"].as<JsonArray>().remove(1);
+    json["hardwareBindings"].as<JsonArray>().remove(0);
+    auto first = json["pages"].as<JsonArray>().add<JsonObject>();
+    first["id"] = "page-a";
+    first["controls"].to<JsonArray>();
+    auto second = json["pages"].as<JsonArray>().add<JsonObject>();
+    second["id"] = "page-b";
+    second["controls"].to<JsonArray>();
+    json["hardwareBindings"][0]["pageID"] = "page-a";
+    json["hardwareBindings"][1]["pageID"] = "page-a";
+    auto other = json["hardwareBindings"].as<JsonArray>().add<JsonObject>();
+    other.set(json["hardwareBindings"][0]);
+    other["pageID"] = "page-b";
+    other["action"]["type"] = "macMedia";
+    other["action"]["text"] = "playPause";
+    NativeProfile profile;
+    assert(parseNativeProfile(json, profile, waveshareAmoled18V2()));
+    int dispatched = 0;
+    std::strcpy(profile.activePageID, "page-b");
+    dispatchHardwareInput(profile, waveshareAmoled18V2(), {"button-1", "press", 1, 1},
+        [&](const HardwareBinding& binding, const NativeAction& action) {
+            assert(!std::strcmp(binding.pageID, "page-b"));
+            assert(!std::strcmp(action.text, "playPause"));
+            ++dispatched;
+            return true;
+        });
+    assert(dispatched == 1);
+    bool pressed[] = {true, false, false};
+    releaseHardwareInputs(profile, waveshareAmoled18V2(), pressed,
+        [&](const HardwareBinding&, const NativeAction&) { ++dispatched; return true; });
+    assert(dispatched == 1);
+    other["pageID"] = "missing";
+    assert(!parseNativeProfile(json, profile, waveshareAmoled18V2()));
+    other["pageID"] = "page-b";
+    other["inputID"] = "dial-1";
+    other["event"] = "change";
+    other["mode"] = "absolute";
+    other["controlID"] = "volume-tile";
+    auto tile = second["controls"].as<JsonArray>().add<JsonObject>();
+    tile["id"] = "volume-tile";
+    tile["kind"] = "slider";
+    tile["action"].set(other["action"]);
+    tile["action"]["text"] = "volume";
+    tile["action"]["value"] = 128;
+    assert(parseNativeProfile(json, profile, waveshareAmoled18V2()));
+    assert(profile.bindings[2].state.value == 50);
+    std::strcpy(profile.activePageID, "page-b");
+    dispatchHardwareInput(profile, waveshareAmoled18V2(), {"dial-1", "change", 16383, 2},
+        [&](const HardwareBinding& binding, const NativeAction& action) {
+            assert(!std::strcmp(binding.controlID, "volume-tile"));
+            assert(!std::strcmp(action.text, "volume") && action.value == 255);
+            ++dispatched;
+            return true;
+        });
+    assert(dispatched == 2);
+    assert(hasSliderDialBinding(profile));
+    profile.bindings[profile.count] = profile.bindings[0];
+    profile.bindings[profile.count++].pageID[0] = 0;
+    profile.bindings[profile.count] = profile.bindings[2];
+    profile.bindings[profile.count].controlID[0] = 0;
+    profile.bindings[profile.count++].pageID[0] = 0;
+    std::strcpy(profile.activePageID, "unassigned-page");
+    dispatchHardwareInput(profile, waveshareAmoled18V2(), {"button-1", "press", 1, 3},
+        [&](const HardwareBinding&, const NativeAction&) { ++dispatched; return true; });
+    dispatchHardwareInput(profile, waveshareAmoled18V2(), {"dial-1", "change", 0, 4},
+        [&](const HardwareBinding&, const NativeAction&) { ++dispatched; return true; });
+    pressed[0] = true;
+    releaseHardwareInputs(profile, waveshareAmoled18V2(), pressed,
+        [&](const HardwareBinding&, const NativeAction&) { ++dispatched; return true; });
+    assert(dispatched == 2);
+    assert(!hasSliderDialBinding(profile));
+    std::strcpy(profile.activePageID, "page-b");
+    dispatchHardwareInput(profile, waveshareAmoled18V2(), {"dial-1", "change", 0, 5},
+        [&](const HardwareBinding& binding, const NativeAction&) {
+            assert(!std::strcmp(binding.pageID, "page-b"));
+            ++dispatched;
+            return true;
+        });
+    assert(dispatched == 3);
+    tile["kind"] = "button";
+    assert(!parseNativeProfile(json, profile, waveshareAmoled18V2()));
+    other["controlID"] = "missing";
+    assert(!parseNativeProfile(json, profile, waveshareAmoled18V2()));
+}
+
+static void seekTransitionTests() {
+    PageMediaState media;
+    assert(media.ignoresKnobSeek(100));
+    JsonDocument track;
+    track["available"] = true;
+    track["playing"] = true;
+    track["text"] = "First track";
+    track["elapsedMilliseconds"] = 30000;
+    track["durationMilliseconds"] = 180000;
+    assert(media.update(track.as<JsonObjectConst>(), 100));
+    assert(media.ignoresKnobSeek(1099));
+    assert(!media.ignoresKnobSeek(1100));
+    media.noteTrackChange(2000);
+    assert(media.ignoresKnobSeek(2001));
+    assert(media.update(track.as<JsonObjectConst>(), 2500));
+    assert(media.ignoresKnobSeek(6999));
+    assert(!media.ignoresKnobSeek(7000));
+    media.noteTrackChange(8000);
+    track["text"] = "Second track";
+    track["elapsedMilliseconds"] = 0;
+    assert(media.update(track.as<JsonObjectConst>(), 8200));
+    assert(media.ignoresKnobSeek(9199));
+    assert(!media.ignoresKnobSeek(9200));
+    track["elapsedMilliseconds"] = 1000;
+    assert(media.update(track.as<JsonObjectConst>(), 9300));
+    assert(!media.ignoresKnobSeek(9300));
+    track["elapsedMilliseconds"] = 180000;
+    assert(media.update(track.as<JsonObjectConst>(), 10000));
+    assert(media.ignoresKnobSeek(10001));
+    track["text"] = "Automatic next track";
+    track["elapsedMilliseconds"] = 0;
+    assert(media.update(track.as<JsonObjectConst>(), 10100));
+    assert(media.ignoresKnobSeek(11099));
+    assert(!media.ignoresKnobSeek(11100));
+    media.timeline.stale = true;
+    assert(media.ignoresKnobSeek(11200));
+}
+
+static void pageLayoutTests() {
+    JsonDocument json;
+    assert(!deserializeJson(json, R"({"gridColumns":2,"gridRows":4,"controls":[
+        {"kind":"button","layoutSlot":0}, {"kind":"slider","layoutSlot":1},
+        {"kind":"button","gridWidth":2,"gridHeight":2,"layoutSlot":4}]})"));
+    PageTilePlacement placements[maxPageTiles];
+    assert(layoutPageTiles(json.as<JsonObjectConst>(), placements));
+    assert(placements[0].slot == 0 && placements[0].height == 2);
+    assert(placements[1].slot == 1 && placements[1].height == 1);
+    assert(placements[2].slot == 4 && placements[2].width == 2);
+    for (size_t index = 0; index < 3; ++index) {
+        const auto rect = pageTileRect(placements[index], 2, 4, 368, 448);
+        assert(validRect(rect) && rect.y > pageHeaderHeight);
+        assert(rect.x + rect.width <= 368 && rect.y + rect.height <= 448);
+    }
+    json["controls"][1]["layoutSlot"] = 0;
+    assert(layoutPageTiles(json.as<JsonObjectConst>(), placements));
+    assert(placements[1].slot == 1);
+    json["gridRows"] = 1;
+    assert(!layoutPageTiles(json.as<JsonObjectConst>(), placements));
+    PageSwipe swipe;
+    swipe.begin(100, 200, false);
+    assert(swipe.move(40, 205) == 1 && swipe.swiped);
+    swipe.begin(100, 200, true);
+    assert(swipe.move(40, 205) == 0 && !swipe.swiped);
+    swipe.begin(100, 200, false);
+    assert(swipe.move(110, 280) == 0 && !swipe.swiped);
+}
+
 int main(int argc, char** argv) {
     descriptorTests();
     geometryTests();
     bindingTests();
     parserTests();
+    pageBindingTests();
+    seekTransitionTests();
+    pageLayoutTests();
     if (argc > 1) {
         std::ifstream file(argv[1]);
         JsonDocument fixture;

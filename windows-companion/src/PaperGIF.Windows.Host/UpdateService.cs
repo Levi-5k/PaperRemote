@@ -60,7 +60,7 @@ internal sealed class UpdateService : IDisposable
 {
     public const string Repository = "Levi-5k/PaperRemote";
     public const string ManifestName = "papergif-release.json";
-    private const string TaskName = "paperGIF Windows Companion";
+    private const string TaskName = "OP Remote";
     private static readonly JsonSerializerOptions ManifestOptions = new() { PropertyNameCaseInsensitive = true };
     private readonly HttpClient github = new() { Timeout = TimeSpan.FromSeconds(60) };
     private readonly HttpClient device = new(new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false })
@@ -90,7 +90,7 @@ internal sealed class UpdateService : IDisposable
             cancellationToken);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            throw new UpdateException("No paperGIF releases have been published yet.");
+            throw new UpdateException("No OP Remote releases have been published yet.");
         }
         if (!response.IsSuccessStatusCode)
         {
@@ -193,7 +193,7 @@ internal sealed class UpdateService : IDisposable
             var stagedAssembly = Path.Combine(staging, "PaperGIF.Windows.Host.dll");
             if (!File.Exists(Path.Combine(staging, "PaperGIF.Windows.Host.exe")) || !File.Exists(stagedAssembly))
             {
-                throw new UpdateException("The update archive does not contain paperGIF.");
+                throw new UpdateException("The update archive does not contain OP Remote.");
             }
             var stagedVersion = AssemblyName.GetAssemblyName(stagedAssembly).Version?.ToString(3) ?? string.Empty;
             if (!SoftwareVersion.AreEqual(stagedVersion, version))
@@ -233,7 +233,7 @@ internal sealed class UpdateService : IDisposable
         {
             File.Delete(archivePath);
         }
-        DiagnosticLog.Info($"Installing paperGIF Windows {version} and restarting");
+        DiagnosticLog.Info($"Installing OP Remote {version} and restarting");
         exit();
     }
 

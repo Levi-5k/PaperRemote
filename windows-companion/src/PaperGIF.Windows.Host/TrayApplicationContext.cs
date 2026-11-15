@@ -40,8 +40,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         icon = PaperGifIcon.Create(64);
         updates = new UpdateCoordinator(editorStore, configuration) { ExitApplication = ExitThread };
         window = new RemoteEditorWindow(editorStore, activity, discovery, bluetoothDevices, netHomeService, moduleCatalog, homeAccessories, updates, icon);
+        pairingApprovalService.AttachPromptOwner(window);
         var openItem = new ToolStripMenuItem(
-            "Open paperGIF",
+            "Open OP Remote",
             null,
             (_, _) => window.ShowAndActivate());
         var statusItem = new ToolStripMenuItem($"Running on port {configuration.Port}")
@@ -70,7 +71,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (!startupRegistration.SetEnabled(startupItem.Checked, out var error))
             {
                 startupItem.Checked = startupRegistration.IsEnabled;
-                MessageBox.Show(error, "paperGIF", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(error, "OP Remote", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         };
         startupRegistration.Changed += (_, _) => startupItem.Checked = startupRegistration.IsEnabled;
@@ -92,12 +93,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(updateItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
+        _ = menu.Handle;
 
         notifyIcon = new NotifyIcon
         {
             ContextMenuStrip = menu,
             Icon = icon,
-            Text = "paperGIF Windows Companion",
+            Text = "OP Remote",
             Visible = true,
         };
         notifyIcon.DoubleClick += (_, _) => window.ShowAndActivate();
@@ -125,7 +127,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _ = CheckForUpdatesAfterStartupAsync();
         notifyIcon.ShowBalloonTip(
             3_000,
-            "paperGIF",
+            "OP Remote",
             "Windows companion is running.",
             ToolTipIcon.Info);
     }
@@ -179,9 +181,9 @@ internal sealed class TrayApplicationContext : ApplicationContext
         updateBalloonShown = true;
         notifyIcon.ShowBalloonTip(
             10_000,
-            "paperGIF update available",
+            "OP Remote update available",
             updates.AppUpdate is not null
-                ? $"paperGIF {release.Version} is ready to install. Click to see the update."
+                ? $"OP Remote {release.Version} is ready to install. Click to see the update."
                 : $"M5Paper firmware {release.Version} is ready to install. Click to see the update.",
             ToolTipIcon.Info);
     }
@@ -218,8 +220,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         notifyIcon.ShowBalloonTip(
             10_000,
-            "paperGIF pairing request",
-            $"{requester} wants to pair with this PC. Approve or decline in the paperGIF dialog.",
+            "OP Remote pairing request",
+            $"{requester} wants to pair with this PC. Approve or decline in the OP Remote dialog.",
             ToolTipIcon.Info);
     }
 
@@ -234,7 +236,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             ? ActionDescriptions.TypeName(action.Type)
             : ActionDescriptions.Detail(action.Text);
         activityItem.Text = $"{(action.Succeeded ? "Ran" : "Failed")}: {actionName}";
-        var tooltip = $"paperGIF: {activityItem.Text}";
+        var tooltip = $"OP Remote: {activityItem.Text}";
         notifyIcon.Text = tooltip[..Math.Min(tooltip.Length, 63)];
     }
 
@@ -251,8 +253,8 @@ internal sealed class TrayApplicationContext : ApplicationContext
             return;
         }
         var restart = MessageBox.Show(
-            "Restart paperGIF now to use the new listener port?",
-            "paperGIF",
+            "Restart OP Remote now to use the new listener port?",
+            "OP Remote",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Information);
         if (restart == DialogResult.Yes)
@@ -265,7 +267,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private void ForgetPairedDevices()
     {
         var result = MessageBox.Show(
-            "Existing paperGIF remotes will stop controlling this computer until they pair again.",
+            "Existing OP Remote controllers will stop controlling this computer until they pair again.",
             "Forget all paired devices?",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning,
@@ -278,7 +280,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         editorStore.RefreshLocalCompanion(previousToken);
         MessageBox.Show(
             "Pairings were cleared. Send the updated profile to M5Paper after pairing again.",
-            "paperGIF",
+            "OP Remote",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
     }

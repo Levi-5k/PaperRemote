@@ -1,10 +1,13 @@
 import CoreGraphics
+import PaperDeviceKit
 import SwiftUI
 
 struct PaperGIFMediaCard: View {
     let savedMedia: PaperGIFStorage.SavedMedia
     let isSelected: Bool
     @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
+    let descriptor: DeviceDescriptor?
+    var effectsLive = false
     let onChangeCrop: () -> Void
     let onEditConversion: () -> Void
     let onExport: () -> Void
@@ -13,6 +16,8 @@ struct PaperGIFMediaCard: View {
 
     @State private var animation: PaperGIFAnimation?
     @State private var previewImage: CGImage?
+    @State private var preparingSend = false
+    @State private var sendError: String?
 
     var body: some View {
         GeometryReader { proxy in
@@ -42,6 +47,9 @@ struct PaperGIFMediaCard: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
+                            } else if savedMedia.isColorImage {
+                                Text("IMAGE  •  \(ByteCountFormatter.string(fromByteCount: Int64(savedMedia.byteCount), countStyle: .file))")
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                         }
 
@@ -57,7 +65,7 @@ struct PaperGIFMediaCard: View {
                                 .labelStyle(.titleAndIcon)
                         }
                         .buttonStyle(.borderedProminent)
-                        .disabled(!bluetoothManager.canSend)
+                        .disabled(!canSend)
                         .accessibilityLabel(sendButtonTitle)
                     }
                 }
@@ -68,10 +76,19 @@ struct PaperGIFMediaCard: View {
                 .frame(height: proxy.size.height, alignment: .bottom)
 
                 if isActiveTransfer {
-                    ProgressView(value: bluetoothManager.transferProgress)
-                        .padding(.horizontal, 12)
-                        .frame(height: proxy.size.height, alignment: .top)
-                        .padding(.top, 8)
+                    Group {
+                        if effectsLive {
+                            PaperGIFTransferBar(
+                                fraction: bluetoothManager.transferProgress,
+                                label: bluetoothManager.transferStatus ?? "Sending"
+                            )
+                        } else {
+                            ProgressView(value: bluetoothManager.transferProgress)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: proxy.size.height, alignment: .top)
+                    .padding(.top, 8)
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
@@ -89,7 +106,7 @@ struct PaperGIFMediaCard: View {
                 Label("Send", systemImage: "antenna.radiowaves.left.and.right")
             }
             .tint(.blue)
-            .disabled(!bluetoothManager.canSend)
+            .disabled(!canSend)
 
             Button(action: onExport) {
                 Label("Export", systemImage: "square.and.arrow.up")
@@ -127,12 +144,14 @@ struct PaperGIFMediaCard: View {
             guard let result = try? await Task.detached(priority: .utility, operation: {
                 let loaded = try PaperGIFStorage.load(savedMedia)
                 let data = loaded.data
-                let animation = try PaperGIFAnimation(encoded: data)
+                let animation = savedMedia.isColorImage ? nil : try PaperGIFAnimation(encoded: data)
                 let image: CGImage
                 if let sourceData = loaded.sourceData {
                     image = try PaperGIFEncoder.previewImage(from: sourceData)
+                } else if savedMedia.isColorImage {
+                    image = try DeviceImageEncoder.decode(data)
                 } else {
-                    guard let firstFrame = animation.frames.first else {
+                    guard let firstFrame = animation?.frames.first else {
                         throw PaperGIFError.noFrames
                     }
                     image = try PaperGIFEncoder.previewImage(fromPackedFrame: firstFrame)
@@ -142,6 +161,9 @@ struct PaperGIFMediaCard: View {
             animation = result.0
             previewImage = result.1
         }
+        .alert("Couldn’t Send Media", isPresented: Binding(get: { sendError != nil }, set: { if !$0 { sendError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(sendError ?? "Unknown error") }
     }
 
     private func detail(for animation: PaperGIFAnimation) -> String {
@@ -151,15 +173,32 @@ struct PaperGIFMediaCard: View {
     }
 
     private func sendToDevice() {
+        guard canSend else { return }
+        let targetID = descriptor?.deviceID
+        let colorDisplay = descriptor?.canUseColorImages == true ? descriptor?.display : nil
+        preparingSend = true
         Task {
-            guard let data = try? await Task.detached(priority: .userInitiated, operation: {
-                try PaperGIFStorage.loadData(savedMedia)
-            }).value else { return }
-            bluetoothManager.send(data, name: savedMedia.name, mediaID: savedMedia.id)
+            defer { preparingSend = false }
+            do {
+                let data = try await Task.detached(priority: .userInitiated) {
+                    try PaperGIFStorage.load(savedMedia).convertedData(for: colorDisplay)
+                }.value
+                guard bluetoothManager.deviceSession?.selectedID == targetID else { return }
+                if colorDisplay != nil, let targetID {
+                    bluetoothManager.sendColorImage(data, to: targetID, name: savedMedia.name, mediaID: savedMedia.id)
+                } else {
+                    bluetoothManager.send(data, name: savedMedia.name, mediaID: savedMedia.id)
+                }
+            } catch { sendError = error.localizedDescription }
         }
     }
 
+    private var canSend: Bool {
+        !preparingSend && (descriptor?.canUseColorImages == true ? bluetoothManager.canSendColorImage : bluetoothManager.canSend)
+    }
+
     private var sendButtonTitle: String {
+        if preparingSend { return "Preparing" }
         if isActiveTransfer {
             return "Sending"
         }

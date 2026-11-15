@@ -53,7 +53,7 @@ internal sealed class WinRtBleConnector : IBleDeviceConnector
             var services = await device.GetGattServicesForUuidAsync(BleProtocol.ServiceUuid, BluetoothCacheMode.Uncached)
                 .AsTask(cancellationToken);
             if (services.Status != GattCommunicationStatus.Success || services.Services.Count == 0)
-                throw new IOException($"PaperRemote service unavailable ({services.Status}).");
+                throw new IOException($"OP Remote service unavailable ({services.Status}).");
             var service = services.Services[0];
             var control = await CharacteristicAsync(service, BleProtocol.ControlCharacteristicUuid, cancellationToken);
             var descriptor = await CharacteristicAsync(service, BleProtocol.DescriptorCharacteristicUuid, cancellationToken);

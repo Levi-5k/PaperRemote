@@ -20,7 +20,7 @@ struct PaperGIFLegacyMusicExportSection: View {
     var body: some View {
         Section {
             Button(action: exportLibrary) {
-                Label("Export paperGIF Library", systemImage: "square.and.arrow.up")
+                Label("Export OP Remote Library", systemImage: "square.and.arrow.up")
             }
             .disabled(isCheckingLibrary || exportFolder != nil)
 
@@ -30,7 +30,7 @@ struct PaperGIFLegacyMusicExportSection: View {
         } header: {
             Text("Move Music to XPlayer")
         } footer: {
-            Text("Save a copy of your legacy Music folder to Files. Then, in XPlayer, choose Import paperGIF Library and select the exported Music folder itself, not its parent or individual songs. Subfolders are preserved. The original library stays in paperGIF; do not delete this app until you verify the import.")
+            Text("Save a copy of your legacy Music folder to Files. Then, in XPlayer, choose Import paperGIF Library and select the exported Music folder itself, not its parent or individual songs. Subfolders are preserved. The original library stays in OP Remote; do not delete this app until you verify the import.")
         }
         .sheet(item: $exportFolder, onDismiss: exportPickerDismissed) { folder in
             PaperGIFLegacyMusicExportPicker(root: folder.url) { exported in

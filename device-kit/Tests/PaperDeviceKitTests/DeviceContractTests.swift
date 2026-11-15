@@ -1,9 +1,60 @@
 import CryptoKit
+import CoreGraphics
 import XCTest
 
 @testable import PaperDeviceKit
 
 final class DeviceContractTests: XCTestCase {
+    func testColorImageCapabilityRequiresExplicitFormat() {
+        var storageDescriptor = DeviceDescriptor.legacyM5Paper(deviceID: "storage-test")
+        storageDescriptor.capabilities.mediaStorageID = "mount-123"
+        XCTAssertNoThrow(try storageDescriptor.validate())
+        storageDescriptor.capabilities.mediaStorageID = ""
+        XCTAssertThrowsError(try storageDescriptor.validate())
+        var descriptor = DeviceDescriptor.legacyM5Paper(deviceID: "test")
+        descriptor.display?.pixelFormat = "rgb565"
+        XCTAssertFalse(descriptor.canUseColorImages)
+        descriptor.capabilities.imageFormats = ["pimg-rgb565-v1"]
+        XCTAssertTrue(descriptor.canUseColorImages)
+        XCTAssertFalse(descriptor.canUseLegacyMedia)
+        XCTAssertNoThrow(try descriptor.validate())
+        descriptor.capabilities.imageFormats = ["pimg-rgb565-v1", "pimg-rgb565-v1"]
+        XCTAssertThrowsError(try descriptor.validate())
+        descriptor.display = nil
+        XCTAssertFalse(descriptor.canUseColorImages)
+    }
+
+    func testColorImageDimensionsCropAndWirePixels() throws {
+        let wireImage = Data([80, 73, 77, 71, 1, 0, 2, 0, 1, 0, 0, 248, 31, 0])
+        let decoded = try DeviceImageEncoder.decode(wireImage)
+        XCTAssertEqual(decoded.width, 2)
+        XCTAssertEqual(decoded.height, 1)
+        let tinyDisplay = DeviceDisplay(width: 2, height: 1, touch: false, pixelFormat: "rgb565")
+        XCTAssertEqual(try DeviceImageEncoder.encode(decoded, for: tinyDisplay).data, wireImage)
+        XCTAssertThrowsError(try DeviceImageEncoder.decode(wireImage.dropLast()))
+        XCTAssertThrowsError(try DeviceImageEncoder.decode(Data(repeating: 0, count: 10)))
+        let bytes = Data([255, 0, 0, 255, 0, 0, 255, 255])
+        let provider = try XCTUnwrap(CGDataProvider(data: bytes as CFData))
+        let image = try XCTUnwrap(CGImage(width: 2, height: 1, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: 8, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let display = DeviceDisplay(width: 2, height: 1, touch: false, pixelFormat: "rgb565")
+        let encoded = try DeviceImageEncoder.encode(image, for: display)
+        XCTAssertEqual(Array(encoded.data), [80, 73, 77, 71, 1, 0, 2, 0, 1, 0, 0, 248, 31, 0])
+        let cropped = try DeviceImageEncoder.crop(image, normalizedRect: CGRect(x: 0.5, y: 0, width: 0.5, height: 1))
+        XCTAssertEqual(cropped.width, 1)
+        XCTAssertThrowsError(try DeviceImageEncoder.crop(image, normalizedRect: CGRect(x: 2, y: 2, width: 1, height: 1)))
+        let portrait = try DeviceImageEncoder.encode(image,
+            for: DeviceDisplay(width: 368, height: 448, touch: true, pixelFormat: "rgb565"))
+        XCTAssertEqual(portrait.data.count, 10 + 368 * 448 * 2)
+        XCTAssertEqual(portrait.preview.height, 448)
+        let landscape = try DeviceImageEncoder.encode(image,
+            for: DeviceDisplay(width: 448, height: 368, touch: true, pixelFormat: "rgb565"))
+        XCTAssertEqual(landscape.preview.width, 448)
+        XCTAssertThrowsError(try DeviceImageEncoder.encode(image,
+            for: DeviceDisplay(width: 0, height: 448, touch: true, pixelFormat: "rgb565")))
+    }
     private var root: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -270,6 +321,55 @@ final class DeviceContractTests: XCTestCase {
         session.address = "different.local"
         XCTAssertFalse(session.isVerified)
         XCTAssertFalse(session.isLoading)
+    }
+
+    @MainActor
+    func testNetworkVerificationChecksIdentityAndPreservesProfile() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = DeviceSession(storageURL: directory.appendingPathComponent("devices.json"))
+        var descriptor = try reference()
+        descriptor.capabilities.transports = ["http", "ble"]
+        try session.remember(descriptor)
+        session.select(id: descriptor.deviceID)
+        try session.saveProfile(Data("saved".utf8))
+        let data = try JSONEncoder().encode(descriptor)
+        try await session.verifyNetwork(address: "192.168.1.2", deviceID: descriptor.deviceID,
+            adapter: NativeDeviceAdapter { _, _ in (data, 200) })
+        XCTAssertTrue(session.isVerified)
+        XCTAssertEqual(session.address, "192.168.1.2")
+        XCTAssertEqual(session.profileData, Data("saved".utf8))
+        var other = descriptor
+        other.deviceID = "different-device"
+        let otherData = try JSONEncoder().encode(other)
+        do {
+            try await session.verifyNetwork(address: "192.168.1.3", deviceID: descriptor.deviceID,
+                adapter: NativeDeviceAdapter { _, _ in (otherData, 200) })
+            XCTFail("Wrong device verified")
+        } catch {}
+        XCTAssertFalse(session.isVerified)
+        XCTAssertEqual(session.address, "192.168.1.2")
+        XCTAssertEqual(session.selectedID, descriptor.deviceID)
+        let started = expectation(description: "verification started")
+        let pending = Task {
+            try await session.verifyNetwork(address: "192.168.1.4", deviceID: descriptor.deviceID,
+                adapter: NativeDeviceAdapter { _, _ in
+                    started.fulfill()
+                    try await Task.sleep(for: .milliseconds(50))
+                    return (data, 200)
+                })
+        }
+        await fulfillment(of: [started], timeout: 2)
+        try session.remember(other)
+        session.select(id: other.deviceID)
+        do {
+            try await pending.value
+            XCTFail("Stale verification completed")
+        } catch is CancellationError {}
+        XCTAssertEqual(session.selectedID, other.deviceID)
+        XCTAssertFalse(session.isVerified)
+        session.select(id: descriptor.deviceID)
+        XCTAssertEqual(session.records.first?.address, "192.168.1.2")
     }
 
     @MainActor

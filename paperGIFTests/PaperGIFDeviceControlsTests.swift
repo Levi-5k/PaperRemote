@@ -320,6 +320,59 @@ struct PaperGIFDeviceControlsTests {
         #expect(nearby.accepts(knobID, descriptor: controlDescriptor(id: "knob", transports: ["ble"])))
     }
 
+    @Test func selectorIncludesUnsavedDiscoveriesWithoutDuplicatingSavedDevices() throws {
+        let descriptor = controlDescriptor(id: "saved", transports: ["http", "ble"])
+        let knownPeripheral = UUID(), unknownPeripheral = UUID(), sameNamePeripheral = UUID()
+        let storageURL = FileManager.default.temporaryDirectory.appendingPathComponent("selector-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storageURL) }
+        let session = DeviceSession(storageURL: storageURL)
+        let saved = try session.remember(descriptor, address: "192.168.1.9")
+        let known = PaperGIFBluetoothManager.NearbyDevice(id: knownPeripheral, name: "Advertised name",
+            rssi: -40, lastSeen: Date(), deviceID: "saved")
+        let unknown = PaperGIFBluetoothManager.NearbyDevice(id: unknownPeripheral, name: "New AMOLED",
+            rssi: -50, lastSeen: Date(), deviceID: nil)
+        let sameName = PaperGIFBluetoothManager.NearbyDevice(id: sameNamePeripheral, name: descriptor.name,
+            rssi: -60, lastSeen: Date(), deviceID: nil)
+        let options = PaperGIFDeviceSelectorOption.resolve(saved: [saved], nearby: [known, unknown, unknown, sameName])
+        #expect(options.count == 3)
+        #expect(options.first?.target == .savedDevice("saved"))
+        #expect(options.contains { $0.target == .nearby(unknownPeripheral) })
+        #expect(options.contains { $0.target == .nearby(sameNamePeripheral) })
+        #expect(Set(options.map(\.id)).count == options.count)
+        let discoveryOnly = PaperGIFDeviceSelectorOption.resolve(saved: [], nearby: [unknown])
+        #expect(discoveryOnly.count == 1)
+        #expect(discoveryOnly.first?.target == .nearby(unknownPeripheral))
+        #expect(PaperGIFDeviceSelectorOption.resolve(saved: [saved], nearby: []).first?.id == options.first?.id)
+    }
+
+    @Test func selectorShowsTheCurrentDeviceWhenDiscoveryOmitsIt() throws {
+        let descriptor = controlDescriptor(id: "current", transports: ["ble"])
+        let storageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("selector-current-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storageURL) }
+        let session = DeviceSession(storageURL: storageURL)
+        let saved = try session.remember(descriptor, address: "")
+        let other = PaperGIFBluetoothManager.NearbyDevice(
+            id: UUID(), name: "Other", rssi: -40, lastSeen: Date(), deviceID: "other"
+        )
+        let listed = PaperGIFDeviceSelectorOption.includingCurrent(
+            saved: [saved], nearby: [other], selectedID: "current", selectedName: descriptor.name,
+            connectedPeripheralID: nil, connectedDeviceID: nil, connectedName: nil
+        )
+        let savedCurrentShown = listed.contains { $0.deviceID == "current" }
+        #expect(savedCurrentShown)
+
+        let peripheral = UUID()
+        let omitted = PaperGIFDeviceSelectorOption.includingCurrent(
+            saved: [], nearby: [], selectedID: "current", selectedName: "Desk Remote",
+            connectedPeripheralID: peripheral, connectedDeviceID: "live", connectedName: "Live Board"
+        )
+        let selectedShown = omitted.contains { $0.deviceID == "current" && $0.name == "Desk Remote" }
+        let connectedShown = omitted.contains { $0.deviceID == "live" && $0.name == "Live Board" }
+        #expect(selectedShown)
+        #expect(connectedShown)
+    }
+
     @Test func legacyM5PaperBluetoothReusesSavedWiFiIdentity() {
         let peripheral = UUID(), saved: Set = ["papergif-3c689a004f8c"]
         #expect(PaperGIFBluetoothTarget.legacyM5PaperID(

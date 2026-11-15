@@ -23,6 +23,11 @@ inline uint32_t elapsedAt(const State& state, uint32_t now) {
         ? static_cast<uint32_t>(elapsed) : state.durationMilliseconds;
 }
 
+    inline bool seekFinishesTrack(const State& state, int value) {
+        return value >= 255 && state.available && state.playing && !state.stale &&
+        state.durationMilliseconds > 0;
+    }
+
 struct Position {
     bool available = false;
     uint32_t elapsedSeconds = 0;

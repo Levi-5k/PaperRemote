@@ -333,7 +333,7 @@ public sealed class BleSessionPool(IBleDeviceConnector connector, TimeSpan? scan
             }
         }
         throw new DeviceControlException(DeviceControlError.Transport,
-            ordered.Count == 0 ? "No PaperRemote Bluetooth device found nearby." :
+            ordered.Count == 0 ? "No OP Remote Bluetooth device found nearby." :
             $"The device was not found over Bluetooth{(lastError is null ? "." : $": {lastError.Message}")}", lastError);
     }
 

@@ -100,7 +100,7 @@ final class DeviceBluetoothScanner: NSObject, ObservableObject {
             nearby[index].lastSeen = date
             return nearby[index].descriptor == nil && nearby[index].problem == nil
         }
-        nearby.append(Nearby(id: id, name: name?.isEmpty == false ? name! : "PaperRemote device",
+        nearby.append(Nearby(id: id, name: name?.isEmpty == false ? name! : "OP Remote device",
                              rssi: rssi, lastSeen: date))
         return true
     }
@@ -172,7 +172,7 @@ extension DeviceBluetoothScanner: CBCentralManagerDelegate {
                 if isRunning { scan() }
             case .unauthorized:
                 status = "Bluetooth permission denied"
-                problem = "Allow Bluetooth for paperGIF Mac in System Settings → Privacy & Security → Bluetooth."
+                problem = "Allow Bluetooth for OP Remote in System Settings → Privacy & Security → Bluetooth."
             case .poweredOff:
                 status = "Bluetooth is off"
                 problem = "Turn on Bluetooth to discover controllers that are not on Wi-Fi."
@@ -222,7 +222,7 @@ extension DeviceBluetoothScanner: CBPeripheralDelegate {
         MainActor.assumeIsolated {
             guard identifying === peripheral else { return }
             guard let service = peripheral.services?.first(where: { $0.uuid == Self.serviceUUID }) else {
-                fail(peripheral, "PaperRemote service not found")
+                fail(peripheral, "OP Remote service not found")
                 return
             }
             peripheral.discoverCharacteristics([Self.descriptorUUID], for: service)

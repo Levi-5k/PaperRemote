@@ -5,7 +5,7 @@
   "name": "Matter Switch",
   "summary": "Direct local control for a Matter smart switch through the Mac companion.",
   "version": "1.0.0",
-  "author": "paperGIF",
+  "author": "OP Remote",
   "runtime": {
     "executable": "matter",
     "actions": ["on", "off", "toggle"]

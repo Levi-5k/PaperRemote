@@ -14,6 +14,179 @@ namespace PaperGIF.Windows.Host.Tests;
 
 public sealed class CompanionEndpointTests
 {
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindowEnabled(IntPtr window);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr window, uint command);
+
+    public sealed class InteractiveFactAttribute : FactAttribute
+    {
+        public InteractiveFactAttribute()
+        {
+            if (!Environment.UserInteractive) Skip = "Requires an interactive Windows desktop.";
+        }
+    }
+
+    [InteractiveFact]
+    public async Task PairingDialogExpiresWithoutAnEditorWindowAndCanReopen()
+    {
+        var service = new PairingApprovalService(new CompanionConfiguration(),
+            approvalTimeout: TimeSpan.FromMilliseconds(250));
+        var prompts = 0;
+        service.ApprovalRequested += (_, _) => ++prompts;
+
+        for (var attempt = 0; attempt < 2; ++attempt)
+            Assert.Equal(PairingApprovalResult.Expired,
+                await service.RequestApprovalAsync("Test Phone").WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(2, prompts);
+    }
+
+    [Fact]
+    public async Task PairingEndpointExpiresWithoutExposingCredentialsAndAllowsRetry()
+    {
+        var attempts = 0;
+        await using var host = await TestHost.StartAsync(async (_, _, token) =>
+        {
+            if (++attempts == 1) await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            return false;
+        }, TimeSpan.FromMilliseconds(100));
+        host.Client.DefaultRequestHeaders.Authorization = null;
+
+        var expired = await host.Client.PostAsJsonAsync("/pair", new { deviceName = "Test Phone" });
+        Assert.Equal(HttpStatusCode.RequestTimeout, expired.StatusCode);
+        var body = await expired.Content.ReadFromJsonAsync<JsonDocument>();
+        Assert.False(body!.RootElement.TryGetProperty("token", out _));
+        var retry = await host.Client.PostAsJsonAsync("/pair", new { deviceName = "Test Phone" });
+        Assert.Equal(HttpStatusCode.Forbidden, retry.StatusCode);
+        Assert.Equal(2, attempts);
+    }
+
+    [InteractiveFact]
+    public async Task PairingDialogIsVisibleAndOwnedWhenCompanionWindowIsOpen()
+    {
+        var completion = new TaskCompletionSource<(bool Passed, string Diagnostic)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            using var owner = new System.Windows.Forms.Form { Text = "Pairing test companion" };
+            var service = new PairingApprovalService(new CompanionConfiguration(),
+                approvalTimeout: TimeSpan.FromMilliseconds(750));
+            service.AttachPromptOwner(owner);
+            var observedOwnedPrompt = false;
+            var diagnostic = "No pairing dialog was observed.";
+            using var timer = new System.Windows.Forms.Timer { Interval = 25 };
+            timer.Tick += (_, _) =>
+            {
+                var prompt = System.Windows.Forms.Application.OpenForms.Cast<System.Windows.Forms.Form>()
+                    .FirstOrDefault(form => form.Text == "Pair with Test Phone?");
+                if (prompt is null) return;
+                var nativeOwner = GetWindow(prompt.Handle, 4);
+                var ownerEnabled = IsWindowEnabled(owner.Handle);
+                diagnostic = $"Visible={prompt.Visible}; TopMost={prompt.TopMost}; NativeOwnerMatches={nativeOwner == owner.Handle}; OwnerEnabled={ownerEnabled}";
+                observedOwnedPrompt |= prompt is { Visible: true, TopMost: true } &&
+                    nativeOwner == owner.Handle && !ownerEnabled;
+            };
+            owner.Shown += async (_, _) =>
+            {
+                try
+                {
+                    timer.Start();
+                    var result = await Task.Run(() => service.RequestApprovalAsync("Test Phone"))
+                        .WaitAsync(TimeSpan.FromSeconds(5));
+                    completion.TrySetResult((observedOwnedPrompt && result == PairingApprovalResult.Expired,
+                        $"{diagnostic}; Result={result}"));
+                }
+                catch (Exception exception) { completion.TrySetException(exception); }
+                finally { timer.Stop(); owner.Close(); }
+            };
+            System.Windows.Forms.Application.Run(owner);
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
+        thread.Start();
+        var result = await completion.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(result.Passed, result.Diagnostic);
+    }
+
+    [Fact]
+    public async Task PairingTimeoutReleasesPromptEvenWhenDispatcherDoesNotRespond()
+    {
+        var service = new PairingApprovalService(new CompanionConfiguration(),
+            (_, _, _) => new TaskCompletionSource<bool>().Task,
+            TimeSpan.FromMilliseconds(100));
+        for (var attempt = 0; attempt < 2; ++attempt)
+            Assert.Equal(PairingApprovalResult.Expired,
+                await service.RequestApprovalAsync("Test Phone").WaitAsync(TimeSpan.FromSeconds(3)));
+    }
+
+    [Fact]
+    public async Task PairingDeclineAllowsAnotherRequest()
+    {
+        var attempts = 0;
+        var configuration = new CompanionConfiguration { PairedDevices = ["Test Phone"] };
+        var service = new PairingApprovalService(configuration, (_, _, _) => Task.FromResult(++attempts == 2));
+
+        Assert.Equal(PairingApprovalResult.Declined, await service.RequestApprovalAsync("Test Phone"));
+        Assert.Equal(PairingApprovalResult.Approved, await service.RequestApprovalAsync("Test Phone"));
+        Assert.Equal(2, attempts);
+    }
+
+    [Fact]
+    public async Task PairingCancellationReleasesPromptForRetry()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var attempts = 0;
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var configuration = new CompanionConfiguration { PairedDevices = ["Test Phone"] };
+        var service = new PairingApprovalService(configuration, async (_, _, token) =>
+        {
+            if (++attempts == 1)
+            {
+                started.SetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+            return true;
+        });
+
+        var first = service.RequestApprovalAsync("Test Phone", cancellation.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(PairingApprovalResult.Busy, await service.RequestApprovalAsync("Other Phone"));
+        cancellation.Cancel();
+        Assert.Equal(PairingApprovalResult.Expired, await first.WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Equal(PairingApprovalResult.Approved, await service.RequestApprovalAsync("Test Phone"));
+    }
+
+    [Fact]
+    public async Task PairingTimeoutReleasesPromptForRetry()
+    {
+        var attempts = 0;
+        var configuration = new CompanionConfiguration { PairedDevices = ["Test Phone"] };
+        var service = new PairingApprovalService(configuration, async (_, _, token) =>
+        {
+            if (++attempts == 1) await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            return true;
+        }, TimeSpan.FromMilliseconds(100));
+
+        Assert.Equal(PairingApprovalResult.Expired,
+            await service.RequestApprovalAsync("Test Phone").WaitAsync(TimeSpan.FromSeconds(3)));
+        Assert.Equal(PairingApprovalResult.Approved, await service.RequestApprovalAsync("Test Phone"));
+    }
+
+    [Fact]
+    public async Task PairingCannotApproveAfterCancellation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var configuration = new CompanionConfiguration();
+        var service = new PairingApprovalService(configuration, (_, _, _) =>
+        {
+            cancellation.Cancel();
+            return Task.FromResult(true);
+        });
+
+        Assert.Equal(PairingApprovalResult.Expired, await service.RequestApprovalAsync("Test Phone", cancellation.Token));
+        Assert.Empty(configuration.PairedDevices);
+    }
+
     [Fact]
     public async Task StatusRequiresBearerToken()
     {
@@ -196,7 +369,9 @@ public sealed class CompanionEndpointTests
         public WindowsMediaUpdatePublisher Publisher => app.Services.GetRequiredService<WindowsMediaUpdatePublisher>();
         public HomeAccessoryCatalog HomeAccessories => app.Services.GetRequiredService<HomeAccessoryCatalog>();
 
-        public static async Task<TestHost> StartAsync()
+        public static async Task<TestHost> StartAsync(
+            Func<string, string, CancellationToken, Task<bool>>? showPrompt = null,
+            TimeSpan? approvalTimeout = null)
         {
             var configuration = new CompanionConfiguration
             {
@@ -209,7 +384,7 @@ public sealed class CompanionEndpointTests
             builder.WebHost.UseTestServer();
             builder.Services.AddSingleton(configuration);
             builder.Services.AddSingleton<CompanionActivity>();
-            builder.Services.AddSingleton<PairingApprovalService>();
+            builder.Services.AddSingleton(new PairingApprovalService(configuration, showPrompt, approvalTimeout));
             builder.Services.AddSingleton<WindowsActionDispatcher>();
             builder.Services.AddSingleton<WindowsTextSourceResolver>();
             builder.Services.AddSingleton(_ => new WindowsMediaUpdatePublisher(

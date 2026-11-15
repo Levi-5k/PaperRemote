@@ -1,6 +1,6 @@
-# PaperRemote
+# OP Remote
 
-PaperRemote turns an M5Stack M5Paper into a configurable remote. An iPhone or Mac editor builds the control layout, the ESP32 firmware renders and runs it, and a macOS menu-bar companion handles Mac actions and dynamic text sources.
+OP Remote turns an M5Stack M5Paper into a configurable remote. An iPhone or Mac editor builds the control layout, the ESP32 firmware renders and runs it, and a macOS menu-bar companion handles Mac actions and dynamic text sources.
 
 Controller discovery also supports versioned device descriptors and custom
 board layouts across iPhone/iPad, Mac, and Windows. Compatible controllers can
@@ -49,6 +49,14 @@ Package, sign, and open the menu-bar app using an available Apple Development id
 ```
 
 The companion uses macOS automation permissions for Music and a private MediaRemote framework for event-driven now-playing updates. Private framework behavior may change between macOS releases.
+
+## Windows Pairing
+
+The Windows companion must be running, but its editor window can stay closed.
+Request pairing from the iPhone app; approval opens in a separate desktop dialog.
+Requests expire after 60 seconds and abandoned dialogs close automatically.
+Use **Cancel Request** or **Retry Pairing** on iPhone to make a fresh attempt;
+declining or missing a request does not require restarting the companion.
 
 ## M5Paper Firmware
 

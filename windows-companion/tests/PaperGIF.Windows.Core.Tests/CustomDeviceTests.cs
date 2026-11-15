@@ -11,6 +11,183 @@ namespace PaperGIF.Windows.Core.Tests;
 
 public sealed class CustomDeviceTests
 {
+    [Fact]
+    public void ButtonColorOverridesRoundTripWithoutChangingLegacyDefaults()
+    {
+        var control = new RemoteControl { TintHex = "FF3344", BackgroundTintHex = "123456", ImageTintHex = "00FF88" };
+        var profile = new RemoteProfile { Pages = [new RemotePage { Controls = [control] }] };
+        var decoded = RemoteProfileJson.Deserialize(RemoteProfileJson.Serialize(profile)).Pages[0].Controls[0];
+        Assert.Equal(control.TintHex, decoded.TintHex);
+        Assert.Equal(control.BackgroundTintHex, decoded.BackgroundTintHex);
+        Assert.Equal(control.ImageTintHex, decoded.ImageTintHex);
+        Assert.Null(new RemoteControl().BackgroundTintHex);
+        Assert.Null(new RemoteControl().ImageTintHex);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task ButtonRGBUploadRequiresMatchingAcknowledgement(bool accepted, bool matchingId)
+    {
+        var id = Guid.NewGuid();
+        byte[] image = [80, 66, 71, 73, 2, 0, 2, 0, 2, 0, 0, 248, 0, 248, 0, 248, 0, 248];
+        using var client = Client(async request =>
+        {
+            Assert.Equal("/images", request.RequestUri!.AbsolutePath);
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+            Assert.True(request.Headers.ConnectionClose);
+            Assert.Equal("button", request.Headers.GetValues("X-Image-Kind").Single());
+            Assert.Equal(id.ToString("D"), request.Headers.GetValues("X-Image-ID").Single());
+            Assert.Equal(DeviceImageClient.Checksum(image).ToString("X8"), request.Headers.GetValues("X-Image-CRC32").Single());
+            Assert.Equal(image.Length, request.Content!.Headers.ContentLength);
+            Assert.Equal(image, await request.Content.ReadAsByteArrayAsync());
+            return Response(JsonSerializer.Serialize(new { ok = accepted, id = matchingId ? id : Guid.NewGuid() }), HttpStatusCode.Created);
+        });
+        var upload = new DeviceImageClient(client, new Uri("http://device.invalid/remote"), "fixture-token");
+        if (accepted && matchingId) await upload.UploadButtonAsync(image, id);
+        else await Assert.ThrowsAsync<InvalidOperationException>(() => upload.UploadButtonAsync(image, id));
+        Assert.Equal(0xCBF43926u, DeviceImageClient.Checksum("123456789"u8));
+    }
+
+    [Fact]
+    public async Task ButtonRGBUploadRejectsMalformedPixelsBeforeSending()
+    {
+        var sent = false;
+        using var client = Client(request => { sent = true; return Task.FromResult(Response("{}")); });
+        var upload = new DeviceImageClient(client, new Uri("http://device.invalid"), "fixture-token");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => upload.UploadButtonAsync(
+            [80, 66, 71, 73, 2, 0, 2, 0, 2, 0, 0], Guid.NewGuid()));
+        Assert.False(sent);
+    }
+
+    [Theory]
+    [InlineData("#FF0000")]
+    [InlineData("GG0000")]
+    [InlineData("FFFFF")]
+    public void InvalidButtonColorOverridesAreRejected(string color)
+    {
+        var profile = new RemoteProfile { Pages = [new RemotePage { Controls = [new RemoteControl { BackgroundTintHex = color }] }] };
+        Assert.Throws<JsonException>(() => RemoteProfileJson.Deserialize(RemoteProfileJson.Serialize(profile)));
+    }
+
+    [Fact]
+    public void NativeButtonImageProfilesRequireAdvertisedRGBFormat()
+    {
+        var legacy = DeviceDescriptor.Legacy("color-device");
+        var device = legacy with
+        {
+            BoardID = "paperremote.waveshare-amoled-18-v2", Display = new(368, 448, true, "rgb565", 0),
+            Capabilities = legacy.Capabilities with { ImageFormats = ["pimg-rgb565-v1", "pbgi-rgb565-v2"], ImageTransports = ["http"] },
+        };
+        var texture = new RemoteButtonTexture { Kind = RemoteButtonTextureKind.Image, ImageID = Guid.NewGuid(), PreserveColor = true };
+        var profile = new RemoteProfile { Pages = [new RemotePage { Controls = [new RemoteControl { ButtonTexture = texture }] }] };
+        var decoded = RemoteProfileJson.Deserialize(RemoteProfileJson.SerializeForDevice(profile, device));
+        Assert.True(decoded.Pages[0].Controls[0].ButtonTexture!.PreserveColor);
+        Assert.Throws<InvalidOperationException>(() => RemoteProfileJson.SerializeForDevice(profile,
+            device with { Capabilities = device.Capabilities with { ImageFormats = ["pimg-rgb565-v1"] } }));
+    }
+
+    [Fact]
+    public async Task PhysicalAMOLEDColorButtonUploadRetryAndDelete()
+    {
+        var address = Environment.GetEnvironmentVariable("PAPERGIF_COLOR_DEVICE");
+        if (string.IsNullOrWhiteSpace(address)) return;
+        var token = Environment.GetEnvironmentVariable("PAPERGIF_COLOR_TOKEN") ??
+            throw new InvalidOperationException("The hardware test requires a device credential.");
+        var id = Guid.NewGuid();
+        var endpoint = new Uri(address);
+        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(15) };
+        var bytes = new byte[10 + 400 * 400 * 2];
+        byte[] header = [80, 66, 71, 73, 2, 0, 144, 1, 144, 1];
+        header.CopyTo(bytes, 0);
+        for (var pixel = 0; pixel < 400 * 400; pixel++)
+        {
+            var packed = pixel % 3 == 0 ? (ushort)0xF800 : pixel % 3 == 1 ? (ushort)0x07E0 : (ushort)0x001F;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(10 + pixel * 2), packed);
+        }
+        var upload = new DeviceImageClient(client, endpoint, token);
+        try
+        {
+            await upload.UploadButtonAsync(bytes, id);
+            await upload.UploadButtonAsync(bytes, id);
+            bytes[^1] ^= 1;
+            var conflict = await Assert.ThrowsAsync<HttpRequestException>(() => upload.UploadButtonAsync(bytes, id));
+            Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+            bytes[^1] ^= 1;
+            using var corrupt = new HttpRequestMessage(HttpMethod.Post, new Uri(endpoint, "/images"));
+            corrupt.Headers.Authorization = new("Bearer", token);
+            corrupt.Headers.ConnectionClose = true;
+            corrupt.Headers.Add("X-Image-ID", id.ToString("D"));
+            corrupt.Headers.Add("X-Image-Kind", "button");
+            corrupt.Headers.Add("X-Image-CRC32", "00000000");
+            corrupt.Content = new ByteArrayContent(bytes);
+            using var rejection = await client.SendAsync(corrupt);
+            Assert.Equal(HttpStatusCode.BadRequest, rejection.StatusCode);
+        }
+        finally
+        {
+            using var deletion = new HttpRequestMessage(HttpMethod.Delete, new Uri(endpoint, "/images"));
+            deletion.Headers.Authorization = new("Bearer", token);
+            deletion.Headers.Add("X-Image-ID", id.ToString("D"));
+            deletion.Headers.Add("X-Image-Kind", "button");
+            using var removed = await client.SendAsync(deletion);
+            Assert.True(removed.StatusCode is HttpStatusCode.OK or HttpStatusCode.NotFound);
+        }
+    }
+
+    [Fact]
+    public void NativeImageCapabilitiesRoundTripThroughWindowsDescriptor()
+    {
+        var node = JsonNode.Parse(Json(DeviceDescriptor.Legacy("device")))!.AsObject();
+        var capabilities = node["capabilities"]!.AsObject();
+        capabilities["transports"] = new JsonArray("http", "ble");
+        capabilities["imageFormats"] = new JsonArray("pimg-rgb565-v1");
+        capabilities["imageTransports"] = new JsonArray("http", "ble");
+        capabilities["mediaStorageID"] = "boot-123-storage-456";
+        var descriptor = DeviceDescriptor.Parse(node.ToJsonString());
+        Assert.Equal(["pimg-rgb565-v1"], descriptor.Capabilities.ImageFormats);
+        Assert.Equal(["http", "ble"], descriptor.Capabilities.ImageTransports);
+        Assert.Equal("boot-123-storage-456", descriptor.Capabilities.MediaStorageID);
+        var roundTrip = DeviceDescriptor.Parse(Json(descriptor));
+        Assert.Equal(descriptor.Capabilities.ImageFormats, roundTrip.Capabilities.ImageFormats);
+        Assert.Equal(descriptor.Capabilities.ImageTransports, roundTrip.Capabilities.ImageTransports);
+        Assert.Equal(descriptor.Capabilities.MediaStorageID, roundTrip.Capabilities.MediaStorageID);
+        capabilities["unrecognizedCapability"] = true;
+        Assert.Throws<JsonException>(() => DeviceDescriptor.Parse(node.ToJsonString()));
+    }
+
+    [Theory]
+    [InlineData("imageFormats", "[\"pimg-rgb565-v1\",\"pimg-rgb565-v1\"]")]
+    [InlineData("imageFormats", "[\"\"]")]
+    [InlineData("imageTransports", "[]")]
+    [InlineData("imageTransports", "[\"http\",\"http\"]")]
+    [InlineData("imageTransports", "[\"serial\"]")]
+    [InlineData("imageTransports", "[\"ble\"]")]
+    [InlineData("mediaStorageID", "\"\"")]
+    public void MalformedImageCapabilitiesAreRejected(string field, string value)
+    {
+        var node = JsonNode.Parse(Json(DeviceDescriptor.Legacy("device")))!.AsObject();
+        var capabilities = node["capabilities"]!.AsObject();
+        capabilities["imageFormats"] = new JsonArray("pimg-rgb565-v1");
+        capabilities[field] = JsonNode.Parse(value);
+        Assert.Throws<JsonException>(() => DeviceDescriptor.Parse(node.ToJsonString()));
+    }
+
+    [Fact]
+    public async Task PhysicalNativeImageDescriptorCanBeIdentifiedWhenRequested()
+    {
+        var address = Environment.GetEnvironmentVariable("PAPERGIF_DESCRIPTOR_DEVICE");
+        if (string.IsNullOrEmpty(address)) return;
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        var adapter = await DeviceAdapters.IdentifyAsync(client, new Uri(address), "");
+        Assert.False(adapter.IsLegacy);
+        Assert.Equal("paperremote.waveshare-amoled-18-v2", adapter.Descriptor.BoardID);
+        Assert.Contains("pimg-rgb565-v1", adapter.Descriptor.Capabilities.ImageFormats!);
+        Assert.Contains("http", adapter.Descriptor.Capabilities.ImageTransports!);
+        Assert.False(string.IsNullOrEmpty(adapter.Descriptor.Capabilities.MediaStorageID));
+    }
+
     [Theory]
     [InlineData(RemoteActionType.ComputerMedia, "volume", 0, 100, true)]
     [InlineData(RemoteActionType.IPhoneMedia, "volume", 0, 101, false)]

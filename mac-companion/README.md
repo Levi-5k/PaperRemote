@@ -1,4 +1,4 @@
-# paperGIF Mac Companion
+# OP Remote
 
 A menu-bar receiver and visual M5Paper remote editor.
 
@@ -15,12 +15,12 @@ Whenever the editor opens, it discovers M5Paper on the home network and loads it
 To install a profile directly from the Mac, keep the Mac and M5Paper on the same home network and choose **Send to M5Paper**. If home Wi-Fi is not configured yet:
 
 1. Open Wi-Fi mode on the M5Paper.
-2. Join its `paperGIF-…` network using the password `paperdisplay`.
+2. Join its `OP Remote-…` network using the password `paperdisplay`.
 3. Leave the device address as `192.168.4.1` and choose **Send to M5Paper**.
 
 The device validates the complete profile before replacing its active remote. The editor supports up to 8 pages and 16 controls per page, matching the firmware limits.
 
-Open the paperGIF iPhone Remote tab, select the discovered Mac, and request pairing when editing from iPhone. Approve the request on the Mac; the credential is exchanged and saved automatically. Script actions are rejected unless the exact command appears in the companion's allowed-script list.
+Open the OP Remote iPhone Remote tab, select the discovered Mac, and request pairing when editing from iPhone. Approve the request on the Mac; the credential is exchanged and saved automatically. Script actions are rejected unless the exact command appears in the companion's allowed-script list.
 
 Keyboard shortcuts require Accessibility access in System Settings. The server advertises `_papergif._tcp` through Bonjour and listens only for authenticated `POST /action` requests.
 

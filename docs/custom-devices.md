@@ -1,6 +1,6 @@
 # Custom controller devices
 
-PaperRemote separates the **controller board** you configure from action targets
+OP Remote separates the **controller board** you configure from action targets
 such as a WLED light, Shelly relay, or computer. Adding a controller does not
 automatically make every network accessory a configurable remote.
 
@@ -13,7 +13,7 @@ New controllers are discovered two ways:
 
 - **Wi-Fi:** Bonjour (`_papergif-device._tcp`) and local-subnet `/status` probes
   on the Mac and Windows editors.
-- **Bluetooth:** every app scans for the PaperRemote BLE service, so a fresh
+- **Bluetooth:** every app scans for the OP Remote BLE service, so a fresh
   board that is only on its own setup access point still shows up. On the phone,
   Device setup → **Nearby Bluetooth Devices** lists each board with its signal
   strength. Tapping **Connect** reads its descriptor and saves it under
@@ -45,7 +45,7 @@ saved before Bluetooth peripheral mappings were introduced. Other nearby boards
 are not substituted for the requested controller. Desktop discovery requires an
 updated installed companion, not only updated source code.
 
-1. PaperRemote reads the controller's identity, display, physical inputs,
+1. OP Remote reads the controller's identity, display, physical inputs,
    capabilities, and basic layout.
 2. You can use its device-reported layout without an internet connection.
 3. The app automatically checks the
@@ -182,6 +182,16 @@ media and update paths rather than send a 540 x 960 M5Paper package to another
 screen. Supporting a new panel's images/animation requires an encoder and
 firmware decoder for its advertised format.
 
+### Waveshare Touch AMOLED 1.8 V2
+
+`paperremote.waveshare-amoled-18-v2` is the SuperMini knob and two buttons on the
+Waveshare ESP32-S3-Touch-AMOLED-1.8 V2. It advertises the same `button-1`,
+`button-2`, and `dial-1` inputs, plus a 368×448 RGB565 touchscreen drawn with
+LVGL 9.6. It does not accept M5Paper image media. Buttons are active-low on
+GPIO17 and GPIO18. The MT6701 uses the board I2C bus, SDA GPIO15 and SCL GPIO14,
+because GPIO12 is the display chip select. On-screen buttons send the same press,
+hold, and release events; touching the dial arc does not move `dial-1`.
+
 ## Board layout packages
 
 The [board catalog schema](../protocol/board-catalog-v1.schema.json) defines a
@@ -205,7 +215,9 @@ with it; no external image host or additional download is required. Keep the
 whole package below 64 KiB for all clients. The SuperMini MT6701 definition
 includes the knob enclosure artwork with its dial above the left/right buttons.
 Boards without artwork retain the generic control preview. A proposed optional
-animated 3D model is described in [3d-board-models.md](3d-board-models.md).
+animated 3D model, Apple USDZ conversion, and guided custom-device creator are
+described in [3d-board-models.md](3d-board-models.md). These are planned features,
+not part of the current setup flow.
 
 When no catalog entry exists, retain the device's basic geometry. Firmware can
 generate simple geometry from its input list; no detailed artwork is required.
@@ -266,7 +278,7 @@ no push switch. Compile-time `PAPERGIF_BUTTON_PIN`, `PAPERGIF_ENCODER_A_PIN`,
 `PAPERGIF_ENCODER_B_PIN`, and `PAPERGIF_SLIDER_PIN` define the pin map; confirm
 these are suitable for your exact board and voltage levels.
 
-For reference network setup, join its `papergif-XXXX` setup AP (default password
+For reference network setup, join its `op-remote-XXXX` setup AP (default password
 `paperdisplay`) and use the serial-reported address, normally `192.168.4.1`.
 Install a profile containing your pairing token plus optional `wifiSSID` and
 `wifiPassword`. The AP remains available while station Wi-Fi connects. This

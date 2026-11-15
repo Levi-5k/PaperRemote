@@ -155,7 +155,7 @@ internal sealed class RemoteEditorWindow : Form
             WrapContents = false,
             Controls = { applicationTarget, browseApplicationButton },
         });
-        Text = "paperGIF Controls";
+        Text = "OP Remote";
         Icon = (Icon)icon.Clone();
         ClientSize = new Size(1000, 720);
         MinimumSize = new Size(900, 640);
@@ -306,7 +306,7 @@ internal sealed class RemoteEditorWindow : Form
             Font = new Font("Segoe UI Variable Display Semibold", 12.5F),
             ForeColor = Ink,
             Location = new Point(50, 1),
-            Text = "paperGIF Studio",
+            Text = "OP Remote",
         };
         var subtitle = new Label
         {
@@ -365,7 +365,7 @@ internal sealed class RemoteEditorWindow : Form
         layout.Controls.Add(sendButton, 5, 0);
         CenterInBar(updatesButton, new Padding(10, 0, 0, 0));
         updatesButton.Click += (_, _) => ShowUpdates(checkNow: false);
-        new ToolTip().SetToolTip(updatesButton, "paperGIF and M5Paper firmware updates");
+        new ToolTip().SetToolTip(updatesButton, "OP Remote and M5Paper firmware updates");
         layout.Controls.Add(updatesButton, 6, 0);
         bar.Controls.Add(layout);
         return bar;
@@ -519,6 +519,8 @@ internal sealed class RemoteEditorWindow : Form
             {
                 _ = RefreshModulesAsync();
             }
+            preview.EditHardwareInputs = inspectorTabs.SelectedTab?.Text == "Hardware";
+            preview.Invalidate();
         };
         RefreshCatalog();
         return inspectorTabs;
@@ -746,6 +748,27 @@ internal sealed class RemoteEditorWindow : Form
         toolbar.Controls.Add(Button("Duplicate", (_, _) => store.DuplicateSelectedControl(), 72));
         toolbar.Controls.Add(Button("Delete", (_, _) => store.DeleteSelectedControl(), 58));
         toolbar.Controls.Add(Button("Schedules", (_, _) => EditSchedules(), 76));
+        toolbar.Controls.Add(Button("Image...", async (_, _) =>
+        {
+            if (store.SelectedControl is not { Kind: RemoteControlKind.Button } control) return;
+            using var picker = new OpenFileDialog { Filter = "Images|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp", CheckFileExists = true };
+            if (picker.ShowDialog(this) != DialogResult.OK) return;
+            try
+            {
+                using var image = Image.FromFile(picker.FileName);
+                await store.ImportButtonImageAsync(control, ButtonImageStore.Encode(image));
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+            {
+                MessageBox.Show(this, exception.Message, "Image import", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }, 70));
+        toolbar.Controls.Add(Button("Clear image", (_, _) =>
+        {
+            if (store.SelectedControl is not { } control) return;
+            control.ButtonTexture = new RemoteButtonTexture();
+            store.Commit();
+        }, 84));
         targetComputer.Width = 130;
         targetComputer.DropDownStyle = ComboBoxStyle.DropDownList;
         targetComputer.DisplayMember = nameof(ComputerChoice.DisplayName);
@@ -1274,12 +1297,14 @@ internal sealed class RemoteEditorWindow : Form
               $"{store.CatalogStatus}\n" +
               $"{(store.CanInstallM5Firmware ? "M5Paper firmware updates available when released." : "Firmware updates unavailable for this board/transport.")}\n" +
               $"{(store.CanUploadMedia ? "Legacy-size media supported." : "Media encoding/upload unavailable for this display.")}"
-            : "Connect a native PaperRemote device or verified legacy M5Paper.\n" +
+            : "Connect a native OP Remote device or verified legacy M5Paper.\n" +
               "Other third-party protocols need a specific adapter; universal support is not provided.";
         preview.PageIndex = Math.Max(0, store.Profile.Pages.FindIndex(page => page.Id == store.SelectedPageId));
         preview.PageNames = store.Profile.Pages.Select(page => page.Name).ToArray();
         preview.SelectedControlId = store.SelectedControlId;
         preview.MaxButtonTextSize = store.Profile.MaxButtonTextSize;
+        preview.DefaultButtonBackground = store.Profile.ButtonBackground;
+        preview.DefaultButtonTexture = store.Profile.ButtonTexture;
         var selectedControl = store.SelectedControl;
         controlProperties.SelectedObject = selectedControl is { } control && store.SelectedPage is { } selectedPage
             ? new ControlProperties(control, selectedPage, store)
@@ -1717,7 +1742,7 @@ internal sealed class RemoteEditorWindow : Form
         }
         else
         {
-            MessageBox.Show(this, "This page does not have room for that control.", "paperGIF", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "This page does not have room for that control.", "OP Remote", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
 
@@ -1787,7 +1812,7 @@ internal sealed class RemoteEditorWindow : Form
                     break;
                 case DiscoveredServiceKind.Companion:
                     var pairingResult = await store.PairComputerAsync(endpoint.Name, endpoint.Host, endpoint.Port);
-                    MessageBox.Show(this, pairingResult, "paperGIF");
+                    MessageBox.Show(this, pairingResult, "OP Remote");
                     break;
                 case DiscoveredServiceKind.Wled:
                     AddWledPage(endpoint.Host, endpoint.Name);
@@ -1796,7 +1821,7 @@ internal sealed class RemoteEditorWindow : Form
         }
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException)
         {
-            MessageBox.Show(this, exception.Message, "paperGIF", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, exception.Message, "OP Remote", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         RefreshAll();
     }
@@ -1863,11 +1888,11 @@ internal sealed class RemoteEditorWindow : Form
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
             client.DefaultRequestHeaders.Authorization = new("Bearer", computer.Token);
             using var response = await client.GetAsync($"http://{computer.Host}:{computer.Port}/status");
-            MessageBox.Show(this, response.IsSuccessStatusCode ? $"Connected to {computer.Name}." : $"{computer.Name} rejected the saved pairing.", "paperGIF");
+            MessageBox.Show(this, response.IsSuccessStatusCode ? $"Connected to {computer.Name}." : $"{computer.Name} rejected the saved pairing.", "OP Remote");
         }
         catch (HttpRequestException)
         {
-            MessageBox.Show(this, $"Could not reach {computer.Name}.", "paperGIF", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, $"Could not reach {computer.Name}.", "OP Remote", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 

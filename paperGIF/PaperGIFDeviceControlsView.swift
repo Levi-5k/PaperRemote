@@ -7,6 +7,7 @@ struct PaperGIFDeviceControlsView: View {
     let descriptor: DeviceDescriptor
     @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
     @ObservedObject var session: DeviceSession
+    var effectsLive = false
     @StateObject private var model = DeviceControlsModel()
     @State private var lastRefresh: Date?
 
@@ -87,7 +88,13 @@ struct PaperGIFDeviceControlsView: View {
     private var statusRow: some View {
         LabeledContent {
             HStack(spacing: 6) {
-                if model.isLoading { ProgressView() }
+                if model.isLoading {
+                    if effectsLive {
+                        PaperGIFActivityLoader(label: "Loading device controls", size: 18)
+                    } else {
+                        ProgressView()
+                    }
+                }
                 Text(connectionText).foregroundStyle(.secondary)
             }
         } label: {

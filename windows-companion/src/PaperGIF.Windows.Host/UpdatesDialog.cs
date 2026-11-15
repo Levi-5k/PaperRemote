@@ -26,7 +26,7 @@ internal sealed class UpdatesDialog : Form
         ShowInTaskbar = false;
         MinimizeBox = false;
 
-        appCard = new UpdateCardPanel("paperGIF for Windows", async () => await updates.InstallAppAsync());
+        appCard = new UpdateCardPanel("OP Remote", async () => await updates.InstallAppAsync());
         firmwareCard = new UpdateCardPanel("M5Paper", async () =>
         {
             if (updates.DeviceFirmware is null)
@@ -211,7 +211,7 @@ internal sealed class UpdatesDialog : Form
         else if (updates.AppUpdate is { } appUpdate)
         {
             appCard.Render(VersionLine(UpdateCoordinator.CurrentVersion), UpdateCardState.Available,
-                $"Version {appUpdate.Version} is ready to install. paperGIF restarts when it finishes.",
+                $"Version {appUpdate.Version} is ready to install. OP Remote restarts when it finishes.",
                 busy ? null : "Install and restart");
         }
         else

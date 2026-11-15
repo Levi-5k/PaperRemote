@@ -3,7 +3,7 @@
   "protocolVersion": 1,
   "deviceID": "fixture:landscape:001",
   "name": "Landscape simulator",
-  "manufacturer": "PaperRemote reference",
+  "manufacturer": "OP Remote reference",
   "boardID": "paperremote.simulated-display",
   "hardwareRevision": "1",
   "firmwareVersion": "simulator-1",

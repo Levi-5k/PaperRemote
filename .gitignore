@@ -28,6 +28,13 @@ firmware/.esp-flasher.json
 firmware/.vscode/
 firmware/compile_commands.json
 
+# Native ESP-IDF
+/build/
+/build-idf/
+/managed_components/
+firmware/idf/sdkconfig
+firmware/idf/sdkconfig.old
+
 # Release builds
 dist/
 

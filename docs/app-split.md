@@ -1,10 +1,10 @@
-# paperGIF / XPlayer app split
+# OP Remote / XPlayer app split
 
-**XPlayer** (capital X and P) is the separate music player. The original paperGIF
+**XPlayer** (capital X and P) is the separate music player. The original OP Remote
 app keeps GIF/image conversion, the phone and device media libraries, device
 setup, remote-profile editing and synchronization, computer controls, and
 HomeKit/Matter features. Music playback and its eight Metal visualizers belong
-to XPlayer, not to a replacement paperGIF installation.
+to XPlayer, not to a replacement OP Remote installation.
 
 ## Keep the original data container
 
@@ -12,16 +12,16 @@ to XPlayer, not to a replacement paperGIF installation.
   build configurations. Update it in place; do not uninstall it to perform the
   split. XPlayer must use its own bundle identifier and container.
 - The legacy library remains under **Application Support/paperGIF-v2/Music** in
-  paperGIF's existing sandbox. Removing playback source files does not remove
+  OP Remote's existing sandbox. Removing playback source files does not remove
   library files. No migration runs at startup and no player is instantiated.
-- Do not uninstall paperGIF until the Files copy and the XPlayer import are
+- Do not uninstall OP Remote until the Files copy and the XPlayer import are
   verified. Uninstalling an app can delete its local data. Keep a backup of the
   exported library independently of both apps.
 
 ## Manual migration through Files
 
-1. On the device that holds the old library, open **paperGIF → Settings → Move
-   Music to XPlayer → Export paperGIF Library**.
+1. On the device that holds the old library, open **OP Remote → Settings → Move
+   Music to XPlayer → Export OP Remote Library**.
 2. In the system Files picker choose a writable destination, such as iCloud Drive
    or an On My iPhone/iPad folder. Save the folder copy. Prefer a new destination
    if a folder named **Music** already exists; avoid replacing an unrelated
@@ -31,9 +31,9 @@ to XPlayer, not to a replacement paperGIF installation.
 4. In **XPlayer**, choose **Import paperGIF Library** and select that exported
    **Music** folder itself, not the parent destination, its inner default Music
    collection, or individual songs. The XPlayer side implements this matching
-   folder-import option separately; this change only implements paperGIF export.
+   folder-import option separately; this change only implements OP Remote export.
 5. Verify the expected songs, folders, and playback in XPlayer. Both the original
-   library in paperGIF and the Files copy remain available; neither is moved or
+   library in OP Remote and the Files copy remain available; neither is moved or
    deleted by this export.
 
 If there is no legacy library, or it contains only empty folders, Settings
@@ -72,7 +72,7 @@ completion callback, not confirmation of cross-device cloud synchronization.
   library while preserving relative subfolders, and leave the exported Files
   tree untouched. Destination collision/duplicate policy is owned by XPlayer;
   it must not silently overwrite different songs or destroy folder structure.
-  No shared sandbox, App Group, bundle-ID reuse, or access to paperGIF's private
+  No shared sandbox, App Group, bundle-ID reuse, or access to OP Remote's private
   Application Support directory is required or assumed.
 
 ## Bluetooth ownership and original-app scope
@@ -89,7 +89,7 @@ HomeKit status and the **0x62** phone registration are unrelated and retained.
 Compatible music protocol types and explicit state-send helpers remain inert:
 there is no caller of `syncLocalMediaState` in the original app, so its pending
 state stays nil and existing transfer-completion flushes have nothing to send.
-Do not reintroduce automatic music-state publication in paperGIF. Firmware and
+Do not reintroduce automatic music-state publication in OP Remote. Firmware and
 remote-editor music action definitions are not removed by this split.
 
 The original [Info plist](../paperGIF-Info.plist) drops only the `audio`

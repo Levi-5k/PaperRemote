@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://papergif.local/protocol/device-descriptor-v1.schema.json",
-  "title": "PaperRemote Device Descriptor v1",
+  "title": "OP Remote Device Descriptor v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -129,6 +129,19 @@
         },
         "media": {
           "type": "boolean"
+        },
+        "imageFormats": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+        },
+        "mediaStorageID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "imageTransports": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["http", "ble"] }
         },
         "firmwareUpdate": {
           "type": "boolean"

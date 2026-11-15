@@ -1,3 +1,4 @@
+import PaperDeviceKit
 import SwiftUI
 
 enum PaperGIFSettingKey {
@@ -12,9 +13,13 @@ enum PaperGIFSettingKey {
     static let transitionScans = "playback.transitionScans"
     static let cleanRefreshInterval = "playback.cleanRefreshInterval"
     static let adaptiveCleaning = "playback.adaptiveCleaning"
+    static let editingPhone = "devices.editingPhone"
 }
 
 struct PaperGIFSettingsView: View {
+    @Binding var profile: PaperGIFRemoteProfile
+    @ObservedObject var bluetoothManager: PaperGIFBluetoothManager
+    @ObservedObject var deviceSession: DeviceSession
     @Binding var monochromeMode: PaperGIFMonochromeMode
     @Binding var threshold: Double
     @Binding var monochromeLevels: Int
@@ -26,10 +31,50 @@ struct PaperGIFSettingsView: View {
     @Binding var transitionScans: Int
     @Binding var cleanRefreshInterval: Int
     @Binding var adaptiveCleaning: Bool
+    var effectsLive = false
+    @AppStorage(PaperGIFActivityBackdrop.storageKey) private var emptyBackground = PaperGIFActivityBackdrop.off
+    @AppStorage(PaperGIFSplashPreference.enabledKey) private var splashEnabled = false
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    NavigationLink {
+                        PaperGIFRemoteView(
+                            profile: $profile,
+                            bluetoothManager: bluetoothManager,
+                            deviceSession: deviceSession,
+                            showsConnections: true
+                        )
+                        .id(deviceSession.selectedID ?? "offline")
+                    } label: {
+                        Label("Connections", systemImage: "network")
+                    }
+                    NavigationLink {
+                        PaperGIFDeviceSetupView(
+                            session: deviceSession, bluetooth: bluetoothManager, profile: $profile,
+                            effectsLive: effectsLive
+                        )
+                    } label: {
+                        Label("Device Setup", systemImage: "rectangle.connected.to.line.below")
+                    }
+                }
+                Section {
+                    Picker("Empty screens", selection: $emptyBackground) {
+                        ForEach(PaperGIFActivityBackdrop.allCases) { backdrop in
+                            Text(backdrop.title).tag(backdrop)
+                        }
+                    }
+                    .accessibilityIdentifier("activity-empty-background")
+                } footer: {
+                    Text("A quiet background behind Media screens that have nothing to show. Off leaves those screens plain.")
+                }
+                Section {
+                    Toggle("Splash screen", isOn: $splashEnabled)
+                        .accessibilityIdentifier("splash-screen-enabled")
+                } footer: {
+                    Text("Plays the opening pour when OP Remote opens. It always plays the first time, then only when this is on.")
+                }
                 Section {
                     Picker("Rendering", selection: $monochromeMode) {
                         ForEach(PaperGIFMonochromeMode.allCases) { mode in

@@ -1,6 +1,6 @@
-# paperGIF modules
+# OP Remote modules
 
-The macOS and Windows companions discover modules from [`index.json`](index.json) on GitHub. A module is a data-only JSON manifest containing controls that already use the paperGIF remote profile action model. Modules do not run downloaded application code.
+The macOS and Windows companions discover modules from [`index.json`](index.json) on GitHub. A module is a data-only JSON manifest containing controls that already use the OP Remote remote profile action model. Modules do not run downloaded application code.
 
 ## Publish a module
 

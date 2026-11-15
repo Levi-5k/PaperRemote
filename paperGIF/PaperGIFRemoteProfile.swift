@@ -78,11 +78,12 @@ struct PaperGIFRemoteButtonTexture: Codable, Equatable, Hashable, Sendable {
     var angle = 45
     var dotGain = 0
     var fade = 50
+    var preserveColor = false
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case kind, pattern, scale, lineWidth, imageID, mode, threshold, levels, dotSpacing, angle, dotGain, fade
+        case kind, pattern, scale, lineWidth, imageID, mode, threshold, levels, dotSpacing, angle, dotGain, fade, preserveColor
     }
 
     init(from decoder: Decoder) throws {
@@ -103,6 +104,7 @@ struct PaperGIFRemoteButtonTexture: Codable, Equatable, Hashable, Sendable {
         angle = integer(.angle, 45, 0...90)
         dotGain = integer(.dotGain, 0, -50...50)
         fade = integer(.fade, 50, 0...90)
+        preserveColor = (try? container.decodeIfPresent(Bool.self, forKey: .preserveColor)) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -118,6 +120,7 @@ struct PaperGIFRemoteButtonTexture: Codable, Equatable, Hashable, Sendable {
         try container.encode(dotSpacing, forKey: .dotSpacing)
         try container.encode(angle, forKey: .angle)
         try container.encode(dotGain, forKey: .dotGain)
+        try container.encode(preserveColor, forKey: .preserveColor)
         try container.encode(fade, forKey: .fade)
     }
 }
@@ -431,6 +434,8 @@ struct PaperGIFRemoteControl: Codable, Equatable, Identifiable, Sendable {
     var symbol: String
     var iconBitmap: String? = nil
     var tintHex: String
+    var backgroundTintHex: String? = nil
+    var imageTintHex: String? = nil
     var kind: PaperGIFRemoteControlKind
     var isToggle: Bool? = nil
     var buttonHeight: Int? = nil
@@ -997,6 +1002,8 @@ struct PaperGIFHardwareBinding: Codable, Equatable, Identifiable, Sendable {
     var inputID: String
     var event: String
     var direction: String? = nil
+    var pageID: UUID? = nil
+    var controlID: UUID? = nil
     var mode = "action"
     var action: PaperGIFRemoteAction
     var minimum: Double = 0

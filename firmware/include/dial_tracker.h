@@ -70,16 +70,24 @@ public:
 class DialTracker {
     DialConfiguration settings;
     bool initialized = false, hasPosition = false;
+    bool relativeOverride = false;
     double previous = 0, sensor = 0, accepted = 0, position = 0, emitted = 0;
 
     double quantized() const {
         const double quantum = settings.span() * settings.step / 100;
         const double result = std::round(position / quantum) * quantum;
-        return settings.mode == DialMode::continuous ? result
+        return relativeOutput() ? result
             : std::max(0.0, std::min(settings.span(), result));
     }
 public:
     const DialConfiguration& configuration() const { return settings; }
+    bool relativeOutput() const { return relativeOverride || settings.mode == DialMode::continuous; }
+    bool setRelativeOutput(bool enabled) {
+        if (relativeOverride == enabled) return false;
+        relativeOverride = enabled;
+        initialized = hasPosition = false;
+        return true;
+    }
     bool configure(const DialConfiguration& candidate) {
         if (!candidate.valid()) return false;
         const bool newOrigin = candidate.mode != settings.mode || candidate.start != settings.start ||
@@ -88,7 +96,7 @@ public:
         if (newOrigin) {
             initialized = false;
             hasPosition = false;
-        } else if (settings.mode != DialMode::continuous) {
+        } else if (!relativeOutput()) {
             position = std::max(0.0, std::min(settings.span(), position));
         }
         emitted = quantized();
@@ -114,7 +122,7 @@ public:
             double phase = std::fmod((settings.counterclockwise() ? settings.start - angle
                 : angle - settings.start) + 360, 360);
             if (!hasPosition) {
-                position = settings.mode == DialMode::single
+                position = settings.mode == DialMode::single && !relativeOutput()
                     ? std::min(settings.span(), phase) : 0;
             }
             hasPosition = true;
@@ -134,11 +142,11 @@ public:
         const double movement = difference - std::copysign(settings.jitter, difference);
         accepted += movement;
         position += movement;
-        if (settings.mode != DialMode::continuous)
+        if (!relativeOutput())
             position = std::max(0.0, std::min(settings.span(), position));
         const double next = quantized();
         if (std::abs(next - emitted) < 1e-9) return false;
-        value = (settings.mode == DialMode::continuous ? next - emitted : next)
+        value = (relativeOutput() ? next - emitted : next)
             / settings.span() * 16383;
         emitted = next;
         return true;

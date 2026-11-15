@@ -51,7 +51,7 @@ struct UpdatesPage: View {
                     messages
                     UpdateCard(
                         symbol: "macwindow",
-                        title: "paperGIF Mac",
+                        title: "OP Remote",
                         detail: versionLine(installed: updates.currentAppVersion),
                         status: appStatus
                     ) {
@@ -160,7 +160,7 @@ struct UpdatesPage: View {
     }
 
     private var appStatus: UpdateStatus {
-        if let activity = updates.activity, activity.item.hasPrefix("paperGIF Mac") {
+        if let activity = updates.activity, activity.item.hasPrefix("OP Remote") {
             return .working(activity.title)
         }
         if let release = updates.appUpdate { return .available("Version \(release.version) is ready to install.") }

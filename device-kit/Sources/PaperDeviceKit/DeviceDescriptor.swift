@@ -169,9 +169,13 @@ public struct DeviceCapabilities: Codable, Equatable, Sendable {
     public var maxPages: Int
     /// Transports the device supports (`http`, `ble`); nil when not advertised.
     public var transports: [String]?
+    public var imageFormats: [String]?
+    public var imageTransports: [String]?
+    public var mediaStorageID: String?
 
     public init(profileVersions: [Int], media: Bool, firmwareUpdate: Bool,
-                maxProfileBytes: Int, maxControls: Int, maxPages: Int, transports: [String]? = nil) {
+                maxProfileBytes: Int, maxControls: Int, maxPages: Int, transports: [String]? = nil,
+                imageFormats: [String]? = nil, mediaStorageID: String? = nil, imageTransports: [String]? = nil) {
         self.profileVersions = profileVersions
         self.media = media
         self.firmwareUpdate = firmwareUpdate
@@ -179,6 +183,9 @@ public struct DeviceCapabilities: Codable, Equatable, Sendable {
         self.maxControls = maxControls
         self.maxPages = maxPages
         self.transports = transports
+        self.imageFormats = imageFormats
+        self.imageTransports = imageTransports
+        self.mediaStorageID = mediaStorageID
     }
 
     public func supports(transport: String) -> Bool { transports?.contains(transport) ?? false }
@@ -251,11 +258,16 @@ public struct DeviceDescriptor: Codable, Equatable, Identifiable, Sendable {
     public var id: String { deviceID }
     public var isM5Paper: Bool { boardID == "m5stack.m5paper" && hardwareRevision == "1.0" }
     public var requiresProfileEnrollmentToken: Bool {
-        ["paperremote.esp32-screenless-reference", "paperremote.supermini-s3-mt6701"].contains(boardID)
+        ["paperremote.esp32-screenless-reference", "paperremote.supermini-s3-mt6701",
+         "paperremote.waveshare-amoled-18-v2"].contains(boardID)
     }
     public var canUseLegacyMedia: Bool {
         isM5Paper && capabilities.media && display?.width == 540 &&
             display?.height == 960 && display?.pixelFormat == "gray4"
+    }
+    public var canUseColorImages: Bool {
+        capabilities.media && display?.pixelFormat == "rgb565" &&
+            capabilities.imageFormats?.contains("pimg-rgb565-v1") == true
     }
 
     public init(schemaVersion: Int = 1, protocolVersion: Int = 1, deviceID: String,
@@ -334,6 +346,23 @@ public struct DeviceDescriptor: Codable, Equatable, Identifiable, Sendable {
             throw DeviceContractError.invalid("too many or duplicate device controls, or unknown transports")
         }
         try controls.forEach { try $0.validate() }
+        if let storageID = capabilities.mediaStorageID,
+           storageID.isEmpty || storageID.utf8.count > 128 {
+            throw DeviceContractError.invalid("media storage identity")
+        }
+        if let formats = capabilities.imageFormats {
+            guard formats.count <= 16, Set(formats).count == formats.count,
+                  formats.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 64 }) else {
+                throw DeviceContractError.invalid("image formats")
+            }
+        }
+        if let imageTransports = capabilities.imageTransports {
+            guard !imageTransports.isEmpty, Set(imageTransports).count == imageTransports.count,
+                  Set(imageTransports).isSubset(of: Set(capabilities.transports ?? [])),
+                  !(capabilities.imageFormats ?? []).isEmpty else {
+                throw DeviceContractError.invalid("image transports")
+            }
+        }
     }
 
     public static func decode(_ data: Data) throws -> DeviceDescriptor {

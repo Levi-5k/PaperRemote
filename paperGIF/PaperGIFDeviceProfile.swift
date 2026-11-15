@@ -14,8 +14,8 @@ extension PaperGIFHardwareBinding {
         }
         if mode != "action" {
             let valueAction = action.type == .wledBrightness ||
-                action.type == .netHomeTemperature ||
-                (action.type == .computerMedia && action.text == "volume")
+                action.type == .netHomeTemperature || action.type == .netHomeFan ||
+                (action.type == .computerMedia && ["volume", "seek"].contains(action.text))
             guard valueAction else {
                 throw DeviceContractError.unsupported("this action cannot accept an adjusted value")
             }
@@ -36,6 +36,67 @@ extension PaperGIFHardwareBinding {
 }
 
 extension PaperGIFRemoteProfile {
+    static func profileFromDeviceRefresh(_ data: Data, descriptor: DeviceDescriptor,
+        previousLocalProfile: Self, currentLocalProfile: Self) throws -> Self {
+        guard previousLocalProfile == currentLocalProfile else {
+            throw DeviceContractError.invalid("The local profile changed while loading. Load from the device again before syncing.")
+        }
+        let loaded = try JSONDecoder().decode(Self.self, from: data)
+        _ = try loaded.negotiatedPayload(for: descriptor)
+        return loaded
+    }
+
+    mutating func prepareBluetoothEnrollment(for descriptor: DeviceDescriptor, savedToken: String) -> Bool {
+        guard descriptor.requiresProfileEnrollmentToken, deviceEnrollmentToken.isEmpty else { return false }
+        macToken = savedToken.isEmpty ? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() : savedToken
+        markUpdated()
+        return true
+    }
+
+    mutating func prepareAMOLEDPageTiles(for descriptor: DeviceDescriptor) -> Bool {
+        guard descriptor.boardID == "paperremote.waveshare-amoled-18-v2",
+              pages.allSatisfy({ $0.controls.isEmpty }) else { return false }
+        let candidates = hardwareBindings.indices.filter {
+            hardwareBindings[$0].pageID == nil && ["press", "change"].contains(hardwareBindings[$0].event)
+        }
+        guard !candidates.isEmpty else { return false }
+        var page = pages.first ?? PaperGIFRemotePage(name: "Main", controls: [])
+        page.gridColumns = 2
+        page.gridRows = 4
+        for index in candidates {
+            let binding = hardwareBindings[index]
+            let adjusting = binding.mode != "action"
+            let name = descriptor.inputs.first(where: { $0.id == binding.inputID })?.name ?? binding.inputID
+            var action = binding.action
+            let media = action.type == .computerMedia || action.type == .iPhoneMedia
+            if adjusting && media { action.value = Int((Double(action.value) * 255 / 100).rounded()) }
+            let title = adjusting ? (action.type == .wledBrightness ? "Brightness" : action.type == .netHomeTemperature ? "Temperature" : "Volume") : name
+            let control = PaperGIFRemoteControl(title: title,
+                symbol: adjusting ? "slider.horizontal.3" : "circle.fill", tintHex: "202020",
+                kind: adjusting ? .slider : .button, gridWidth: adjusting ? 2 : 1, action: action)
+            page.controls.append(control)
+            hardwareBindings[index].pageID = page.id
+            hardwareBindings[index].controlID = control.id
+            hardwareBindings[index].action = action
+        }
+        if pages.isEmpty { pages.append(page) } else { pages[0] = page }
+        version = 7
+        return true
+    }
+
+    mutating func reconcileTileBindings() {
+        hardwareBindings = hardwareBindings.compactMap { binding in
+            guard let pageID = binding.pageID else { return binding }
+            guard let page = pages.first(where: { $0.id == pageID }) else { return nil }
+            guard let controlID = binding.controlID else { return binding }
+            guard let control = page.controls.first(where: { $0.id == controlID }),
+                  (binding.mode == "action" ? control.kind == .button : control.kind == .slider) else { return nil }
+            var updated = binding
+            updated.action = control.action
+            return updated
+        }
+    }
+
     var deviceEnrollmentToken: String {
         !macToken.isEmpty ? macToken : computers.first(where: { !$0.token.isEmpty })?.token ?? ""
     }
@@ -79,7 +140,9 @@ extension PaperGIFRemoteProfile {
         guard Set(hardwareBindings.map(\.id)).count == hardwareBindings.count else {
             throw DeviceContractError.invalid("duplicate hardware binding")
         }
-        let groups = Dictionary(grouping: hardwareBindings) { "\($0.inputID):\($0.event)" }
+        let groups = Dictionary(grouping: hardwareBindings) {
+            "\($0.pageID?.uuidString ?? "global"):\($0.inputID):\($0.event)"
+        }
         for bindings in groups.values where bindings.count > 1 {
             guard bindings.count == 2,
                   bindings.allSatisfy({ $0.mode == "action" && $0.direction != nil }),
@@ -87,7 +150,26 @@ extension PaperGIFRemoteProfile {
                 throw DeviceContractError.invalid("overlapping bindings for an input event")
             }
         }
-        for binding in hardwareBindings { try binding.validate(for: descriptor) }
+        var resolved = self
+        for index in resolved.hardwareBindings.indices {
+            var binding = resolved.hardwareBindings[index]
+            if let pageID = binding.pageID {
+                guard descriptor.display != nil, let page = pages.first(where: { $0.id == pageID }) else {
+                    throw DeviceContractError.invalid("hardware binding page is missing")
+                }
+                if let controlID = binding.controlID {
+                    guard let control = page.controls.first(where: { $0.id == controlID }),
+                          (binding.mode == "action" ? control.kind == .button : control.kind == .slider) else {
+                        throw DeviceContractError.invalid("hardware binding tile is missing or has the wrong kind")
+                    }
+                    binding.action = control.action
+                }
+            } else if binding.controlID != nil {
+                throw DeviceContractError.invalid("tile bindings require a page")
+            }
+            try binding.validate(for: descriptor)
+            resolved.hardwareBindings[index] = binding
+        }
         guard descriptor.display != nil || pages.allSatisfy({ $0.controls.isEmpty }) else {
             throw DeviceContractError.unsupported("screenless devices cannot receive touchscreen controls")
         }
@@ -97,10 +179,10 @@ extension PaperGIFRemoteProfile {
            }) {
             throw DeviceContractError.unsupported("phone-local screen actions require the M5Paper Bluetooth adapter")
         }
-        guard descriptor.canUseLegacyMedia || referencedButtonImageIDs.isEmpty else {
-            throw DeviceContractError.unsupported("button image encoding is only available for M5Paper")
+        guard descriptor.canUseLegacyMedia || descriptor.canUseColorImages || referencedButtonImageIDs.isEmpty else {
+            throw DeviceContractError.unsupported("this device does not advertise button image support")
         }
-        guard let payload = devicePayload(version: version),
+        guard let payload = resolved.devicePayload(version: version),
               payload.count <= capabilities.maxProfileBytes else {
             throw DeviceContractError.invalid("profile exceeds the device's byte limit")
         }

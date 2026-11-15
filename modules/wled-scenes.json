@@ -5,7 +5,7 @@
   "name": "WLED Scenes",
   "summary": "Power, brightness, and preset scenes for a WLED light.",
   "version": "1.0.0",
-  "author": "paperGIF",
+  "author": "OP Remote",
   "controls": [
     {
       "id": "power",

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "boardID": "paperremote.waveshare-amoled-18-v2",
+  "hardwareRevisions": ["2"],
+  "version": 1,
+  "name": "Waveshare Touch AMOLED 1.8 V2",
+  "layout": {
+    "width": 368,
+    "height": 448,
+    "screen": {"x": 0, "y": 0, "width": 368, "height": 448},
+    "inputs": [
+      {"id": "button-1", "x": 24, "y": 360, "width": 148, "height": 64},
+      {"id": "button-2", "x": 196, "y": 360, "width": 148, "height": 64},
+      {"id": "dial-1", "x": 64, "y": 36, "width": 240, "height": 240}
+    ]
+  }
+}

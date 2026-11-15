@@ -42,6 +42,11 @@ struct Credentials {
     char password[maxPassword + 1] = {};
 };
 
+inline bool profileReplacesSaved(const Credentials& saved, const char* ssid, const char* password) {
+    return ssid && ssid[0] && (!saved.ssid[0] || std::strcmp(saved.ssid, ssid) ||
+        (password && password[0]));
+}
+
 // WPA2 passphrases are 8-63 characters; open networks have none.
 inline bool parseJoin(const uint8_t* bytes, size_t length, Credentials& out) {
     if (length < 3 || bytes[0] != joinRequest) return false;

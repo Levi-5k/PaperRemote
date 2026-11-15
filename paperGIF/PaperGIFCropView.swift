@@ -10,6 +10,8 @@ struct PaperGIFCropView: View {
 
     private let originalImage: CGImage
     private let initialCropRect: CGRect?
+    private let targetSize: CGSize
+    private let confirmationTitle: String
     let onConvert: (CGRect?, Int) -> Void
     let onCancel: () -> Void
 
@@ -27,11 +29,15 @@ struct PaperGIFCropView: View {
         initialCropRect: CGRect? = nil,
         initialRotationQuarterTurns: Int = 0,
         initialFramingIsCrop: Bool = true,
+        targetSize: CGSize = CGSize(width: PaperGIFAnimation.width, height: PaperGIFAnimation.height),
+        confirmationTitle: String = "Next",
         onConvert: @escaping (CGRect?, Int) -> Void,
         onCancel: @escaping () -> Void
     ) {
         originalImage = image
         self.initialCropRect = initialCropRect
+        self.targetSize = CGSize(width: max(1, targetSize.width), height: max(1, targetSize.height))
+        self.confirmationTitle = confirmationTitle
         self.onConvert = onConvert
         self.onCancel = onCancel
         let turns = ((initialRotationQuarterTurns % 4) + 4) % 4
@@ -156,7 +162,7 @@ struct PaperGIFCropView: View {
                 Button("Cancel", action: onCancel)
                     .buttonStyle(.bordered)
 
-                Button("Next") {
+                Button(confirmationTitle) {
                     onConvert(
                         framing == .crop ? normalizedCropRect() : nil,
                         rotationQuarterTurns
@@ -222,7 +228,7 @@ struct PaperGIFCropView: View {
     }
 
     private var displayAspectRatio: CGFloat {
-        CGFloat(PaperGIFAnimation.width) / CGFloat(PaperGIFAnimation.height)
+        targetSize.width / targetSize.height
     }
 
     private func rotateClockwise() {
@@ -261,7 +267,7 @@ struct PaperGIFCropView: View {
 
     private func normalizedCropRect() -> CGRect {
         let viewport = viewportSize == .zero
-            ? CGSize(width: PaperGIFAnimation.width, height: PaperGIFAnimation.height)
+            ? targetSize
             : viewportSize
         let displayed = displayedImageSize(viewport: viewport)
         let effectiveOffset = clampedOffset(offset, viewport: viewport)

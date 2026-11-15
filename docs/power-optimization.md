@@ -1,6 +1,6 @@
 # Firmware Power Optimization
 
-PaperRemote keeps Bluetooth and home Wi-Fi available while the remote is active. Power changes must preserve button response, dynamic text, remote actions, uploads, discovery, and wake behavior.
+OP Remote keeps Bluetooth and home Wi-Fi available while the remote is active. Power changes must preserve button response, dynamic text, remote actions, uploads, discovery, and wake behavior.
 
 ## Implemented
 
@@ -11,7 +11,7 @@ PaperRemote keeps Bluetooth and home Wi-Fi available while the remote is active.
 - Use lower-duty Bluetooth connection parameters while idle and restore the fast 15 ms interval for transfers.
 - Advertise over Bluetooth at 100-200 ms intervals.
 - Disable M5Paper's unused external 5 V output.
-- Skip M5Unified's automatic white-screen clear at boot because PaperRemote renders the required screen itself.
+- Skip M5Unified's automatic white-screen clear at boot because OP Remote renders the required screen itself.
 - When the image screen saver is enabled, treat its wake tap only as a wake gesture. When it is disabled, leave the remote visible during idle sleep and use the wake tap as the first queued remote-control press.
 - Skip the full image-library scan on normal boots and input wakes; scan on library access, playback navigation, or timer-driven slideshow wake instead.
 - When the remote sleeps with nothing scheduled, the 60-second recovery timer wake goes straight back to sleep: no Wi-Fi, Bluetooth, or full-screen redraw. Previously each recovery wake redrew the remote and stayed awake for the whole sleep delay.

@@ -3,19 +3,19 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>paperGIF Mac</string>
+	<string>OP Remote</string>
 	<key>CFBundleExecutable</key>
 	<string>PaperGIFMac</string>
 	<key>CFBundleIdentifier</key>
 	<string>human-programs.paperGIFMac</string>
 	<key>CFBundleName</key>
-	<string>paperGIF Mac</string>
+	<string>OP Remote</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.7</string>
+	<string>1.0.8</string>
 	<key>CFBundleVersion</key>
-	<string>8</string>
+	<string>9</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
@@ -24,9 +24,9 @@
 		<true/>
 	</dict>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>paperGIF Mac reads the current track from Music to show it on your paperGIF display.</string>
+	<string>OP Remote reads the current track from Music to show it on your OP Remote display.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>paperGIF Mac uses Bluetooth to discover and configure PaperRemote controllers and Matter devices, and to receive controller actions when Wi-Fi is unavailable.</string>
+	<string>OP Remote uses Bluetooth to discover and configure OP Remote controllers and Matter devices, and to receive controller actions when Wi-Fi is unavailable.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_papergif._tcp</string>
@@ -35,6 +35,6 @@
 		<string>_matter._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>paperGIF Mac finds and configures your M5Paper and companion computers on your local network.</string>
+	<string>OP Remote finds and configures your M5Paper and companion computers on your local network.</string>
 </dict>
 </plist>

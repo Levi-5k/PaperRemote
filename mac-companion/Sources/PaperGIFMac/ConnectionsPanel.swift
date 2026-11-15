@@ -402,7 +402,7 @@ struct ConnectionsPanel: View {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try? JSONEncoder().encode(PairingRequest(
-                deviceName: Host.current().localizedName ?? "paperGIF Mac"
+                deviceName: Host.current().localizedName ?? "OP Remote"
             ))
         } else {
             request.setValue("Bearer \(computerToken)", forHTTPHeaderField: "Authorization")
@@ -439,7 +439,7 @@ struct ConnectionsPanel: View {
             selectedComputerID = computer.id
             computerStatus = isPairing ? "Paired with \(name)." : "Connected to \(name)."
         } catch {
-            computerStatus = "Could not reach \(name). Make sure its paperGIF companion is running."
+            computerStatus = "Could not reach \(name). Make sure its OP Remote companion is running."
         }
     }
 

@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>paperGIF</string>
+	<string>OP Remote</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<string>OP Remote</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -32,7 +32,9 @@
 		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>paperGIF uses Bluetooth to find your M5Paper and send animations.</string>
+	<string>OP Remote uses Bluetooth to find your M5Paper and send animations.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>OP Remote uses the tilt of your phone to steer the opening drips.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_ewelink._tcp</string>
@@ -42,9 +44,9 @@
 		<string>_wled._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>paperGIF finds companion computers, lights, switches, and your M5Paper on your local network.</string>
+	<string>OP Remote finds companion computers, lights, switches, and your M5Paper on your local network.</string>
 	<key>NSHomeKitUsageDescription</key>
-	<string>paperGIF uses Apple Home to set up Matter accessories.</string>
+	<string>OP Remote uses Apple Home to set up Matter accessories.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -60,7 +62,10 @@
 		<string>bluetooth-central</string>
 	</array>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>SplashBackground</string>
+	</dict>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

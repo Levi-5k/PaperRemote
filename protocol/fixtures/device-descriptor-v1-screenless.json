@@ -3,7 +3,7 @@
   "protocolVersion": 1,
   "deviceID": "fixture:screenless:001",
   "name": "Reference knob controller",
-  "manufacturer": "PaperRemote reference",
+  "manufacturer": "OP Remote reference",
   "boardID": "paperremote.esp32-screenless-reference",
   "hardwareRevision": "1",
   "firmwareVersion": "reference-1",

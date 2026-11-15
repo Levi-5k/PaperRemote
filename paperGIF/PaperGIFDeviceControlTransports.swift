@@ -55,6 +55,70 @@ enum PaperGIFBluetoothTarget: Equatable {
 }
 
 /// Request/response state for device controls over the BLE control characteristic.
+struct PaperGIFDeviceSelectorOption: Identifiable, Equatable {
+    static let phoneID = "phone"
+
+    let name: String
+    let deviceID: String?
+    let target: PaperGIFBluetoothTarget
+
+    var id: String {
+        switch target {
+        case .savedDevice(let deviceID): "saved:\(deviceID)"
+        case .nearby(let peripheralID): "nearby:\(peripheralID.uuidString)"
+        }
+    }
+
+    static func resolve(saved: [SavedDevice], nearby: [PaperGIFBluetoothManager.NearbyDevice]) -> [Self] {
+        var options = saved.map {
+            Self(name: $0.descriptor.name, deviceID: $0.id, target: .savedDevice($0.id))
+        }
+        let savedIDs = Set(saved.map(\.id))
+        var seenPeripherals = Set<UUID>()
+        for device in nearby.sorted(by: { $0.name.localizedStandardCompare($1.name) == .orderedAscending }) {
+            guard seenPeripherals.insert(device.id).inserted,
+                  device.deviceID.map({ !savedIDs.contains($0) }) ?? true else { continue }
+            options.append(Self(name: device.name, deviceID: device.deviceID, target: .nearby(device.id)))
+        }
+        return options
+    }
+
+    /// Saved and nearby choices, with the selected or connected controller inserted when discovery omitted it.
+    static func includingCurrent(
+        saved: [SavedDevice],
+        nearby: [PaperGIFBluetoothManager.NearbyDevice],
+        selectedID: String?,
+        selectedName: String?,
+        connectedPeripheralID: UUID?,
+        connectedDeviceID: String?,
+        connectedName: String?
+    ) -> [Self] {
+        var options = resolve(saved: saved, nearby: nearby)
+        let connectedListed = connectedPeripheralID.map { peripheralID in
+            options.contains { option in
+                if case .nearby(let id) = option.target { return id == peripheralID }
+                return false
+            }
+        } ?? true
+        let connectedSaved = connectedDeviceID.map { id in options.contains { $0.deviceID == id } } ?? false
+        if let peripheralID = connectedPeripheralID, !connectedListed, !connectedSaved {
+            options.insert(Self(
+                name: connectedName?.isEmpty == false ? connectedName! : "Connected device",
+                deviceID: connectedDeviceID,
+                target: .nearby(peripheralID)
+            ), at: 0)
+        }
+        if let selectedID, !options.contains(where: { $0.deviceID == selectedID }) {
+            options.insert(Self(
+                name: selectedName?.isEmpty == false ? selectedName! : "Current device",
+                deviceID: selectedID,
+                target: .savedDevice(selectedID)
+            ), at: 0)
+        }
+        return options
+    }
+}
+
 /// Requests are serialized: one `0x50`/`0x52` exchange is in flight at a time.
 @MainActor
 final class PaperGIFBLEControlChannel {

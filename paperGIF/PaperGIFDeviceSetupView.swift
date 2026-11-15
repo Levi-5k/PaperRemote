@@ -38,6 +38,7 @@ struct PaperGIFDeviceSetupView: View {
     @ObservedObject var session: DeviceSession
     @ObservedObject var bluetooth: PaperGIFBluetoothManager
     @Binding var profile: PaperGIFRemoteProfile
+    var effectsLive = false
     @State private var address = ""
     @State private var token = ""
     @State private var problem: String?
@@ -49,27 +50,6 @@ struct PaperGIFDeviceSetupView: View {
 
     var body: some View {
         Form {
-            Section("Controllers") {
-                ForEach(session.records) { record in
-                    Button {
-                        connectionTask?.cancel()
-                        session.select(id: record.id)
-                        token = PaperGIFDeviceCredentials.token(for: record.id)
-                        bluetooth.connectSavedDevice(deviceID: record.id)
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(record.descriptor.name)
-                                Text(record.id).font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if session.selectedID == record.id { Image(systemName: "checkmark.circle.fill") }
-                        }
-                    }
-                }
-                Text("Profiles and layout overrides are saved separately for each stable device ID.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
             Section("Add or Verify Network Device") {
                 TextField("http://device-address", text: $address)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -77,13 +57,13 @@ struct PaperGIFDeviceSetupView: View {
                 SecureField("Device authorization token (if required)", text: $token)
                 Button(session.isLoading ? "Connecting…" : "Read Device Capabilities") { connect() }
                     .disabled(session.isLoading || address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Text("Native PaperRemote descriptors and the recognized legacy M5Paper protocol are supported. Other devices require a compatible protocol adapter; adding an address does not make an arbitrary controller compatible.")
+                Text("Native OP Remote descriptors and the recognized legacy M5Paper protocol are supported. Other devices require a compatible protocol adapter; adding an address does not make an arbitrary controller compatible.")
                     .font(.footnote).foregroundStyle(.secondary)
                 if let message = session.message { Text(message).font(.footnote) }
             }
             if let descriptor = session.descriptor {
                 Section("Selected Device") {
-                    LabeledContent("Protocol", value: session.adapter == .legacyM5Paper ? "Legacy M5Paper (v6)" : "Native PaperRemote")
+                    LabeledContent("Protocol", value: session.adapter == .legacyM5Paper ? "Legacy M5Paper (v6)" : "Native OP Remote")
                     LabeledContent("Board", value: descriptor.boardID)
                     LabeledContent("Hardware", value: descriptor.hardwareRevision)
                     LabeledContent("Firmware", value: descriptor.firmwareVersion)
@@ -164,7 +144,13 @@ struct PaperGIFDeviceSetupView: View {
             Section("Nearby Bluetooth Devices") {
                 if bluetooth.nearbyDevices.isEmpty {
                     HStack {
-                        ProgressView()
+                        if bluetooth.connectionState != .bluetoothUnavailable {
+                            if effectsLive {
+                                PaperGIFActivityLoader(label: "Searching for nearby devices", size: 18)
+                            } else {
+                                ProgressView()
+                            }
+                        }
                         Text(bluetooth.connectionState == .bluetoothUnavailable
                              ? "Bluetooth unavailable" : "Searching for nearby devices…")
                             .foregroundStyle(.secondary)
@@ -174,7 +160,7 @@ struct PaperGIFDeviceSetupView: View {
                     nearbyRow(device)
                 }
                 if let status = bluetooth.descriptorStatus { Text(status).font(.footnote) }
-                Text("New PaperRemote boards appear here as soon as they power on. Connecting reads the board's details and layout over Bluetooth and saves it under Controllers.")
+                Text("New OP Remote boards appear here as soon as they power on. Connecting reads the board's details and layout over Bluetooth and adds it to Remote.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if let problem { Section("Problem") { Text(problem).foregroundStyle(.orange) } }

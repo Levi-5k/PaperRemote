@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <memory>
+#include <esp_heap_caps.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <LittleFS.h>
@@ -14,6 +16,10 @@
 #include "reference_controls.h"
 #include "reference_inputs.h"
 #include "supermini_s3_board.h"
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+#include "waveshare_amoled_18_board.h"
+#include "reference_pages.h"
+#endif
 #include "reference_profile.h"
 #include "remote_action_payload.h"
 #include "remote_computer.h"
@@ -34,14 +40,18 @@ using namespace paper_board;
 constexpr char serviceUuid[] = "7A230001-7D2A-4C7B-9C42-504749460001";
 constexpr char controlUuid[] = "7A230002-7D2A-4C7B-9C42-504749460001";
 constexpr char dataUuid[] = "7A230003-7D2A-4C7B-9C42-504749460001";
-#if defined(PAPERGIF_SUPERMINI_S3)
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+WaveshareAmoled18Board board;
+constexpr const char* deviceFirmwareIdentity = waveshareAmoled18FirmwareIdentity;
+constexpr const char* bluetoothDeviceName = "OP Remote AMOLED 1.8";
+#elif defined(PAPERGIF_SUPERMINI_S3)
 SuperMiniS3Board board;
 constexpr const char* deviceFirmwareIdentity = superminiS3FirmwareIdentity;
-constexpr const char* bluetoothDeviceName = "paperGIF SuperMini S3";
+constexpr const char* bluetoothDeviceName = "OP Remote SuperMini S3";
 #else
 ReferenceBoard board;
 constexpr const char* deviceFirmwareIdentity = referenceFirmwareIdentity;
-constexpr const char* bluetoothDeviceName = "paperGIF Reference";
+constexpr const char* bluetoothDeviceName = "OP Remote Reference";
 #endif
 WebServer server(80);
 String deviceJSON;
@@ -58,10 +68,11 @@ InputEvent lastSuperminiInput{"", "", 0, 0};
 bool hasLastSuperminiInput = false;
 #endif
 NimBLECharacteristic* control = nullptr;
+volatile bool bluetoothReady = false;
 uint16_t iPhoneController = UINT16_MAX;
 SemaphoreHandle_t networkMutex = nullptr;
 struct Request {
-    char url[256]{}, body[1024]{}, token[80]{}, method[5] = "POST", controlId[32]{};
+    char url[256]{}, body[1024]{}, token[80]{}, method[5] = "POST", controlId[80]{};
     bool slider = false;
     uint32_t profileRevision = 0;
     int8_t relayComputer = -3;  // Computer index for a Bluetooth relay retry; -3 = none.
@@ -325,7 +336,32 @@ void pollDialStream() {
         control->notify(iPhoneStreamPacket, sizeof(iPhoneStreamPacket), iPhoneController);
 }
 #endif
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+HardwareBinding* activeTouchJog = nullptr;
+
+void updateTileValue(const HardwareBinding& binding, const NativeAction& action) {
+    if (!binding.controlID[0] || binding.state.mode == BindingMode::action) return;
+    for (JsonObject page : profileJSON["pages"].as<JsonArray>()) {
+        if (std::strcmp(page["id"] | "", binding.pageID)) continue;
+        for (JsonObject tile : page["controls"].as<JsonArray>()) {
+            if (std::strcmp(tile["id"] | "", binding.controlID)) continue;
+            tile["action"]["value"] = action.value;
+            tile["action"]["valueTenths"] = action.valueTenths;
+        }
+    }
+    for (size_t index = 0; index < profile.count; ++index) {
+        auto& linked = profile.bindings[index];
+        if (std::strcmp(linked.pageID, binding.pageID) || std::strcmp(linked.controlID, binding.controlID)) continue;
+        linked.state.value = boundValue(nativeControlValue(action), linked.state);
+        linked.state.remainder = 0;
+    }
+}
+#endif
+
 bool dispatchAction(const HardwareBinding& binding, const NativeAction& action, bool safety = false) {
+    char bindingKey[80];
+    if (binding.controlID[0]) std::snprintf(bindingKey, sizeof(bindingKey), "%s:%s", binding.pageID, binding.controlID);
+    else strlcpy(bindingKey, binding.inputID, sizeof(bindingKey));
     if (!std::strcmp(action.type, "iPhoneMedia")) {
         if (iPhoneController == UINT16_MAX || !control) return false;
         const char* commands[] = {"playPause", "previous", "next", "volumeUp", "volumeDown",
@@ -395,12 +431,12 @@ bool dispatchAction(const HardwareBinding& binding, const NativeAction& action, 
         relayHandleFor(relayComputer, false) != device_controls::RelayRegistry::none) {
         const bool slider = binding.state.mode != BindingMode::action && !safety;
         if (pendingRelaySlider.active &&
-            (!slider || std::strcmp(pendingRelaySlider.controlId, binding.inputID) ||
+            (!slider || std::strcmp(pendingRelaySlider.controlId, bindingKey) ||
              pendingRelaySlider.computer != relayComputer)) flushRelaySlider(true);
         if (slider) {
             pendingRelaySlider.active = true;
             pendingRelaySlider.computer = relayComputer;
-            strlcpy(pendingRelaySlider.controlId, binding.inputID, sizeof(pendingRelaySlider.controlId));
+            strlcpy(pendingRelaySlider.controlId, bindingKey, sizeof(pendingRelaySlider.controlId));
             pendingRelaySlider.body = body;
             flushRelaySlider(false);
             return true;
@@ -414,7 +450,7 @@ bool dispatchAction(const HardwareBinding& binding, const NativeAction& action, 
     strlcpy(request.body, body.c_str(), sizeof(request.body));
     strlcpy(request.token, token, sizeof(request.token));
     strlcpy(request.method, method, sizeof(request.method));
-    strlcpy(request.controlId, binding.inputID, sizeof(request.controlId));
+    strlcpy(request.controlId, bindingKey, sizeof(request.controlId));
     request.slider = binding.state.mode != BindingMode::action;
     request.profileRevision = profileRevision;
     request.relayComputer = static_cast<int8_t>(relayComputer >= -1 ? relayComputer : noRelayComputer);
@@ -463,6 +499,22 @@ void networkWorker(void*) {
         vTaskDelay(pdMS_TO_TICKS(2));
     }
 }
+void startNetworkWorker() {
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    // Keep this stack in PSRAM. Internal RAM is already holding Wi-Fi, LVGL, and the BLE controller.
+    static StaticTask_t control;
+    static StackType_t* stack = nullptr;
+    if (!stack) stack = static_cast<StackType_t*>(heap_caps_malloc(8192 * sizeof(StackType_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    const TaskHandle_t created = stack ? xTaskCreateStatic(networkWorker, "actions", 8192, nullptr, 1, stack, &control) : nullptr;
+    if (!created) {
+        Serial.printf("Network task failed; free internal %u, largest %u, PSRAM %u\n",
+                      ESP.getFreeHeap(), ESP.getMaxAllocHeap(), ESP.getFreePsram());
+        abort();
+    }
+#else
+    if (xTaskCreate(networkWorker, "actions", 8192, nullptr, 1, nullptr) != pdPASS) abort();
+#endif
+}
 void handleInput(const InputEvent& event) {
     if (!std::strcmp(event.event, "release")) {
         xSemaphoreTake(networkMutex, portMAX_DELAY);
@@ -474,15 +526,35 @@ void handleInput(const InputEvent& event) {
         if (!std::strcmp(event.event, "press")) pressed[i] = true;
         else if (!std::strcmp(event.event, "release")) pressed[i] = false;
     }
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    if (event.relative && !std::strcmp(event.inputID, "dial-1") && paper_board::waveshareUiSliderHeld()) return;
+#endif
     dispatchHardwareInput(profile, board.info(), event,
         [](const HardwareBinding& binding, const NativeAction& action) {
-            return dispatchAction(binding, action);
+            const bool sent = dispatchAction(binding, action);
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+            if (sent) updateTileValue(binding, action);
+#endif
+            return sent;
         });
 }
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+void cancelTouchJog() {
+    if (!activeTouchJog) return;
+    strlcpy(activeTouchJog->action.text, "cancelJog", sizeof(activeTouchJog->action.text));
+    dispatchAction(*activeTouchJog, activeTouchJog->action, true);
+    delete activeTouchJog;
+    activeTouchJog = nullptr;
+}
+#endif
+
 void releaseInputs() {
     xSemaphoreTake(networkMutex, portMAX_DELAY);
     networkQueue.clearPending();
     xSemaphoreGive(networkMutex);
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    cancelTouchJog();
+#endif
     releaseHardwareInputs(profile, board.info(), pressed,
         [](const HardwareBinding& binding, const NativeAction& action) { return dispatchAction(binding, action); });
     board.inputs()->release();
@@ -502,36 +574,52 @@ bool installProfile(const String& payload, bool persist) {
     profileError = "invalid_profile";
     if (!payload.length() || payload.length() > board.info().maxProfileBytes) return false;
     JsonDocument candidate;
-    // Allocate the large candidate on the heap, never the small ESP32 loop stack.
-    auto* parsed = new (std::nothrow) NativeProfile;
-    const bool valid = parsed && !deserializeJson(candidate, payload, DeserializationOption::NestingLimit(24)) &&
-        parseNativeProfile(candidate, *parsed, board.info(), &profileError);
-    if (!valid) { delete parsed; return false; }
+    void* allocation = heap_caps_malloc(sizeof(NativeProfile),
+    #if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    #else
+        MALLOC_CAP_8BIT
+    #endif
+    );
+    std::unique_ptr<NativeProfile, decltype(&heap_caps_free)> parsed(
+        allocation ? new (allocation) NativeProfile : nullptr, &heap_caps_free);
+    if (!parsed) { profileError = "profile_memory_unavailable"; return false; }
+    const auto jsonError = deserializeJson(candidate, payload, DeserializationOption::NestingLimit(24));
+    if (jsonError) { profileError = jsonError.c_str(); return false; }
+    const bool valid = parseNativeProfile(candidate, *parsed, board.info(), &profileError)
+    #if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+        && validTouchPages(candidate)
+    #endif
+        ;
+    if (!valid) return false;
     // Refuse profiles that would make subsequent authenticated editing impossible.
     bool hasToken = std::strlen(candidate["macToken"] | "") > 0;
     for (JsonObjectConst computer : candidate["computers"].as<JsonArrayConst>())
         hasToken = hasToken || std::strlen(computer["token"] | "") > 0;
-    if (!hasToken) { profileError = "missing_profile_token"; delete parsed; return false; }
+    if (!hasToken) { profileError = "missing_profile_token"; return false; }
     if (persist) {
-        if (!storageReady) { delete parsed; return false; }
+        if (!storageReady) { profileError = "storage_not_ready"; return false; }
         LittleFS.remove("/remote.new");
         File file = LittleFS.open("/remote.new", FILE_WRITE);
         const bool written = file && file.print(payload) == payload.length();
         if (file) { file.flush(); file.close(); }
-        if (!written) { LittleFS.remove("/remote.new"); delete parsed; return false; }
+        if (!written) { LittleFS.remove("/remote.new"); profileError = "profile_write_failed"; return false; }
         LittleFS.remove("/remote.bak");
         if (LittleFS.exists("/remote.json") && !LittleFS.rename("/remote.json", "/remote.bak")) {
-            delete parsed; return false;
+            profileError = "profile_backup_failed"; return false;
         }
         if (!LittleFS.rename("/remote.new", "/remote.json")) {
             LittleFS.rename("/remote.bak", "/remote.json");
-            delete parsed; return false;
+            profileError = "profile_install_failed"; return false;
         }
     }
     releaseInputs();
+    for (JsonObjectConst page : candidate["pages"].as<JsonArrayConst>()) {
+        if (!std::strcmp(page["id"] | "", profile.activePageID))
+            strlcpy(parsed->activePageID, profile.activePageID, sizeof(parsed->activePageID));
+    }
     profileJSON = std::move(candidate);
     profile = *parsed;
-    delete parsed;
     ++profileRevision;
     configured = true;
     // A profile that names a network replaces credentials set from the network picker.
@@ -600,7 +688,7 @@ uint32_t crc32(const String& bytes) {
     }
     return ~result;
 }
-void notify(uint8_t code, uint16_t handle) { control->notify(&code, 1, handle); }
+void notify(uint8_t code, uint16_t handle) { if (control) control->notify(&code, 1, handle); }
 bool readControl(const device_controls::Control& item, device_controls::Value& value) {
     const bool online = WiFi.status() == WL_CONNECTED;
     switch (&item - reference_controls::controls) {
@@ -931,6 +1019,7 @@ bool processWiFiSetupPacket(const uint8_t* bytes, size_t length, uint16_t handle
     }
 }
 void processBLE() {
+    if (!bluetoothReady || !control) return;
     BLEWrite packet;
     while (xQueueReceive(bleWrites, &packet, 0) == pdTRUE) {
         if (packet.command) {
@@ -976,11 +1065,127 @@ void processBLE() {
         }
     }
 }
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+size_t activePageIndex() {
+    size_t index = 0;
+    for (JsonObjectConst page : profileJSON["pages"].as<JsonArrayConst>()) {
+        if (!std::strcmp(page["id"] | "", profile.activePageID)) return index;
+        ++index;
+    }
+    return 0;
+}
+void changeWavesharePage(int delta) {
+    const int count = profileJSON["pages"].size();
+    if (count < 2) return;
+    const int next = std::clamp(int(activePageIndex()) + delta, 0, count - 1);
+    if (next == int(activePageIndex())) return;
+    releaseInputs();
+    flushRelaySlider(true);
+    strlcpy(profile.activePageID, profileJSON["pages"][next]["id"] | "", sizeof(profile.activePageID));
+    Serial.printf("AMOLED page %d\n", next + 1);
+}
+bool touchWaveshareControl(size_t index, const char* event, double value) {
+    if (!std::strcmp(event, "release")) {
+        cancelTouchJog();
+        return true;
+    }
+    JsonObject tile = profileJSON["pages"][activePageIndex()]["controls"][index];
+    if (tile.isNull()) return false;
+    HardwareBinding binding;
+    if (!parseAction(tile["action"], binding.action)) return false;
+    strlcpy(binding.inputID, "touch", sizeof(binding.inputID));
+    strlcpy(binding.pageID, profile.activePageID, sizeof(binding.pageID));
+    strlcpy(binding.controlID, tile["id"] | "", sizeof(binding.controlID));
+    const bool slider = !std::strcmp(tile["kind"] | "", "slider");
+    const bool jog = !std::strcmp(binding.action.type, "openBuilds") &&
+        !std::strncmp(binding.action.text, "continuousJog", 13);
+    if (slider) {
+        binding.state = tileSliderState(binding.action);
+        if (!std::isfinite(value)) return false;
+        const double bounded = boundValue(value, binding.state);
+        binding.action.value = static_cast<int32_t>(std::round(mediaWireValue(binding.action, bounded)));
+        binding.action.valueTenths = static_cast<int32_t>(std::round(bounded * 10));
+    } else if ((!jog && std::strcmp(event, "activate")) || (jog && std::strcmp(event, "press"))) return false;
+    if (jog) {
+        cancelTouchJog();
+        activeTouchJog = new (std::nothrow) HardwareBinding(binding);
+        if (!activeTouchJog) return false;
+    }
+    const bool sent = dispatchAction(binding, binding.action);
+    if (jog && !sent) { delete activeTouchJog; activeTouchJog = nullptr; }
+    if (sent) updateTileValue(binding, binding.action);
+    return sent;
+}
+void publishWaveshareUi() {
+    paper_board::WaveshareUiState ui{};
+    ui.configured = configured;
+    ui.profile = &profileJSON;
+    ui.pageIndex = activePageIndex();
+    ui.profileRevision = profileRevision;
+    ui.controlEvent = touchWaveshareControl;
+    ui.changePage = changeWavesharePage;
+    paper_board::waveshareUiPoll(ui);
+}
+#endif
+void startBluetooth() {
+    Serial.printf("NimBLE init; free internal %u, largest %u, PSRAM %u\n",
+                  ESP.getFreeHeap(), ESP.getMaxAllocHeap(), ESP.getFreePsram());
+    if (!NimBLEDevice::init(bluetoothDeviceName)) {
+        Serial.printf("NimBLE init failed; free internal %u, largest %u, PSRAM %u\n",
+                      ESP.getFreeHeap(), ESP.getMaxAllocHeap(), ESP.getFreePsram());
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+        return;
+#else
+        abort();
+#endif
+    }
+    Serial.printf("NimBLE ready; free internal %u, largest %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    NimBLEDevice::setMTU(517);
+    auto* bleServer = NimBLEDevice::createServer();
+    bleServer->setCallbacks(&serverCallbacks, false);
+    bleServer->advertiseOnDisconnect(true);
+    auto* service = bleServer->createService(serviceUuid);
+    control = service->createCharacteristic(controlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 256);
+    auto* data = service->createCharacteristic(dataUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR, 512);
+    control->setCallbacks(&controlCallbacks);
+    data->setCallbacks(&dataCallbacks);
+    addDescriptorCharacteristic(service, descriptorCallbacks);
+    bleServer->start();
+    NimBLEDevice::getAdvertising()->addServiceUUID(serviceUuid);
+    // The 128-bit service UUID fills the advertisement; the name goes in the scan response.
+    NimBLEDevice::getAdvertising()->enableScanResponse(true);
+    NimBLEDevice::getAdvertising()->setName(bluetoothDeviceName);
+    bluetoothReady = true;
+    const bool advertising = NimBLEDevice::getAdvertising()->start();
+    startNetworkWorker();
+    Serial.printf("Bluetooth advertising %s; free internal %u, largest %u\n",
+                  advertising ? "started" : "FAILED", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+}
+void bluetoothTask(void*) {
+    startBluetooth();
+    vTaskDelete(nullptr);
+}
+void launchBluetooth() {
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    // init() waits until the host syncs. On the loop task that freezes the first frame,
+    // so the arc never follows the knob. Keep that wait off the display loop.
+    // Priority above the loop task so LVGL redraws cannot starve the host sync wait.
+    if (xTaskCreate(bluetoothTask, "ble", 8192, nullptr, 5, nullptr) == pdPASS) return;
+    Serial.println("Bluetooth task failed; starting on the loop task");
+#endif
+    startBluetooth();
+}
 } // namespace
 
 void setup() {
     Serial.begin(115200);
     Serial.println(deviceFirmwareIdentity);
+    // Queues must exist before inputs can dispatch, but the worker itself waits until
+    // Bluetooth is up. Its 32 KB stack is internal RAM and starves the BLE controller.
+    networkMutex = xSemaphoreCreateMutex();
+    bleWrites = xQueueCreate(12, sizeof(BLEWrite));
+    relayRetries = xQueueCreate(4, sizeof(RelayRetry*));
+    if (!networkMutex || !bleWrites || !relayRetries) { Serial.println("Allocation failed"); abort(); }
 #if defined(PAPERGIF_SUPERMINI_S3)
     dialStreamBoot = esp_random();
     loadDialConfiguration();
@@ -993,12 +1198,11 @@ void setup() {
         else Serial.println("MT6701 not responding on I2C 0x06; check SDA/SCL wiring");
     }
 #endif
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    publishWaveshareUi();
+#endif
     deviceJSON = descriptor(board.info(), PAPERGIF_FIRMWARE_VERSION,
         reference_controls::controls, reference_controls::count);
-    networkMutex = xSemaphoreCreateMutex();
-    bleWrites = xQueueCreate(12, sizeof(BLEWrite));
-    relayRetries = xQueueCreate(4, sizeof(RelayRetry*));
-    if (!networkMutex || !bleWrites || !relayRetries) { Serial.println("Allocation failed"); abort(); }
     storageReady = mountReferenceStorage(LittleFS,
         PAPERGIF_REFERENCE_FORMAT_ON_MOUNT_FAILURE != 0,
         [](const char* message) { Serial.println(message); });
@@ -1024,11 +1228,16 @@ void setup() {
         lastDisconnectReason = info.wifi_sta_disconnected.reason;
     }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
     WiFi.persistent(false);
-    WiFi.mode(WIFI_AP_STA);
     char name[32];
-    snprintf(name, sizeof(name), "papergif-%04x", unsigned(ESP.getEfuseMac() & 0xffff));
+    snprintf(name, sizeof(name), "op-remote-%04x", unsigned(ESP.getEfuseMac() & 0xffff));
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    WiFi.mode(WIFI_STA);
+    Serial.println("AMOLED Wi-Fi station only; setup over Bluetooth");
+#else
+    WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(name, "paperdisplay");
     Serial.printf("Reference AP %s: %s\n", name, WiFi.softAPIP().toString().c_str());
+#endif
     const char* headers[] = {"Authorization"};
     server.collectHeaders(headers, 1);
     server.on("/device", HTTP_GET, [] { server.send(200, "application/json", deviceJSON); });
@@ -1096,28 +1305,27 @@ void setup() {
     });
     server.begin();
     if (MDNS.begin(name)) MDNS.addService("papergif-device", "tcp", 80);
-    NimBLEDevice::init(bluetoothDeviceName);
-    NimBLEDevice::setMTU(517);
-    auto* bleServer = NimBLEDevice::createServer();
-    bleServer->setCallbacks(&serverCallbacks, false);
-    bleServer->advertiseOnDisconnect(true);
-    auto* service = bleServer->createService(serviceUuid);
-    control = service->createCharacteristic(controlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 256);
-    auto* data = service->createCharacteristic(dataUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR, 512);
-    control->setCallbacks(&controlCallbacks);
-    data->setCallbacks(&dataCallbacks);
-    addDescriptorCharacteristic(service, descriptorCallbacks);
-    bleServer->start();
-    NimBLEDevice::getAdvertising()->addServiceUUID(serviceUuid);
-    // The 128-bit service UUID fills the advertisement; the name goes in the scan response.
-    NimBLEDevice::getAdvertising()->enableScanResponse(true);
-    NimBLEDevice::getAdvertising()->setName(bluetoothDeviceName);
-    NimBLEDevice::getAdvertising()->start();
-    if (xTaskCreate(networkWorker, "actions", 8192, nullptr, 1, nullptr) != pdPASS) abort();
+    launchBluetooth();
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    publishWaveshareUi();
+#endif
 }
 void loop() {
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    static bool gestureDialSuppressed = false;
+    if (paper_board::waveshareUiGestureActive()) {
+        gestureDialSuppressed = true;
+        board.discardGestureDial();
+        publishWaveshareUi();
+        delay(0);
+        return;
+    }
+    if (gestureDialSuppressed) {
+        gestureDialSuppressed = false;
+        board.discardGestureDial();
+    }
+#endif
     descriptorCallbacks.poll(millis());
-    pollBLEUploadTimeout();
     if (disconnected) {
         disconnected = false;
         releaseInputs();
@@ -1169,6 +1377,9 @@ void loop() {
     }
 #if defined(PAPERGIF_SUPERMINI_S3)
     pollDialStream();
+#endif
+#if defined(PAPERGIF_WAVESHARE_AMOLED_18)
+    publishWaveshareUi();
 #endif
     delay(1);
 }

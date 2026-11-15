@@ -29,6 +29,10 @@ int main() {
     assert(!parseImageHeader(header, kImageHeaderBytes + 5, width, height));
     header[4] = 2;
     assert(!parseImageHeader(header, kImageHeaderBytes + 6, width, height));
+    assert(parseImageHeader(header, kImageHeaderBytes + 12, width, height));
+    header[5] = 1;
+    assert(!parseImageHeader(header, kImageHeaderBytes + 12, width, height));
+    header[5] = 0;
     header[4] = 1;
     header[6] = 0x1D; header[7] = 0x02;  // 541 px
     assert(!parseImageHeader(header, kImageHeaderBytes + 541 * 2, width, height));
@@ -120,6 +124,20 @@ int main() {
     assert(Renderer(image, view, 255, 0, 40, 40, 4).level(20, 20) == 0);
     assert(!Renderer(image, ImageView(), 255, 0, 40, 40, 4).drawable());
     assert(luminance565(0xFFFF) == 255 && luminance565(0) == 0);
+
+    assert(parseRGB("12aBfF", 0) == 0x12ABFF && parseRGB("#FF0000", 7) == 7);
+    assert(parseRGB("GG0000", 7) == 7 && parseRGB(nullptr, 7) == 7);
+    assert(packRGB(0xFF0000) == 0xF800 && packRGB(0x00FF00) == 0x07E0);
+    const uint8_t red[] = {0, 248, 0, 248, 0, 248, 0, 248};
+    view = {red, 2, 2, true};
+    image.preserveColor = true;
+    Renderer color(image, view, 255, 0, 40, 40, 4);
+    assert(colorPixel(color, 20, 20, 0xFFFFFF, 0x0000FF, 0x00FF00, false) == 0xF800);
+    assert(colorPixel(color, 0, 0, 0, 0, 0, false) == 0xFFFF);
+    assert(colorPixel(color, 20, 20, 0, 0x0000FF, 0x00FF00, true) != 0xF800);
+    image.fade = 50;
+    Renderer faded(image, view, 255, 0, 40, 40, 4);
+    assert(colorPixel(faded, 20, 20, 0xFFFFFF, 0, 0, false) == packRGB(blendRGB(0xFFFFFF, 0xFF0000, 127)));
 
     std::cout << "PASS: remote button textures, patterns and image conversion.\n";
 }

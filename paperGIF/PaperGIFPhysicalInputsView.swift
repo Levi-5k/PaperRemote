@@ -115,7 +115,7 @@ private struct PaperGIFPhysicalInputEditor: View {
     private var selectedEvent: String { event.isEmpty ? input.events.first ?? "" : event }
     private var bindingIndex: Int? {
         profile.hardwareBindings.firstIndex {
-            $0.inputID == input.id && $0.event == selectedEvent &&
+            $0.pageID == nil && $0.inputID == input.id && $0.event == selectedEvent &&
                 $0.direction == (selectedEvent == "rotate" && direction != "both" ? direction : nil)
         }
     }
@@ -227,6 +227,54 @@ private struct PaperGIFPhysicalInputEditor: View {
     }
 }
 
+struct PaperGIFPageInputsSection: View {
+    let page: PaperGIFRemotePage
+    let descriptor: DeviceDescriptor
+    @Binding var bindings: [PaperGIFHardwareBinding]
+
+    var body: some View {
+        Section("Page Inputs") {
+            ForEach(descriptor.inputs) { input in
+                ForEach(input.events, id: \.self) { event in
+                    Picker("\(input.name) \(event.capitalized)", selection: target(input, event: event)) {
+                        Text(bindings.contains { $0.pageID == nil && $0.inputID == input.id && $0.event == event }
+                             ? "Default action" : "Unassigned").tag(UUID?.none)
+                        ForEach(page.controls.filter { control in
+                            event == "change" || event == "rotate" ? control.kind == .slider : control.kind == .button
+                        }) { control in
+                            Text(control.title).tag(Optional(control.id))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func target(_ input: DeviceInput, event: String) -> Binding<UUID?> {
+        Binding(
+            get: { bindings.first { $0.pageID == page.id && $0.inputID == input.id && $0.event == event }?.controlID },
+            set: { controlID in
+                bindings.removeAll { $0.pageID == page.id && $0.inputID == input.id && $0.event == event }
+                guard let control = page.controls.first(where: { $0.id == controlID }) else { return }
+                bindings.append(Self.tileBinding(pageID: page.id, control: control, input: input, event: event))
+            }
+        )
+    }
+
+    static func tileBinding(pageID: UUID, control: PaperGIFRemoteControl,
+                            input: DeviceInput, event: String) -> PaperGIFHardwareBinding {
+        let adjusting = event == "change" || event == "rotate"
+        return PaperGIFHardwareBinding(
+            inputID: input.id, event: event, pageID: pageID, controlID: control.id,
+            mode: adjusting ? (event == "rotate" ? "relative" : "absolute") : "action",
+            action: control.action,
+            minimum: control.action.type == .netHomeTemperature ? 16 : 0,
+            maximum: control.action.type == .netHomeTemperature ? 30 : control.action.type == .wledBrightness ? 255 : 100,
+            step: control.action.type == .netHomeTemperature ? 0.5 : 1
+        )
+    }
+}
+
 enum PaperGIFAdaptiveGridGeometry {
     static func cellSize(in size: CGSize, columns: Int, rows: Int) -> CGSize {
         CGSize(width: size.width * 0.92 / Double(max(1, columns)),
@@ -259,31 +307,54 @@ struct PaperGIFAdaptivePagePreview: View {
             let columns = max(1, page.gridColumns)
             let rows = max(1, page.gridRows)
             let placements = PaperGIFRemoteGrid.placements(for: page.controls, columns: columns, rows: rows)
-            let cell = PaperGIFAdaptiveGridGeometry.cellSize(in: geometry.size, columns: columns, rows: rows)
+            let headerHeight = geometry.size.height * 28 / height
+            let contentSize = CGSize(width: geometry.size.width, height: geometry.size.height - headerHeight)
+            let cell = PaperGIFAdaptiveGridGeometry.cellSize(in: contentSize, columns: columns, rows: rows)
             let cellWidth = cell.width
             let cellHeight = cell.height
             ZStack(alignment: .topLeading) {
-                Rectangle().fill(Color.white)
+                Rectangle().fill(Color.black)
+                Text(page.name)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(1).minimumScaleFactor(0.5)
+                    .frame(width: geometry.size.width, height: headerHeight)
                 ForEach(Array(page.controls.enumerated()), id: \.element.id) { index, control in
                     if let placement = placements[index] {
                         let frame = PaperGIFAdaptiveGridGeometry.frame(
-                            placement, in: geometry.size, columns: columns, rows: rows
+                            placement, in: contentSize, columns: columns, rows: rows
                         )
                         Button { onEdit(control.id) } label: {
-                            VStack(spacing: 2) {
-                                RemoteIconGlyphView(name: control.symbol.isEmpty ? "square" : control.symbol)
-                                    .frame(width: min(24, cellWidth * 0.3), height: min(24, cellHeight * 0.3))
-                                Text(control.title).font(.system(size: min(16, max(7, cellHeight * 0.2))))
-                                    .lineLimit(2).minimumScaleFactor(0.4)
+                            VStack(spacing: 4) {
+                                if control.kind == .textBox {
+                                    Text(control.textBox?.sourceText ?? control.title)
+                                        .font(.caption).lineLimit(4).minimumScaleFactor(0.4)
+                                } else {
+                                    RemoteIconGlyphView(name: control.symbol.isEmpty ? "square" : control.symbol)
+                                        .frame(width: min(24, frame.width * 0.25), height: min(24, frame.height * 0.25))
+                                    Text(control.title).font(.caption.weight(.medium))
+                                        .lineLimit(2).minimumScaleFactor(0.4)
+                                    if control.kind == .slider {
+                                        GeometryReader { track in
+                                            ZStack(alignment: .leading) {
+                                                Capsule().fill(Color.white.opacity(0.2))
+                                                Capsule().fill(Color.white)
+                                                    .frame(width: track.size.width * sliderFraction(control))
+                                            }
+                                        }
+                                        .frame(height: 4)
+                                        .padding(.horizontal, 8)
+                                    }
+                                }
                             }
-                            .foregroundStyle(.black)
+                            .foregroundStyle(.white)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(Color.gray.opacity(0.12))
-                            .border(Color.black.opacity(0.5))
+                            .background(Color(white: 0.094))
+                            .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(Color(white: 0.467), lineWidth: 1) }
                         }
                         .buttonStyle(.plain)
                         .frame(width: frame.width, height: frame.height)
-                        .offset(x: frame.minX, y: frame.minY)
+                        .offset(x: frame.minX, y: frame.minY + headerHeight)
                         .accessibilityLabel("Edit \(control.title)")
                         .simultaneousGesture(
                             DragGesture(minimumDistance: 16).onEnded { drag in
@@ -305,5 +376,14 @@ struct PaperGIFAdaptivePagePreview: View {
         }
         .aspectRatio(width / height, contentMode: .fit)
         .accessibilityLabel("\(display.width) by \(display.height) display preview")
+    }
+
+    private func sliderFraction(_ control: PaperGIFRemoteControl) -> Double {
+        let value = Double(control.action.value)
+        switch control.action.type {
+        case .netHomeTemperature: return min(1, max(0, (value - 16) / 14))
+        case .netHomeFan: return min(1, max(0, value / 100))
+        default: return min(1, max(0, value / 255))
+        }
     }
 }

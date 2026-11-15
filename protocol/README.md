@@ -1,4 +1,6 @@
-# paperGIF Protocol
+# OP Remote Protocol
+
+The product name is OP Remote. On the wire, status still reports `"device":"paperGIF"`, and discovery still uses `_papergif._tcp` and `_papergif-device._tcp`.
 
 This directory is the platform-neutral contract shared by the M5Paper firmware,
 the iPhone app, the Mac companion, and the planned Windows companion.
